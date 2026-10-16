@@ -1,0 +1,22 @@
+{
+  "name": "magicanvas-express-viewer",
+  "version": "1.0.0",
+  "description": "Minimal Adobe Express viewer for MagiCanvas engine outputs.",
+  "scripts": {
+    "clean": "ccweb-add-on-scripts clean",
+    "build": "ccweb-add-on-scripts build",
+    "start": "ccweb-add-on-scripts start",
+    "package": "ccweb-add-on-scripts package"
+  },
+  "keywords": [
+    "Adobe",
+    "Creative Cloud Web",
+    "Add-on",
+    "panel"
+  ],
+  "devDependencies": {
+    "@adobe/ccweb-add-on-scripts": "^3.11.0",
+    "@types/adobe__ccweb-add-on-sdk": "^1.3.0"
+  },
+  "private": true
+}

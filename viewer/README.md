@@ -1,0 +1,102 @@
+# Layout lab and Express viewer
+
+These viewers are separate from the headless engine. Neither is required to run
+`python -m engine.main` or the existing Docker container. No editor or model code
+from Project Chameleon is used here.
+
+## Local layout lab
+
+From the MagiCanvas root, with the engine requirements installed:
+
+```sh
+.venv/bin/python viewer/server.py
+```
+
+Open http://127.0.0.1:5050. Use `--port 5051` if 5050 is already occupied.
+
+- Load any provided sample or import a v0.9 task `{source, target_canvas}` or a
+  standalone v0.9 design `{canvas, elements}`.
+- Choose a format or enter width/height. Changes apply on Enter or field blur.
+- Compare original and adapted previews from the **same real renderer** used by
+  `engine.main`. Failures are shown explicitly; there is no box fallback here.
+- Download the exact output JSON, PNG, or a comparison bundle for Express.
+- Assets/fonts resolve from the existing `brand_kit`. An imported task's missing
+  assets are reported. The intentional missing holiday badge is not fabricated.
+
+The local server listens only on loopback, writes previews in temporary folders,
+and doesn't change the source, sample inputs, brand kit, or output fixtures. It
+uses standard-library HTTP serving, not a new backend framework. Browser preview
+limits (12,000px per side / 40 million pixels / 500 elements / 4 MB task JSON) are
+resource guards for development only, not engine constraints.
+
+## Content-derived appearance
+
+The viewer starts with neutral light/dark surfaces and follows the operating
+system's appearance. A background rectangle's opaque `fill_color` supplies the
+color seed when available. For image backgrounds or other compositions, a small
+in-browser sample of the real source preview finds the dominant color, weighting
+edges more strongly so headlines and central artwork have less influence.
+
+OKLCH tones derived from that seed supply accents and a restrained surface tint.
+There are no sample names, asset filenames, or predefined design palettes in the
+selection logic. Foreground/action contrast is checked; grayscale sources remain
+neutral. Colors transition over 650ms when designs change. Reduced-motion users
+receive immediate updates. Failed sampling keeps the previous or neutral theme.
+This changes only viewer styling, never the design JSON or rendered assets.
+
+Theme logic is in `theme.mjs`. Run its focused tests with:
+
+```sh
+node tests/test_theme.mjs
+```
+
+Run that command from the repository root. It checks light/dark contrast,
+background selection, image precedence, and edge-weighted pixel sampling.
+
+References:
+
+- https://linear.app/now/how-we-redesigned-the-linear-ui
+- https://m3.material.io/styles/color/the-color-system
+
+## Adobe Express viewer add-on
+
+`express/` uses Adobe's official JavaScript add-on tooling and manifest v2.
+It loads locally generated results; it never calls an external AI provider or
+requires a local HTTP engine connection from the Adobe iframe.
+
+```sh
+cd viewer/express
+npm ci
+npm run build
+npm run start
+```
+
+Adobe's local add-on server uses HTTPS. Follow the CLI's certificate setup when
+running it for the first time; certificate trust changes need your participation.
+Enable Adobe Express Add-on Development, then use **Test your local add-on** to
+connect to the URL printed by the CLI (normally https://localhost:5241).
+
+In the panel:
+
+1. Load `magicanvas-viewer-bundle.json`, exported by the local layout lab, to see
+   both previews, dimensions, notes, and the official output design JSON.
+2. Alternatively, select a matching `_output.json` and `_output.png` together.
+3. Optionally insert the adapted preview into Express. This inserts one flattened
+   PNG, not editable scene elements. This is a viewer, not the full finale editor.
+
+Package for sideloading/submission with:
+
+```sh
+npm run package
+```
+
+The Express host/SDK requires Adobe and a browser session. The **engine** remains
+fully offline; the add-on is not a way to bypass the offline engine requirement.
+A successful build validates the package, not an in-Express acceptance test. The
+panel still needs a live Adobe Express sideload and insertion check by the team.
+
+Official references:
+
+- https://developer.adobe.com/express/add-ons/docs/guides/getting-started/hello-world
+- https://developer.adobe.com/express/add-ons/docs/references/manifest/
+- https://developer.adobe.com/express/add-ons/docs/guides/learn/how-to/use-images

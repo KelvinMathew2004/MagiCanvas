@@ -1,0 +1,8 @@
+{
+  "testId": "magicanvas-layout-viewer",
+  "name": "MagiCanvas Layout Viewer",
+  "version": "1.0.0",
+  "manifestVersion": 2,
+  "requirements": {"apps": [{"name": "Express", "apiVersion": 1}]},
+  "entryPoints": [{"type": "panel", "id": "layout-viewer", "main": "index.html", "permissions": {"sandbox": ["allow-downloads"]}}]
+}
