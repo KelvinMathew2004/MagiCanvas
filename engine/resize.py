@@ -1282,11 +1282,15 @@ def _luminance(rgb):
 
 
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
-    """Deterministic raster diagnostics, NOT CLIP/SigLIP or an aesthetic model.
+    """Rendered diagnostics plus an optional learned SigLIP perceptual judge.
 
     Analyze top geometry-safe candidates. A text-free diagnostic rendition lets
     us inspect actual backing pixels without measuring the glyph's own color.
-    Final output always retains the full original element list.
+    When the baked SigLIP weights are present, a learned image/text score is
+    blended with the deterministic cost as a closer proxy for the PNG evaluator;
+    otherwise the deterministic ranking is used unchanged. Either way this stage
+    only *reorders* candidates that already passed every hard constraint -- it
+    never edits geometry, text, assets, or the element list.
     """
     if not candidates or width*height>16000000:
         return candidates[0],dict(used=False,reason='Canvas exceeds diagnostic raster budget')
@@ -1346,7 +1350,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         cost+=3;invisible.append(e['id'])
                     checked+=1
                 cost/=max(1,checked)
-                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,warnings=warnings))
+                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,warnings=warnings,image=full.copy()))
             except Exception as exc:
                 # Diagnostics are optional; isolate third-party renderer faults.
                 # Do not catch BaseException (interrupts and shutdown still work).
@@ -1354,10 +1358,53 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     if not entries or all('error' in item for item in entries):
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
-    selected=min(valid,key=lambda e:e['candidate']['energy']+e['cost'])
-    report=dict(used=True,method='rendered contrast/busyness/visible-text checks',
-                candidates=[{k:v for k,v in e.items() if k!='candidate'}|{'name':e['candidate']['name']} for e in entries])
+    heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
+    perceptual=_siglip_rerank(valid,heuristic_cost)
+    index=perceptual.get('selected_index')
+    selected=valid[index] if index is not None else min(valid,key=heuristic_cost)
+    report=dict(used=True,
+                method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
+                perceptual=perceptual,
+                candidates=[{k:v for k,v in e.items() if k not in ('candidate','image')}|{'name':e['candidate']['name']} for e in entries])
     return selected['candidate'],report
+
+
+def _siglip_rerank(valid, heuristic_cost):
+    """Optional learned SigLIP tie-break among already-valid candidate renders.
+
+    Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
+    entry in ``valid``; otherwise it is ``None`` and the caller keeps the pure
+    heuristic winner. SigLIP may only pick among candidates whose heuristic cost
+    (layout energy + legibility/busyness cost) is within a near-tie band of the
+    best -- so it reorders geometry-preference ties but can never rescue a
+    materially worse (e.g. illegible or off-balance) layout. Degrades to a no-op
+    when torch/transformers or the baked weights are absent.
+    """
+    if len(valid)<2:
+        return dict(used=False,selected_index=None,reason='Fewer than two candidates to compare')
+    try:
+        from engine.vision import score_layouts
+    except Exception as exc:
+        return dict(used=False,selected_index=None,reason=f'Vision module unavailable: {exc}')
+    result=score_layouts([e['image'] for e in valid])
+    if result is None:
+        return dict(used=False,selected_index=None,reason='SigLIP returned no scores')
+    scores,note=result
+    if scores is None:
+        return dict(used=False,selected_index=None,reason=note)
+    costs=[heuristic_cost(e) for e in valid]
+    best_cost=min(costs)
+    # Near-tie band: candidates within this tolerance of the best heuristic cost
+    # are considered interchangeable on the heuristics, so the learned judge
+    # decides among them. Anything worse than the band is never chosen here.
+    tolerance=max(8.,abs(best_cost)*.15)
+    band=[i for i,c in enumerate(costs) if c<=best_cost+tolerance]
+    chosen=max(band,key=lambda i:scores[i])
+    return dict(used=True,note=note,selected_index=chosen,
+                scores=[round(s,4) for s in scores],
+                heuristic_costs=[round(c,4) for c in costs],
+                tie_band=band,tolerance=round(tolerance,4),
+                overrode_heuristic=costs[chosen]>best_cost+1e-9)
 
 
 def _assemble(elements,backgrounds,source,width,height):

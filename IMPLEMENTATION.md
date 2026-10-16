@@ -73,13 +73,55 @@ network service.
   Colors, original assets and content are never rewritten to improve a score.
 
 Deliberate differences from the proposed architecture: no LLM token generation,
-SigLIP/MobileCLIP, model downloads, training, PyTorch, SciPy, or claim of an 80 ms
-runtime. Seeded annealing suits discontinuous wrapping and collision topology;
+no model downloads at runtime, no training, no SciPy, and no claim of an 80 ms
+runtime. A lightweight SigLIP vision model is used only as an optional, offline
+perceptual *tie-breaker* over already-valid candidate renders (see "SigLIP
+perceptual re-rank" below); it never generates content or alters geometry.
+Seeded annealing suits discontinuous wrapping and collision topology;
 Cassowary handles each linear placement problem. Intentional source artwork
 layering and within-group overlap are permitted. Arbitrary overlapping text
 panels or a malformed group still require better relationship inference; blanket
 zero-IoU for every element would break legitimate illustrations and buttons.
 Dense small banners can retain all content yet remain hard to read.
+
+### SigLIP perceptual re-rank (optional learned tie-breaker)
+
+Both the output JSON and the rendered PNG are scored, and the PNG is judged by an
+AI evaluator. To better approximate that judgment than the deterministic
+contrast/busyness heuristics alone, a lightweight vision model
+(`google/siglip-base-patch16-224`) ranks the final, already-valid candidate
+renders. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
+`_siglip_rerank` in `engine/resize.py`.
+
+- **Scope is deliberately narrow.** The model only runs at the existing tie-break
+  stage, over the top ≤3 candidates that already passed every hard constraint
+  (bounds, non-overlap, element preservation). It cannot add, remove, move, or
+  restyle elements, and it never touches asset pixels — so the disqualifying
+  "no regeneration" rule and the v0.9 contract are untouched. Its influence is
+  bounded: SigLIP may only choose among candidates whose heuristic cost
+  (layout energy + legibility/busyness cost) is within a near-tie band of the
+  best, so it refines near-ties but can never rescue a materially worse
+  (e.g. illegible) layout.
+- **Offline by construction.** Weights are baked into the Docker image at *build*
+  time by `scripts/fetch_siglip.py` into `models/siglip` and loaded with
+  `local_files_only=True`; nothing is fetched at runtime, so `--network none`
+  scoring is satisfied. CPU-only torch is installed from the PyTorch CPU wheel
+  index in the Dockerfile to avoid the large CUDA build. Fine-tuning is not used,
+  so there are no private adapter weights to publish; the base model is a public
+  Hugging Face repo.
+- **Graceful degradation.** If torch/transformers or the baked weights are
+  absent, `engine/vision.py` returns `None` and the engine falls back to the
+  deterministic ranking verbatim. The engine therefore still runs with no model
+  present (as in the local test environment). Inference runs in CPU
+  eval/inference mode, preserving the determinism contract.
+- **Diagnostics.** The inspection report's `visual.perceptual` block records the
+  per-candidate SigLIP scores, the near-tie band, the selected index, and whether
+  the learned judge overrode the pure-heuristic winner. None of this enters the
+  official output schema.
+
+If the organizers publish an approved-model list or a size limit, re-check SigLIP
+against it before freezing a submission.
+
 
 ### Inspect a decision
 

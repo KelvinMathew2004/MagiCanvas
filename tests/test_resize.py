@@ -110,5 +110,56 @@ class ResizeTests(unittest.TestCase):
         self.assertEqual(resize(task['source'],task['target_canvas']),resize(task['source'],task['target_canvas']))
 
 
+class SiglipRerankTests(unittest.TestCase):
+    """The learned SigLIP re-rank only picks among already-valid candidates inside
+    a near-tie band; it degrades cleanly when the model is absent and never runs
+    with fewer than two candidates or overrides a materially worse layout."""
+
+    def _entry(self, name, energy, cost=0.):
+        from PIL import Image
+        return dict(candidate=dict(name=name, energy=energy), cost=cost,
+                    image=Image.new('RGB', (8, 8)))
+
+    def _cost(self, e):
+        return e['candidate']['energy']+e['cost']
+
+    def test_fallback_when_model_absent_returns_no_selection(self):
+        from engine.resize import _siglip_rerank
+        entries=[self._entry('A',100.),self._entry('B',110.)]
+        report=_siglip_rerank(entries,self._cost)
+        self.assertFalse(report['used'])
+        self.assertIsNone(report['selected_index'])
+
+    def test_single_candidate_skips_tie_break(self):
+        from engine.resize import _siglip_rerank
+        entries=[self._entry('A',1.)]
+        report=_siglip_rerank(entries,self._cost)
+        self.assertFalse(report['used'])
+        self.assertIsNone(report['selected_index'])
+
+    def test_learned_score_breaks_a_near_tie(self):
+        from unittest.mock import patch
+        from engine.resize import _siglip_rerank
+        # A and B are within the near-tie band; SigLIP prefers B.
+        entries=[self._entry('A',100.),self._entry('B',103.)]
+        with patch('engine.vision.score_layouts',return_value=([0.,5.],'mock')):
+            report=_siglip_rerank(entries,self._cost)
+        self.assertTrue(report['used'])
+        self.assertEqual(report['selected_index'],1)
+        self.assertTrue(report['overrode_heuristic'])
+
+    def test_does_not_rescue_a_materially_worse_candidate(self):
+        from unittest.mock import patch
+        from engine.resize import _siglip_rerank
+        # B is far worse on the heuristics (outside the band); even though SigLIP
+        # loves it, the better-heuristic candidate A must win.
+        entries=[self._entry('A',100.),self._entry('B',500.)]
+        with patch('engine.vision.score_layouts',return_value=([0.,9.],'mock')):
+            report=_siglip_rerank(entries,self._cost)
+        self.assertTrue(report['used'])
+        self.assertEqual(report['selected_index'],0)
+        self.assertFalse(report['overrode_heuristic'])
+
+
 if __name__=='__main__':
     unittest.main()

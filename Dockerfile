@@ -14,7 +14,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# CPU-only torch first (from the PyTorch CPU wheel index) so the large default
+# CUDA build is never pulled in; then the rest of the engine's dependencies.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Bake the SigLIP perceptual re-ranker weights into the image at BUILD time, so
+# engine/vision.py can load them offline. This is the ONLY step that needs the
+# network, and it runs at build time only -- stage-one scoring runs with
+# --network none, where these baked weights are read with local_files_only.
+COPY scripts/fetch_siglip.py ./scripts/fetch_siglip.py
+RUN python scripts/fetch_siglip.py
 
 # If you add dependencies for your own resize() approach, add them to
 # requirements.txt above — everything needed must install at BUILD time.

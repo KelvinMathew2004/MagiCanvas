@@ -20,3 +20,7 @@ venv/
 # Generated run artifacts
 output/*
 !output/.gitkeep
+
+# SigLIP perceptual re-ranker weights are baked into the Docker image at build
+# time (scripts/fetch_siglip.py); never commit the large weight files.
+models/

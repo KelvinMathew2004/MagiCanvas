@@ -234,6 +234,13 @@ engine needs must be installed at **build** time (add it to
 `requirements.txt`), not fetched at run time. If you're using a locally
 hosted model, bake its weights into the image during the build step.
 
+The `docker build` step above also bakes in the optional SigLIP perceptual
+re-ranker weights (`scripts/fetch_siglip.py`, ~370 MB), so it needs internet;
+the `docker run` step then loads them offline under `--network none`. If the
+weights or their dependencies are absent, the engine falls back to its
+deterministic ranking — see [IMPLEMENTATION.md](IMPLEMENTATION.md),
+"SigLIP perceptual re-rank".
+
 ## See also
 
 - `chameleon_design_schema_v0.9.json` — full input/output field spec

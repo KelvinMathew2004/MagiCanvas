@@ -3,3 +3,12 @@ git+https://github.com/CyberAgentAILab/cr-renderer
 
 # Deterministic placement constraints; no model/runtime service.
 kiwisolver==1.5.1
+
+# Optional SigLIP perceptual re-ranker (engine/vision.py). Weights are baked
+# into the image at build time by scripts/fetch_siglip.py and loaded offline;
+# if these are absent the engine falls back to its deterministic ranking.
+# NOTE: CPU-only torch is installed separately in the Dockerfile via the
+# PyTorch CPU wheel index to avoid the large default CUDA build.
+transformers>=4.44
+huggingface_hub>=0.23
+sentencepiece>=0.1.99
