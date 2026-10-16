@@ -1,4 +1,4 @@
-# CHAMELEON — starter repo
+# MAGICANVAS
 
 This is the scaffolding for your engine. It handles input loading, output
 writing, rendering, and Docker packaging — so the only file you need to
