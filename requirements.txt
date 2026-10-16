@@ -1,2 +1,5 @@
 Pillow>=10.0
 git+https://github.com/CyberAgentAILab/cr-renderer
+
+# Deterministic placement constraints; no model/runtime service.
+kiwisolver==1.5.1

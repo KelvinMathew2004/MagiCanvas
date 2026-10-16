@@ -19,7 +19,7 @@ class ResizeTests(unittest.TestCase):
         self.assertEqual(output['canvas'], target)
         self.assertEqual([e['id'] for e in output['elements']], [e['id'] for e in source['elements']])
         self.assertEqual(self_check(source, output), [])
-        mutable = {'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit'}
+        mutable = {'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit','text_align'}
         for old,new in zip(source['elements'], output['elements']):
             self.assertEqual(set(old)-mutable, set(new)-mutable)
             for key,value in old.items():

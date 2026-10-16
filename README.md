@@ -25,6 +25,9 @@ preserved verbatim for reference. Official rules remain in [RULES.md](RULES.md),
 [FAQ.md](FAQ.md), and the design schema; team implementation notes do not replace
 those requirements.
 
+See [REQUIREMENTS_AUDIT.md](REQUIREMENTS_AUDIT.md) for implemented requirements,
+remaining quality gaps, viewer/finale work, and organizer confirmations.
+
 Start with [IMPLEMENTATION.md](IMPLEMENTATION.md) for the engine approach,
 prototype-to-Python mapping, preserved starter comments, validation results,
 and limitations. Read [viewer/README.md](viewer/README.md) for both viewer flows.
@@ -48,6 +51,7 @@ output/             <- generated JSON/PNG results (Git-ignored)
 tests/
   test_resize.py    <- contract and relationship regression checks
   test_theme.mjs    <- frontend palette, contrast, and color sampling checks
+  test_viewer.py    <- native PNG export resolution regression
 viewer/             <- separate local testing UI; not part of engine execution
   server.py         <- loopback preview server, calls the Python engine/renderer
   index.html        <- side-by-side original/adapted preview
@@ -63,6 +67,7 @@ viewer/             <- separate local testing UI; not part of engine execution
 docs/
   STARTER_README.md  <- unchanged original starter instructions
 IMPLEMENTATION.md   <- engine approach, provenance, rules interpretation, limits
+REQUIREMENTS_AUDIT.md <- supplied Adobe requirements and remaining work
 chameleon_design_schema_v0.9.json   <- full field-by-field spec for the design format
 Dockerfile
 requirements.txt
@@ -125,6 +130,23 @@ in development, optionally run `pip install jsonschema`; the tests detect it
 automatically. This is not a new runtime requirement. Tests cover the three
 samples across six target formats, source immutability, groups, text fitting,
 image proportions, rotations, unusual content, and determinism.
+
+### Inspect the layout engine
+
+The engine now combines feature-based semantic roles, aspect-ratio layout
+families, Cassowary bounds/separation constraints, deterministic multi-start
+energy refinement, balanced typography, repeated icon/caption affinities,
+background-busyness-guided candidates, and rendered contrast/busyness checks. It uses no AI model.
+Artwork groups remain atomic; simple text/backplate pairs can reflow together.
+The scorer is heuristic, so visual quality still needs review on varied designs.
+See [IMPLEMENTATION.md](IMPLEMENTATION.md) for algorithm details and limits.
+
+```bash
+python scripts/inspect_layout.py input/chameleon_sample_level3_advanced.json
+```
+
+The output includes the design, PNG and a diagnostic report with roles, candidate
+energies, the selected layout and actual timings. There is no fixed 80 ms claim.
 
 For the Express viewer, use a separate terminal with Node.js/npm installed:
 

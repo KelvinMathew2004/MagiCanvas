@@ -32,7 +32,7 @@ function setTask(value) {
   $('height').value = task.target_canvas?.height ?? task.source.canvas.height;
   $('format').value = 'custom';
   result = null;
-  ['json', 'png', 'bundle'].forEach(id => $(id).disabled = true);
+  ['json', 'png', 'bundle', 'source-preview', 'output-preview'].forEach(id => $(id).disabled = true);
 }
 async function adapt() {
   if (!task) return;
@@ -55,13 +55,62 @@ async function adapt() {
     $('warnings').replaceChildren(...data.warnings.map(message => {const li=document.createElement('li');li.textContent=message;return li;}));
     $('warning-count').textContent = `(${data.warnings.length})`;
     setStatus(`${data.design.elements.length} elements · ${data.seconds}s${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
-    ['json','png','bundle'].forEach(key => $(key).disabled=false);
+    ['json','png','bundle','source-preview','output-preview'].forEach(key => $(key).disabled=false);
   } catch (error) { if (id === requestId) setStatus(error.message, 'error'); }
   finally { if (id === requestId) {document.body.classList.remove('busy');$('adapt').disabled=false;} }
 }
 function download(data, name, type) {
   const url=URL.createObjectURL(new Blob([data], {type})); const link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
+const imageViewer = $('image-viewer');
+const enlargedImage = $('image-viewer-image');
+let actualSize = false;
+function fitImage() {
+  actualSize = false;
+  imageViewer.classList.remove('actual-size');
+  enlargedImage.style.removeProperty('width');
+  enlargedImage.style.removeProperty('height');
+  $('image-viewer-zoom').textContent = '100%';
+  $('image-viewer-zoom').setAttribute('aria-label', 'Show image at actual pixel size');
+  $('image-viewer-zoom').setAttribute('aria-pressed', 'false');
+}
+function openImageViewer(kind) {
+  if (!result) return;
+  fitImage();
+  const title = kind === 'source' ? 'Original' : 'Adapted';
+  $('image-viewer-title').textContent = title;
+  $('image-viewer-size').textContent = '';
+  enlargedImage.alt = `${title} design`;
+  enlargedImage.src = kind === 'source' ? result.source_png : result.output_png;
+  document.body.classList.add('image-viewer-open');
+  imageViewer.showModal();
+}
+enlargedImage.addEventListener('load', () => {
+  $('image-viewer-size').textContent = `${enlargedImage.naturalWidth} × ${enlargedImage.naturalHeight} px`;
+});
+$('source-preview').addEventListener('click', () => openImageViewer('source'));
+$('output-preview').addEventListener('click', () => openImageViewer('output'));
+$('image-viewer-close').addEventListener('click', () => imageViewer.close());
+imageViewer.addEventListener('close', () => {
+  document.body.classList.remove('image-viewer-open');
+  enlargedImage.removeAttribute('src');
+  fitImage();
+});
+imageViewer.addEventListener('click', event => {
+  if (event.target !== imageViewer) return;
+  const bounds = imageViewer.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) imageViewer.close();
+});
+$('image-viewer-zoom').addEventListener('click', () => {
+  if (actualSize) { fitImage(); return; }
+  actualSize = true;
+  imageViewer.classList.add('actual-size');
+  enlargedImage.style.width = `${enlargedImage.naturalWidth}px`;
+  enlargedImage.style.height = `${enlargedImage.naturalHeight}px`;
+  $('image-viewer-zoom').textContent = 'Fit';
+  $('image-viewer-zoom').setAttribute('aria-label', 'Fit image to viewer');
+  $('image-viewer-zoom').setAttribute('aria-pressed', 'true');
+});
 $('adapt').addEventListener('click', adapt);
 $('sample').addEventListener('change', () => {const sample=samples[Number($('sample').value)];if(!sample)return;setTask(sample.task);adapt();});
 $('upload').addEventListener('change', async (event) => {try {const file=event.target.files[0];if(!file)return;setTask(JSON.parse(await file.text()));$('sample').querySelector('[data-import]')?.remove();const option=document.createElement('option');option.dataset.import='true';option.value='imported';option.textContent=file.name;$('sample').append(option);$('sample').value='imported';await adapt();}catch(error){setStatus(error.message, 'error');}});

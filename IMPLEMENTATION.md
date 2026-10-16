@@ -3,7 +3,7 @@
 ## Scope and submission boundary
 
 The scored engine is `engine/resize.py`. The existing function signature, runner,
-JSON schema, assets, renderer, requirements, Dockerfile, input tasks, and container
+JSON schema, assets, renderer, Dockerfile, input tasks, and container
 entry point are preserved. The original Project Chameleon repo is unchanged.
 
 The port adapts the prototype's analysis, grouped layout units, candidate search,
@@ -35,13 +35,102 @@ model**. It runs without a model or network. Model selection/training remains a
 separate future decision once the organizers publish the approved list and size
 limit; the supplied documents do not finalize those numbers.
 
+## Constraint and energy pipeline (October 16 upgrade)
+
+All scored logic remains in `engine/resize.py`; the public `resize()` signature,
+runner, renderer and schema are unchanged. `kiwisolver==1.5.1` is the only new
+runtime dependency. It installs at container build time and needs no model or
+network service.
+
+- Infer logo, hero/art, headline, kicker, subheading/body, CTA, badge, footer and
+  decoration hypotheses from geometry and typography. Confidence is diagnostic,
+  not calibrated probability. Repeated compact pills are distinguished from
+  larger CTA backplates. Explicit artwork groups remain atomic.
+- Compute target/source aspect-ratio delta and classify preservation, banner,
+  landscape, square, portrait or story flow. Generate proportional, split,
+  copy-first, hero-first, inline banner, semantic-stack and fallback-grid seeds.
+  Alternative visual shares avoid committing to one guessed arrangement.
+- Cassowary solves required combined raw/rotated-box bounds and separation constraints for
+  each seed, with soft position/alignment preferences. Non-overlap is a
+  disjunction: the seed chooses a separating axis/direction first. This is not
+  a globally optimal mixed-integer solver. Infeasible topologies are rejected.
+- Refine up to ten feasible starts using 36 bounded, reproducibly seeded
+  annealing steps each. Moves translate units, scale whole artwork groups
+  uniformly, or reflow standalone text with font fitting. Keep the best feasible
+  state, so refinement cannot worsen that seed's energy. No per-frame group
+  member jitter or independent deformation of an illustration.
+- Energy weights: boundary 1500, overlap 1000, text overflow 500, canvas use 35,
+  hierarchy 30, visual balance 18, source fidelity 18, alignment 16,
+  readability 13, copy spacing 8. Terms are normalized heuristics, not learned
+  design preferences or Adobe's scoring function.
+- Render up to three competitive candidates with the existing renderer. A
+  text-free *diagnostic* rendition measures backing contrast and busyness;
+  comparison with the full rendition flags invisible text. Only geometry-safe,
+  competitive candidates enter this tie-breaking stage. The returned document
+  always contains every original element. Diagnostic renders are temporary.
+- The raster check skips rotated text and canvases above 16 megapixels; if it
+  cannot render, retain the best geometry candidate and report the reason.
+  Colors, original assets and content are never rewritten to improve a score.
+
+Deliberate differences from the proposed architecture: no LLM token generation,
+SigLIP/MobileCLIP, model downloads, training, PyTorch, SciPy, or claim of an 80 ms
+runtime. Seeded annealing suits discontinuous wrapping and collision topology;
+Cassowary handles each linear placement problem. Intentional source artwork
+layering and within-group overlap are permitted. Arbitrary overlapping text
+panels or a malformed group still require better relationship inference; blanket
+zero-IoU for every element would break legitimate illustrations and buttons.
+Dense small banners can retain all content yet remain hard to read.
+
+### Inspect a decision
+
+```sh
+python scripts/inspect_layout.py input/chameleon_sample_level3_advanced.json
+```
+
+Writes JSON, PNG and a diagnostics report in `output/inspection/`. The report
+includes role hypotheses, aspect delta/flow, seed counts, energy before/after,
+winning family, constraint status, raster-check findings and measured timings.
+It does not add fields to the official output schema. This script is a local
+team tool, outside the container entry point.
+
+### Follow-up review hardening
+
+See [docs/GEMINI_ENGINE_REVIEW.md](docs/GEMINI_ENGINE_REVIEW.md) for the assessment
+of the supplied feedback and concrete execution findings. Placement now respects
+both raw and rotated bounds, tries alternate separating topologies, and repairs
+up to three rejected seeds for 60 iterations each. Repair explicitly penalizes
+missing separation gaps; infeasible repairs cannot enter ranking. Implicit
+backplate inference and elastic labels require a strict one-shape/one-text pair.
+Optional raster diagnostics isolate ordinary renderer exceptions. No starter
+runner or renderer behavior was changed.
+
+### Typography, relationships and background cues
+
+The subsequent perceptual pass adds line-balance scoring, continuous font
+hierarchy compression, left-aligned split/banner copy candidates, conservative
+repeated icon/caption affinities, central-void scoring, and optional background
+busyness-guided candidates. These are soft heuristics, not semantic image
+understanding. Quiet candidates repack copy and art in complementary regions;
+text reflow preserves alignment anchors, and feature fitting uses a separate
+size hint with proportional caption padding. Details, weights, preserved
+properties and research caveats:
+[docs/PERCEPTUAL_LAYOUT.md](docs/PERCEPTUAL_LAYOUT.md).
+
+### Source alignment and visual hierarchy
+
+A follow-up fixes discarded slot centering, adds source-centered axial
+preferences, separates lower badge strips from CTAs and top-corner callouts,
+and retains small footer images at their source corner. See
+[docs/LEVEL3_LAYOUT_REVIEW.md](docs/LEVEL3_LAYOUT_REVIEW.md) for root causes,
+weights, before/after observations and limits.
+
 ## Preserved properties and limits
 
 Every ID appears exactly once, in source order. The engine deep-copies output,
 leaves the input untouched, and preserves text content, font family, colors,
 opacity, group IDs, asset references, style runs, and unrelated properties.
-Geometry, font size, letter spacing, corners, strokes, and full-bleed background
-fit may adapt. Non-background images retain their source box aspect ratio.
+Geometry, font size, letter spacing, standalone copy alignment, corners,
+strokes, and full-bleed background fit may adapt. Non-background images retain their source box aspect ratio.
 Rotated bounds, not only unrotated rectangles, are considered when fitting.
 
 The engine has no editor-specific minimum size or aspect-ratio cap. It supports
@@ -88,6 +177,15 @@ the conflicting stage-one viewer wording with organizers before submission.
 
 ## Validation completed in this workspace
 
+The October 16 comparison reports are in `output/optimizer-report.json` and
+`output/optimizer-review.png` (generated, Git-ignored). All three winning layouts
+passed the engine's hard placement constraints and used raster reranking.
+Energy improved from its starting value in 8/10, 9/10 and 10/10 refinement
+starts respectively. Warm local engine calls measured 0.61–0.77 s total,
+including raster reranking; geometry measured 0.05–0.26 s. These are measurements
+on this machine, not performance promises. The 728 × 90 sample remains dense
+and small despite retaining all content.
+
 - Six regression tests passed, including all three supplied designs across six
   target formats (18 sample/format combinations), plus synthetic grouped art,
   button fitting, long words, opaque properties, zero-size shapes, invalid
@@ -96,7 +194,10 @@ the conflicting stage-one viewer wording with organizers before submission.
   and no structural self-check warnings. Source/adapted previews were inspected.
 - The existing Dockerfile built for `linux/amd64`. A container run with
   `--network none` and read-only input produced all three JSON/PNG output pairs
-  successfully. The image uses the original requirements and packaging.
+  successfully. The October 16 rebuild includes Kiwi 1.5.1 while keeping the
+  original Dockerfile and entry point. The offline runner reported 3.11 s,
+  1.18 s and 1.07 s for the three `resize()` calls (including diagnostic reranking, excluding
+  the runner's subsequent final PNG render).
 - The local viewer API returned real source/output previews and rejected a
   malformed task. Browser checks confirmed sample selection, format selection,
   and committing a custom width with Enter.

@@ -17,9 +17,14 @@ Open http://127.0.0.1:5050. Use `--port 5051` if 5050 is already occupied.
 - Load any provided sample or import a v0.9 task `{source, target_canvas}` or a
   standalone v0.9 design `{canvas, elements}`.
 - Choose a format or enter width/height. Changes apply on Enter or field blur.
+- Click either preview for a lightbox with fit-to-window and 100% views. Close
+  with Escape, the close button, or the backdrop. The header shows actual PNG pixels.
 - Compare original and adapted previews from the **same real renderer** used by
   `engine.main`. Failures are shown explicitly; there is no box fallback here.
-- Download the exact output JSON, PNG, or a comparison bundle for Express.
+- Download the exact output JSON, native-resolution PNG, or a comparison bundle
+  for Express. Local exports bypass the renderer's default 2048px preview cap;
+  the submission runner and converter remain unchanged. A 728 x 90 target still
+  exports at 728 x 90, not an artificial upscale.
 - Assets/fonts resolve from the existing `brand_kit`. An imported task's missing
   assets are reported. The intentional missing holiday badge is not fabricated.
 

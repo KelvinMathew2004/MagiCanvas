@@ -72,7 +72,10 @@ def adapt_preview(task):
     with TemporaryDirectory(prefix='magicanvas-preview-') as directory:
         for name, design in (('source', source), ('adapted', output)):
             path = Path(directory) / (name + '.png')
-            warnings.extend(render_design_to_png(design, ROOT/'brand_kit'/'assets', path))
+            # Local exports keep native target pixels, bypassing the renderer's
+            # default 2048px preview cap without modifying the official renderer.
+            warnings.extend(render_design_to_png(design, ROOT/'brand_kit'/'assets', path,
+                            max_size=max(design['canvas']['width'], design['canvas']['height'])))
             images.append('data:image/png;base64,' + base64.b64encode(path.read_bytes()).decode())
     return dict(design=output, source=source, source_png=images[0], output_png=images[1],
                 warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3))

@@ -127,3 +127,52 @@ pre { max-height: 340px; overflow: auto; font: 12px/1.6 ui-monospace, monospace;
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+.preview-open, .preview-open:hover, .preview-open:disabled:hover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  box-shadow: none;
+  background: none;
+  opacity: 1;
+}
+.preview-open img { cursor: zoom-in; }
+.preview-open:disabled img { cursor: default; }
+.preview-open:focus-visible { outline: none; }
+.preview-open:focus-visible img { outline: 2px solid var(--focus); outline-offset: 5px; }
+.image-viewer-open { overflow: hidden; }
+.image-viewer {
+  width: calc(100vw - 48px);
+  max-width: 1600px;
+  height: 90vh;
+  height: 90dvh;
+  max-height: none;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--page);
+  box-shadow: 0 24px 80px #0007;
+}
+.image-viewer[open] { display: flex; flex-direction: column; }
+.image-viewer::backdrop { background: #000b; }
+.image-viewer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--surface); flex: none; }
+.image-viewer-toolbar h2 { margin: 0; font-size: 14px; font-weight: 600; }
+#image-viewer-size { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.image-viewer-actions { display: flex; gap: 8px; }
+.image-viewer-actions button { height: 34px; min-width: 36px; display: grid; place-items: center; }
+#image-viewer-close { padding-inline: 8px; }
+.image-viewer-stage { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.image-viewer-content { min-width: 100%; min-height: 100%; width: 100%; height: 100%; display: flex; }
+.image-viewer-content img { display: block; flex: none; margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 2px 20px #0003; }
+.image-viewer.actual-size .image-viewer-content { width: max-content; height: max-content; }
+.image-viewer.actual-size .image-viewer-content img { max-width: none; max-height: none; }
+@media (max-width: 650px) {
+  .image-viewer { width: calc(100vw - 20px); height: 94dvh; }
+  .image-viewer-toolbar { padding: 12px; }
+  .image-viewer-stage { padding: 12px; }
+}
