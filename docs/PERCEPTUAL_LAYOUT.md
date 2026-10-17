@@ -30,6 +30,19 @@ feasible candidates. Diagnostics expose the nine-cell map, inferred links,
 hierarchy exponent and individual energy terms; none of these become official
 output schema fields.
 
+The visual ranker now receives up to five candidates from distinct layout
+families within a bounded energy band; this avoids comparing only proportional
+variants when a split or banner layout is viable. It applies one bounded
+role-aware refinement to the selected layout and compares that variant with its
+parent. The pass is deliberately non-recursive. Source-identified corner
+callouts stay pinned to their corresponding target corner, and banner CTAs
+reserve extra clearance from hero artwork. These are additional soft/layout
+rules, not proof that the ranker understands every asset semantically.
+When the source-to-target aspect-ratio shift is at least 1.6×, proportional
+scaling remains a generated fallback but is excluded from the rendered judging
+shortlist when any feasible reflow exists. This prevents the perceptual model
+from selecting a scaled source composition that fails to use the new canvas.
+
 Use the existing inspection command:
 
 ```sh

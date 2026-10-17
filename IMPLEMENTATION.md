@@ -63,11 +63,14 @@ network service.
   hierarchy 30, visual balance 18, source fidelity 18, alignment 16,
   readability 13, copy spacing 8. Terms are normalized heuristics, not learned
   design preferences or Adobe's scoring function.
-- Render up to three competitive candidates with the existing renderer. A
+- Render up to five candidates from distinct layout families with the existing renderer. A
   text-free *diagnostic* rendition measures backing contrast and busyness;
-  comparison with the full rendition flags invisible text. Only geometry-safe,
-  competitive candidates enter this tie-breaking stage. The returned document
-  always contains every original element. Diagnostic renders are temporary.
+  comparison with the full rendition flags invisible text. Structurally
+  different candidates inside a bounded energy band reach the visual ranker,
+  rather than only near-identical geometry winners. One bounded, role-aware
+  refinement pass explores the selected layout and compares it with its parent;
+  refinement does not recurse. The returned document always contains every
+  original element. Diagnostic renders are temporary.
 - The raster check skips rotated text and canvases above 16 megapixels; if it
   cannot render, retain the best geometry candidate and report the reason.
   Colors, original assets and content are never rewritten to improve a score.
@@ -93,15 +96,18 @@ contrast/busyness heuristics alone, a lightweight vision model
 renders. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
 `_siglip_rerank` in `engine/resize.py`.
 
-- **Scope is deliberately narrow.** The model only runs at the existing tie-break
-  stage, over the top ≤3 candidates that already passed every hard constraint
-  (bounds, non-overlap, element preservation). It cannot add, remove, move, or
-  restyle elements, and it never touches asset pixels — so the disqualifying
+- **Scope is deliberately narrow.** The model only ranks the bounded visual
+  shortlist of up to five structurally distinct candidates that already passed
+  every hard constraint (bounds, non-overlap, element preservation). It cannot
+  add, remove, move, or restyle elements, and it never touches asset pixels — so the disqualifying
   "no regeneration" rule and the v0.9 contract are untouched. Its influence is
-  bounded: SigLIP may only choose among candidates whose heuristic cost
-  (layout energy + legibility/busyness cost) is within a near-tie band of the
-  best, so it refines near-ties but can never rescue a materially worse
-  (e.g. illegible) layout.
+  bounded: SigLIP may only choose among candidates whose combined heuristic
+  cost (layout energy + legibility/busyness cost) is within a finite band of the
+  best. A small capped geometry penalty is combined with the model score, so
+  a weak visual-score difference cannot overrule a much better-balanced layout.
+  When the aspect-ratio shift is at least 1.6×, proportional scaling remains a
+  fallback but is left out of visual ranking whenever a feasible reflow exists;
+  large format changes should use the newly available canvas axis.
 - **Offline by construction.** Weights are baked into the Docker image at *build*
   time by `scripts/fetch_siglip.py` into `models/siglip` and loaded with
   `local_files_only=True`; nothing is fetched at runtime, so `--network none`
@@ -115,7 +121,7 @@ renders. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
   present (as in the local test environment). Inference runs in CPU
   eval/inference mode, preserving the determinism contract.
 - **Diagnostics.** The inspection report's `visual.perceptual` block records the
-  per-candidate SigLIP scores, the near-tie band, the selected index, and whether
+  per-candidate SigLIP and adjusted scores, the bounded candidate band, the selected index, and whether
   the learned judge overrode the pure-heuristic winner. None of this enters the
   official output schema.
 

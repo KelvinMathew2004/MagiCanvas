@@ -32,9 +32,10 @@ Start with [IMPLEMENTATION.md](IMPLEMENTATION.md) for the engine approach,
 prototype-to-Python mapping, preserved starter comments, validation results,
 and limitations. Read [viewer/README.md](viewer/README.md) for both viewer flows.
 
-The current engine is deterministic and offline. It uses no AI model, provider,
-API key, or Project Chameleon runtime. The earlier prototype remains in its
-separate repository; this repository runs independently.
+The current engine is deterministic and offline. An optional local SigLIP model
+can rank rendered layout candidates; no hosted provider or API key is used.
+The earlier prototype remains in its separate repository; this repository runs
+independently.
 
 ## Repo layout
 
@@ -136,9 +137,11 @@ image proportions, rotations, unusual content, and determinism.
 The engine now combines feature-based semantic roles, aspect-ratio layout
 families, Cassowary bounds/separation constraints, deterministic multi-start
 energy refinement, balanced typography, repeated icon/caption affinities,
-background-busyness-guided candidates, and rendered contrast/busyness checks. It uses no AI model.
-Artwork groups remain atomic; simple text/backplate pairs can reflow together.
-The scorer is heuristic, so visual quality still needs review on varied designs.
+background-busyness-guided candidates, and rendered contrast/busyness checks.
+When the optional local SigLIP weights are installed, it also ranks up to five
+distinct valid layouts and performs one bounded refinement pass. Artwork groups
+remain atomic; simple text/backplate pairs can reflow together. The scorer is
+still heuristic, so visual quality needs review on varied designs.
 See [IMPLEMENTATION.md](IMPLEMENTATION.md) for algorithm details and limits.
 
 ```bash
