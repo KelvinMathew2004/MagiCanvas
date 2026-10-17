@@ -380,11 +380,13 @@ def _badge_row(units,width,height,scale,gap):
     return _row(units,width,height,scale,gap)
 
 
-def _action_band(tags,actions,width,height,scale,gap,stacked):
-    if not stacked or not tags or not actions:
+def _action_band(tags,actions,width,height,scale,gap,stacked,align='center'):
+    if not (stacked or len(tags)>=2) or not tags or not actions:
         return _badge_row(tags,width,height,scale,gap) if not actions else _row(tags+actions,width,height,scale,gap)
-    badges,bh=_badge_row(tags,width,height*.40,scale,gap)
+    badges,bh=_badge_row(tags,width,height*.40,scale*.82,gap)
     buttons,ah=_row(actions,width,max(.001,height-bh-gap),scale,gap)
+    if align=='left':
+        _move(badges,0,0);_move(buttons,0,0)
     output=badges+_shift(buttons,0,bh+gap)
     return output,bh+gap+ah
 
@@ -505,12 +507,14 @@ def _decorations(units,width,height,sw,sh,occupied):
     result=[]
     for u in units:
         x,y,r,b=u['bounds']
-        block=_unit(u,width*.32,height*.32,min(width/sw,height/sh))
+        block=_callout_block(u,width,height,sw,sh) if u.get('corner_callout') else _unit(u,width*.32,height*.32,min(width/sw,height/sh))
         _,_,w,h=_bounds(block)
         preferred=(max(0,min(width-w,(x+r)/2/sw*width-w/2)),max(0,min(height-h,(y+b)/2/sh*height-h/2)))
         positions=[preferred,(0,0),(width-w,0),(0,height-h),(width-w,height-h)]
         if u.get('corner_callout'):
-            positions=[preferred,(width-w if (x+r)/2>sw/2 else 0,0)]
+            edge=min(width,height)*.025
+            preferred=(width-edge-w if (x+r)/2>sw/2 else edge,edge)
+            positions=[preferred]
         def cost(p):
             box=(p[0],p[1],p[0]+w,p[1]+h)
             collisions=sum(_overlap(box,_bounds([e]))/max(1,w*h) for e in occupied if e['type']=='text')
@@ -519,15 +523,101 @@ def _decorations(units,width,height,sw,sh,occupied):
     return result
 
 
+def _logo_row(units,width,height,scale,gap):
+    """Fit brand images to a tall logo slot, with a bounded growth allowance."""
+    if not units:return [],0
+    slot=max(.001,(width-gap*(len(units)-1))/len(units))
+    blocks=[_unit(u,slot,height,scale*1.8) for u in units]
+    sizes=[_bounds(b) for b in blocks]
+    used=sum(b[2]-b[0] for b in sizes)+gap*(len(blocks)-1)
+    row_h=max(b[3]-b[1] for b in sizes)
+    output=[];x=max(0,(width-used)/2)
+    for block,b in zip(blocks,sizes):
+        w,h=b[2]-b[0],b[3]-b[1]
+        output.extend(_move(block,x,(row_h-h)/2));x+=w+gap
+    return output,row_h
+
+
+def _callout_block(u,width,height,sw,sh):
+    desired=sqrt(width*height/(sw*sh))
+    return _unit(u,width*.32,height*.38,max(min(width/sw,height/sh),desired*.85))
+
+
+def _editorial_copy(roles,width,height,scale,gap):
+    """Kicker, copy and CTA occupy one left-aligned column."""
+    upper=[u for u in roles['tag'] if u.get('source_upper')]
+    lower=[u for u in roles['tag'] if not u.get('source_upper')]
+    logo,lh=_logo_row(roles['header'],width,height*.18,scale,gap)
+    kicker,kh=_badge_row(upper,width,height*.13,scale*.82,gap)
+    actions,ah=_action_band(lower,roles['action'],width,height*.34,scale,gap,True,align='left')
+    reserved=sum(v for v in (lh,kh,ah))
+    count=sum(bool(v) for v in (lh,kh,ah))+bool(roles['copy'])
+    copy=_copy(roles['copy'],width,max(.001,height-reserved-gap*max(0,count-1)),scale,gap,align='left')
+    mutable={u['items'][0]['id'] for u in roles['copy']+roles['action']+roles['tag']
+             if len(u['items'])==1 and u['items'][0]['type']=='text' and not u['items'][0].get('group_id')}
+    output=[];cursor=0
+    for block in (logo,kicker,copy,actions):
+        if not block:continue
+        for e in block:
+            if e['id'] in mutable:
+                e['text_align']='left';_tighten_text(e)
+        _,_,_,bottom=_bounds(_move(block,0,0))
+        output.extend(_move(block,0,cursor));cursor+=bottom+gap
+    return _contain(output,width,height)
+
+
+def _editorial_split_seed(units,width,height,sw,sh,scale,share=.42,reverse=False):
+    margin,gap=min(width,height)*.05,min(width,height)*.035
+    cw,ch=width-2*margin,height-2*margin
+    roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
+           for r in ('header','footer','copy','action','tag','visual','decoration')}
+    footer,fh=_footer_band(roles['footer'],cw,ch*.10,scale,gap*.6)
+    top=margin;available=max(.001,ch-fh-(gap if fh else 0))
+    side_header=width/height>=2.4 and bool(roles['header'])
+    left=margin;main_width=cw;output=[]
+    if side_header:
+        logo_w=cw*.15
+        brand,bh=_logo_row(roles['header'],logo_w,available*.75,scale,gap)
+        output.extend(_shift(brand,left,top+(available-bh)/2))
+        left+=logo_w+gap;main_width-=logo_w+gap
+    art_left=bool(roles['visual']) and sum((u['bounds'][0]+u['bounds'][2])/2 for u in roles['visual'])/len(roles['visual'])<sw*.45
+    if reverse:art_left=not art_left
+    vw=(main_width-gap)*share if roles['visual'] else 0
+    tw=max(.001,main_width-vw-(gap if vw else 0))
+    tx=left+vw+gap if art_left else left
+    vx=left if art_left else left+tw+gap
+    # Reserve actual corner-callout clearance in the affected column.
+    copy_clear=art_clear=0
+    for u in roles['decoration']:
+        if not u.get('corner_callout'):continue
+        b=_bounds(_callout_block(u,width,height,sw,sh));clear=b[3]-b[1]+gap
+        on_left=(u['bounds'][0]+u['bounds'][2])/2<sw/2
+        if roles['visual'] and on_left==art_left:art_clear=max(art_clear,clear)
+        elif not side_header or not on_left:copy_clear=max(copy_clear,clear)
+    local={**roles,'header':[] if side_header else roles['header']}
+    copy=_editorial_copy(local,tw,max(.001,available-copy_clear),scale,gap)
+    b=_bounds(copy);bh=b[3]-b[1]
+    output.extend(_move(copy,tx,top+copy_clear+(available-copy_clear-bh)/2))
+    if roles['visual']:
+        art=_visuals(roles['visual'],max(.001,vw),max(.001,available-art_clear),scale,gap)
+        b=_bounds(art);bw,bh=b[2]-b[0],b[3]-b[1]
+        output.extend(_move(art,vx+(vw-bw)/2,top+art_clear+(available-art_clear-bh)/2))
+    if footer:output.extend(_shift(footer,margin,height-margin-fh))
+    output.extend(_decorations(roles['decoration'],width,height,sw,sh,output))
+    return output
+
+
 def _reflow(units,width,height,sw,sh,mode,share,scale):
+    if width/height>=2.4 or (mode=='split' and width/height>=1.35):
+        return _editorial_split_seed(units,width,height,sw,sh,scale,share,reverse=mode=='visual-first')
     margin,gap=min(width,height)*.05,min(width,height)*.035
     cw,ch=width-2*margin,height-2*margin
     roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
            for r in ('copy','header','footer','visual','tag','action','decoration')}
-    upper=[u for u in roles['tag'] if u['bounds'][1]<sh*.45]
+    upper=[u for u in roles['tag'] if u['bounds'][1]<sh*.45 and width/height<1.35]
     roles['header']+=upper
     roles['tag']=[u for u in roles['tag'] if u not in upper]
-    side_header=mode=='split' and width/height>3 and bool(roles['header'])
+    side_header=width/height>=2.4 and bool(roles['header'])
     header,hh=_row([] if side_header else roles['header'],cw,ch*.13,scale,gap)
     footer,fh=_footer_band(roles['footer'],cw,ch*.10,scale,gap*.6)
     labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*.20,scale,gap,width/height<1.3)
@@ -550,7 +640,7 @@ def _reflow(units,width,height,sw,sh,mode,share,scale):
     cx,cwidth=margin,cw
     if side_header:
         hw=cw*.15
-        block,used=_row(roles['header'],hw,available,scale,gap)
+        block,used=_logo_row(roles['header'],hw,available*.75,scale,gap)
         output.extend(_shift(block,margin,top+(available-used)/2))
         cx+=hw+gap; cwidth-=hw+gap
     copy,visuals=roles['copy'],roles['visual']
@@ -627,7 +717,7 @@ def _enrich_units(source, units):
         small_image = images and not any(e['type'] == 'text' for e in u['items']) and (r-x)*(b-y) < sw*sh*.09
         near_top = (y+b)/2 < sh*.22
         near_corner = min(abs(x), abs(sw-r)) < sw*.12 and y < sh*.28
-        relative_small = max((_area(e) for e in images), default=0) < largest_image*.55
+        relative_small = ((r-x)*(b-y)<sw*sh*.12 if len(image_units)==1 else max((_area(e) for e in images), default=0) < largest_image*.55)
         if u['role'] == 'header' or small_image and (near_top or near_corner) and (relative_small or b-y < sh*.15):
             u['role'], semantic, confidence = 'header', 'logo', .72
         elif u is headline:
@@ -706,14 +796,13 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
     for key, weight in active:
         w = usable*weight/total
         if key == 'copy':
-            tags, th = _badge_row(roles['tag'], w, available*.20, scale*.9, gap*.5)
-            lower=bool(roles['tag']) and all(not u.get('source_upper') for u in roles['tag'])
-            if tags:
-                output.extend(_shift(tags, cursor, margin+available-th if lower else margin))
-            h = max(.001, available-th-(gap if th else 0))
-            block = _copy(roles['copy'], w, h, scale, gap, align='left')
-            if block:
-                output.extend(_move(block, cursor, margin+(0 if lower else th+(gap if th else 0))+(h-_bounds(block)[3])/2))
+            local_roles={**roles,'header':[],'action':[],'visual':[],'footer':[],'decoration':[]}
+            block=_editorial_copy(local_roles,w,available,scale,gap)
+            _,_,bw,bh=_bounds(block)
+            output.extend(_move(block,cursor,margin+(available-bh)/2))
+        elif key == 'header':
+            block,used=_logo_row(roles[key],w,available*.80,scale,gap)
+            output.extend(_shift(block,cursor,margin+(available-used)/2))
         elif key == 'visual':
             block = _visuals(roles[key], w, available, scale, gap)
             output.extend(_move(block, cursor+(w-_bounds(block)[2])/2, margin+(available-_bounds(block)[3])/2))
@@ -1063,12 +1152,23 @@ def _perceptual_terms(records, boxes, units, width, height):
     return terms
 
 
+def _text_right_limit(unit,box,records,width,height):
+    """Horizontal room at this anchor, respecting neighboring occupied rows."""
+    limit=width-min(width,height)*.045;gap=min(width,height)*.008
+    for other,items in records:
+        if other is unit or _layered(unit,other):continue
+        b=_bounds(items)
+        if min(box[3],b[3])>max(box[1],b[1]) and b[0]>=box[2]-1e-6:
+            limit=min(limit,b[0]-gap)
+    return max(box[2],limit)
+
+
 def _energy_terms(elements, units, source, width, height, desired):
     records = _records(elements,units)
     boxes = [_bounds(items) for _,items in records]
     terms = dict(overlap=0.,boundary=0.,text_fit=0.,readability=0.,balance=0.,
                  hierarchy=0.,alignment=0.,spacing=0.,canvas_use=0.,source_fidelity=0.)
-    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.)
+    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.)
     masses=[]
     for i,((u,items),box) in enumerate(zip(records,boxes)):
         x,y,r,b=box; area=max(1e-9,(r-x)*(b-y))
@@ -1088,6 +1188,10 @@ def _energy_terms(elements, units, source, width, height, desired):
                 continue
             th,tw,lines=_text(e)
             terms['text_fit'] += max(0,th/max(.001,e['height'])-1)+max(0,tw/max(.001,e['width'])-1)
+            if width/height>=1.35 and lines>1 and '\n' not in e.get('content','') and (u['semantic']=='headline' or len(e.get('content','').split())<=14) and u['role'] in ('copy','action'):
+                room=_text_right_limit(u,box,records,width,height)-x
+                possible=_text(e,max(e['width'],room))[2]
+                terms['avoidable_wrap']+=max(0,(lines-possible)/lines)
             if e.get('max_lines'):
                 terms['text_fit'] += max(0,lines-e['max_lines'])
             expected=_target_font(original,u,desired)
@@ -1096,6 +1200,14 @@ def _energy_terms(elements, units, source, width, height, desired):
             importance=2 if u['semantic']=='headline' else 1
             terms['readability'] += importance*max(0,log(expected/max(1,e['font_size'])))**2
             terms['readability'] += max(0,min(8,min(width,height)*.065)-e['font_size'])/4
+        if u['semantic']=='hero' and width/height<3.2:
+            source_box=u['bounds'];source_share=(source_box[2]-source_box[0])*(source_box[3]-source_box[1])/(source['canvas']['width']*source['canvas']['height'])
+            floor=source_share*.45
+            terms['hero_prominence']+=max(0,(floor-area/(width*height))/max(1e-9,floor))**2
+        if u['semantic']=='logo' and width/height>=2.4:
+            old=u['bounds'];ratio=(old[2]-old[0])/max(1e-9,old[3]-old[1])
+            wanted=min(height*.60,width*.15/max(1e-9,ratio),(old[3]-old[1])*desired*1.8)
+            terms['brand_visibility']+=max(0,(wanted-(b-y))/max(1,wanted))**2
         if _axis_active(u,source,width,height):
             terms['axial']+=((x+r)/2/width-.5)**2*(2 if u['semantic'] in ('logo','hero','headline','cta') else 1)
         if u.get('footer_anchor') in ('left','right'):
@@ -1121,6 +1233,22 @@ def _energy_terms(elements, units, source, width, height, desired):
             if original_ratio>1.25:
                 terms['hierarchy']+=max(0,min(original_ratio,1.6)-af/max(1,bf))
     state=_aspect_state(source,width,height)
+    if width/height>=1.35:
+        left_copy=[b for (u,items),b in zip(records,boxes) if u['role']=='copy' and any(e.get('text_align','left')=='left' for e in items)]
+        copy_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='copy']
+        if copy_boxes:
+            copy_top=min(b[1] for b in copy_boxes)
+            for (u,_),b in zip(records,boxes):
+                if u['role']=='tag' and u.get('source_upper'):
+                    terms['hierarchy']+=max(0,(b[3]-copy_top)/height)
+        if left_copy and width/height<3.2:
+            axis=min(b[0] for b in left_copy)
+            bands=[left_copy]
+            bands.append([b for (u,_),b in zip(records,boxes) if u['role']=='action'])
+            for upper in (True,False):
+                bands.append([b for (u,_),b in zip(records,boxes) if u['role']=='tag' and bool(u.get('source_upper'))==upper])
+            terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in left_copy)
+            terms['column_alignment']+=sum(abs(min(b[0] for b in band)-axis)/width for band in bands[1:] if band)
     def role_bounds(roles):
         return _bounds([e for (u,items) in records if u['semantic'] in roles for e in items])
     flow_roles=[{'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}]
@@ -1153,7 +1281,7 @@ def _energy_terms(elements, units, source, width, height, desired):
 
 _ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
-                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.)
+                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.,hero_prominence=140.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.)
 
 
 def _energy(elements,units,source,width,height,desired):
@@ -1226,7 +1354,11 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             proposal=_move(proposal,target if axis==0 else x,target if axis==1 else y)
         elif motion==2 and len(block)==1 and block[0]['type']=='text':
             e=proposal[0]
-            e['width']=max(1,e['width']*rng.choice((.90,1.10)))
+            if width/height>=1.35 and '\n' not in e.get('content','') and rng.random()<.5:
+                room=_text_right_limit(u,bounds,_records(current,units),width,height)-x
+                e['width']=max(1,min(room,_text(e,1e9)[1]+e['font_size']*.02))
+            else:
+                e['width']=max(1,e['width']*rng.choice((.90,1.10)))
             e['font_size']=_fit_text(e,e['width'],height*.7,max(1,e['font_size']*rng.choice((1.,1.04))))
             e['height']=_text(e)[0]
             _tighten_text(e)
@@ -1438,7 +1570,11 @@ def _adapt_with_diagnostics(source,target_canvas):
     seeds=[dict(name='proportional',elements=_proportional(units,width,height,sw,sh))]
     for mode in ('split','copy-first','visual-first'):
         for share in (.30,.45,.60):
-            seeds.append(dict(name=f'{mode}-{share}',elements=_reflow(units,width,height,sw,sh,mode,share,desired*1.15)))
+            family=f'editorial-{mode}' if width/height>=2.4 else mode
+            seeds.append(dict(name=f'{family}-{share}',elements=_reflow(units,width,height,sw,sh,mode,share,desired*1.15)))
+    if width/height>=1.35:
+        seeds.append(dict(name='editorial-split',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42)))
+        seeds.append(dict(name='editorial-split-reversed',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42,True)))
     if state['flow'] in ('banner','landscape'):
         for share in (.14,.22,.30):
             seeds.append(dict(name=f'inline-banner-{share}',elements=_banner_seed(units,width,height,desired*1.15,share,source_size=(sw,sh))))

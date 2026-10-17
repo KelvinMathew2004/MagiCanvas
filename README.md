@@ -235,7 +235,7 @@ engine needs must be installed at **build** time (add it to
 hosted model, bake its weights into the image during the build step.
 
 The `docker build` step above also bakes in the optional SigLIP perceptual
-re-ranker weights (`scripts/fetch_siglip.py`, ~370 MB), so it needs internet;
+re-ranker weights (`scripts/fetch_siglip.py`, ~813 MB), so it needs internet;
 the `docker run` step then loads them offline under `--network none`. If the
 weights or their dependencies are absent, the engine falls back to its
 deterministic ranking — see [IMPLEMENTATION.md](IMPLEMENTATION.md),
@@ -249,3 +249,5 @@ deterministic ranking — see [IMPLEMENTATION.md](IMPLEMENTATION.md),
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) — current engine, port provenance, and validation
 - [viewer/README.md](viewer/README.md) — local and Express viewers
 - [docs/STARTER_README.md](docs/STARTER_README.md) — original starter README, verbatim
+
+Detailed wide-format changes and the 15-case offline vision check: [docs/WIDE_FORMAT_VERIFICATION.md](docs/WIDE_FORMAT_VERIFICATION.md).

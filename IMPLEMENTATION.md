@@ -369,3 +369,9 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
         "elements": out_elements,
     }
 ```
+
+## Wide-format and vision preprocessing follow-up
+
+See [docs/WIDE_FORMAT_VERIFICATION.md](docs/WIDE_FORMAT_VERIFICATION.md) for
+logo visibility, editorial copy/CTA columns, badge/hero hierarchy, bounded
+callout sizing, square letterboxing, and reproducible five-format checks.

@@ -78,6 +78,28 @@ def available() -> bool:
     return _load() is not None
 
 
+def _letterbox_square(image):
+    """Preserve layout proportions before the processor's square resize.
+
+    Use a sampled border median so the padding follows the render background.
+    This preserves geometry, but does not establish aesthetic score accuracy.
+    """
+    from PIL import Image
+    image=image.convert('RGB')
+    width,height=image.size
+    if width==height:return image.copy()
+    border=[]
+    for x in range(0,width,max(1,width//64)):
+        border.extend((image.getpixel((x,0)),image.getpixel((x,height-1))))
+    for y in range(0,height,max(1,height//64)):
+        border.extend((image.getpixel((0,y)),image.getpixel((width-1,y))))
+    color=tuple(sorted(p[k] for p in border)[len(border)//2] for k in range(3))
+    side=max(width,height)
+    canvas=Image.new('RGB',(side,side),color)
+    canvas.paste(image,((side-width)//2,(side-height)//2))
+    return canvas
+
+
 def score_layouts(images):
     """Rank candidate renders by learned design quality.
 
@@ -100,19 +122,18 @@ def score_layouts(images):
     model, processor, torch = loaded
     try:
         prompts = list(_POSITIVE) + list(_NEGATIVE)
-        scores = []
+        # One forward pass shares the identical prompt encoding across images.
         with torch.inference_mode():
-            for image in images:
-                inputs = processor(
-                    text=prompts,
-                    images=image.convert("RGB"),
-                    padding="max_length",
-                    return_tensors="pt",
-                )
-                logits = model(**inputs).logits_per_image[0]  # [num_prompts]
-                positive = logits[: len(_POSITIVE)].mean().item()
-                negative = logits[len(_POSITIVE):].mean().item()
-                scores.append(positive - negative)
+            inputs = processor(
+                text=prompts,
+                images=[_letterbox_square(image) for image in images],
+                padding="max_length",
+                return_tensors="pt",
+            )
+            logits = model(**inputs).logits_per_image
+            positive = logits[:, :len(_POSITIVE)].mean(dim=1)
+            negative = logits[:, len(_POSITIVE):].mean(dim=1)
+            scores = (positive-negative).tolist()
         return scores, f"SigLIP perceptual re-rank over {len(images)} candidate(s)"
     except Exception as exc:
         return None, f"SigLIP scoring failed: {exc}"

@@ -126,7 +126,8 @@ class SiglipRerankTests(unittest.TestCase):
     def test_fallback_when_model_absent_returns_no_selection(self):
         from engine.resize import _siglip_rerank
         entries=[self._entry('A',100.),self._entry('B',110.)]
-        report=_siglip_rerank(entries,self._cost)
+        with patch('engine.vision.score_layouts',return_value=(None,'model unavailable')):
+            report=_siglip_rerank(entries,self._cost)
         self.assertFalse(report['used'])
         self.assertIsNone(report['selected_index'])
 

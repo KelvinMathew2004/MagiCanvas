@@ -1,0 +1,130 @@
+"""Logo slots, editorial columns, hierarchy and vision preprocessing regressions."""
+from copy import deepcopy
+import json
+from pathlib import Path
+import unittest
+from PIL import Image
+
+from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed,
+                           _action_band, _callout_block, _energy_terms)
+from engine.vision import _letterbox_square
+
+ROOT=Path(__file__).resolve().parents[1]
+
+
+def sample(level):
+    return json.loads(next((ROOT/'input').glob(f'*level{level}*.json')).read_text())['source']
+
+
+class LayoutMechanicsTests(unittest.TestCase):
+    def test_single_small_top_image_can_be_logo_without_a_second_image(self):
+        source=dict(canvas=dict(width=800,height=800),elements=[
+            dict(id='opaque',type='image',asset_id='unavailable.png',x=325,y=40,width=150,height=150)])
+        unit=_analyze(source)[1][0]
+        self.assertEqual((unit['role'],unit['semantic']),('header','logo'))
+
+    def test_banner_logo_uses_tall_slot_and_respects_growth_cap(self):
+        units=_analyze(sample(1))[1]
+        logos=[u for u in units if u['semantic']=='logo']
+        result,h=_logo_row(logos,108,60,.22,3)
+        self.assertGreater(h,15)
+        self.assertLessEqual(h,60)
+        before=logos[0]['items'][0];after=result[0]
+        self.assertLessEqual(after['width']/before['width'],.22*1.8+1e-6)
+        self.assertAlmostEqual(after['width']/after['height'],before['width']/before['height'])
+
+    def test_split_keeps_upper_badge_and_cta_with_copy(self):
+        source=sample(2);units=_analyze(source)[1];before=deepcopy(units)
+        elements=_editorial_split_seed(units,1600,400,source['canvas']['width'],source['canvas']['height'],.75,.42)
+        by_id={e['id']:e for e in elements}
+        def box(role):
+            return _bounds([by_id[e['id']] for u in units if u['role']==role for e in u['items']])
+        copy=box('copy');action=box('action')
+        self.assertAlmostEqual(copy[0],action[0],places=5)
+        self.assertLessEqual(copy[3],action[1]+1e-6)
+        upper=[u for u in units if u['role']=='tag' and u.get('source_upper')]
+        self.assertTrue(upper)
+        for u in upper:
+            badge=_bounds([by_id[e['id']] for e in u['items']])
+            self.assertAlmostEqual(badge[0],copy[0],places=5)
+            self.assertLess(badge[3],copy[1])
+        self.assertEqual(units,before)
+
+    def test_landscape_peer_tags_stay_separate_from_primary_action(self):
+        units=_analyze(sample(3))[1]
+        tags=[u for u in units if u['role']=='tag'];actions=[u for u in units if u['role']=='action']
+        elements,h=_action_band(tags,actions,1200,260,1,20,False,align='left')
+        by_id={e['id']:e for e in elements}
+        tag_box=_bounds([by_id[e['id']] for u in tags for e in u['items']])
+        action_box=_bounds([by_id[e['id']] for u in actions for e in u['items']])
+        self.assertAlmostEqual(tag_box[0],action_box[0])
+        self.assertLess(tag_box[3],action_box[1])
+        self.assertLessEqual(h,260+1e-5)
+
+    def test_callout_grows_above_short_side_scale_with_bounded_height(self):
+        source=sample(3);u=next(u for u in _analyze(source)[1] if u.get('corner_callout'))
+        before=deepcopy(u)
+        block=_callout_block(u,728,90,1080,1350);box=_bounds(block)
+        old=u['bounds'];scale=(box[2]-box[0])/(old[2]-old[0])
+        self.assertGreater(scale,90/1350)
+        self.assertLessEqual(box[3]-box[1],90*.38+1e-6)
+        self.assertEqual(u,before)
+
+    def test_tiny_hero_receives_prominence_penalty(self):
+        source=sample(3);units=_analyze(source)[1]
+        hero=next(u for u in units if u['semantic']=='hero');ids={e['id'] for e in hero['items']}
+        small=deepcopy(source['elements'])
+        for e in small:
+            if e['id'] in ids:e['width']*=.1;e['height']*=.1
+        baseline=_energy_terms(source['elements'],units,source,1080,1350,1)
+        changed=_energy_terms(small,units,source,1080,1350,1)
+        self.assertEqual(baseline['hero_prominence'],0)
+        self.assertGreater(changed['hero_prominence'],.5)
+
+    def test_avoidable_wrap_penalty_when_horizontal_room_exists(self):
+        source=dict(canvas=dict(width=800,height=100),elements=[
+            dict(id='copy',type='text',content='Chase the Light',font_family='Solstice Serif',font_size=20,
+                 color='rgb(255,255,255)',x=150,y=10,width=50,height=80),
+            dict(id='neighbor',type='shape',shape_type='rectangle',fill_color='rgb(10,20,30)',
+                 x=650,y=10,width=100,height=80)])
+        units=_analyze(source)[1]
+        narrow=_energy_terms(source['elements'],units,source,800,100,1)
+        expanded=deepcopy(source['elements']);expanded[0]['width']=400
+        wide=_energy_terms(expanded,units,source,800,100,1)
+        self.assertGreater(narrow['avoidable_wrap'],wide['avoidable_wrap'])
+
+
+
+class LetterboxTests(unittest.TestCase):
+    def test_wide_and_tall_contents_keep_geometry_and_source_pixels(self):
+        for size in ((32,8),(8,32),(16,16)):
+            with self.subTest(size=size):
+                source=Image.new('RGB',size,(10,20,30));source.putpixel((size[0]//2,size[1]//2),(240,90,40))
+                before=source.tobytes();result=_letterbox_square(source);side=max(size)
+                self.assertEqual(result.size,(side,side))
+                x=(side-size[0])//2;y=(side-size[1])//2
+                self.assertEqual(result.crop((x,y,x+size[0],y+size[1])).tobytes(),before)
+                self.assertEqual(source.tobytes(),before)
+                self.assertEqual(result.getpixel((0,0)),(10,20,30))
+                self.assertIsNot(result,source)
+
+    def test_scoring_batches_letterboxed_candidates_in_one_forward_pass(self):
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock,patch
+        from engine.vision import score_layouts
+        processor=MagicMock(return_value={})
+        logits=MagicMock();positive=MagicMock();negative=MagicMock()
+        logits.__getitem__.side_effect=[positive,negative]
+        positive.mean.return_value.__sub__.return_value.tolist.return_value=[.1,.2]
+        model=MagicMock(return_value=SimpleNamespace(logits_per_image=logits))
+        torch=SimpleNamespace(inference_mode=lambda:nullcontext())
+        with patch('engine.vision._load',return_value=(model,processor,torch)):
+            scores,_=score_layouts([Image.new('RGB',(32,8)),Image.new('RGB',(8,32))])
+        self.assertEqual(scores,[.1,.2])
+        self.assertEqual(model.call_count,1)
+        self.assertEqual([image.size for image in processor.call_args.kwargs['images']],[(32,32),(32,32)])
+
+
+
+if __name__=='__main__':unittest.main()
