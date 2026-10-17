@@ -346,7 +346,7 @@ def _unit(u, width, height, scale, fill=False):
     return _contain(result, width, height)
 
 
-def _row(units, width, height, scale, gap):
+def _row(units, width, height, scale, gap, align='center'):
     rows, current, used = [], [], 0
     for u in units:
         items = _unit(u, width, height, scale)
@@ -361,7 +361,8 @@ def _row(units, width, height, scale, gap):
     output, cursor = [], 0
     for row in rows:
         rh = max(h for _,_,h in row)
-        x = (width-sum(w for _,w,_ in row)-gap*(len(row)-1))/2
+        row_width=sum(w for _,w,_ in row)+gap*(len(row)-1)
+        x = 0 if align=='left' else width-row_width if align=='right' else (width-row_width)/2
         for items,w,h in row:
             output.extend(_move(items,x,cursor+(rh-h)/2))
             x += w+gap
@@ -369,7 +370,7 @@ def _row(units, width, height, scale, gap):
     return output, max(0,cursor-gap)
 
 
-def _badge_row(units,width,height,scale,gap):
+def _badge_row(units,width,height,scale,gap,align='center'):
     # Keep verified peers on one row by sharing a fitting scale when possible.
     if len(units)>1 and units[0].get('peer_ids') and all(u.get('peer_ids')==units[0]['peer_ids'] for u in units):
         widths=[_bounds(_unit(u,width,height,scale))[2] for u in units]
@@ -377,14 +378,14 @@ def _badge_row(units,width,height,scale,gap):
         if needed+gap*(len(units)-1)>width:
             gap=min(gap,width/max(1,len(units)*8))
             scale*=max(.001,(width-gap*(len(units)-1))/max(.001,needed))*.995
-    return _row(units,width,height,scale,gap)
+    return _row(units,width,height,scale,gap,align)
 
 
 def _action_band(tags,actions,width,height,scale,gap,stacked,align='center'):
     if not (stacked or len(tags)>=2) or not tags or not actions:
-        return _badge_row(tags,width,height,scale,gap) if not actions else _row(tags+actions,width,height,scale,gap)
-    badges,bh=_badge_row(tags,width,height*.40,scale*.82,gap)
-    buttons,ah=_row(actions,width,max(.001,height-bh-gap),scale,gap)
+        return _badge_row(tags,width,height,scale,gap,align) if not actions else _row(tags+actions,width,height,scale,gap,align)
+    badges,bh=_badge_row(tags,width,height*.40,scale*.82,gap,align)
+    buttons,ah=_row(actions,width,max(.001,height-bh-gap),scale,gap,align)
     if align=='left':
         _move(badges,0,0);_move(buttons,0,0)
     output=badges+_shift(buttons,0,bh+gap)
@@ -523,11 +524,20 @@ def _decorations(units,width,height,sw,sh,occupied):
     return result
 
 
-def _logo_row(units,width,height,scale,gap):
-    """Fit brand images to a tall logo slot, with a bounded growth allowance."""
+def _logo_row(units,width,height,scale,gap,source_size=None,fill=False):
+    """Fit logos into a slot, optionally filling it with a bounded scale."""
     if not units:return [],0
     slot=max(.001,(width-gap*(len(units)-1))/len(units))
-    blocks=[_unit(u,slot,height,scale*1.8) for u in units]
+    blocks=[]
+    for u in units:
+        if fill:
+            fit_w,fit_h=u.get('fit_size',(u['bounds'][2]-u['bounds'][0],u['bounds'][3]-u['bounds'][1]))
+            cap=max(scale*1.6,min(width/source_size[0],height/source_size[1])*1.35) if source_size else scale*1.6
+            factor=min(slot/max(1e-9,fit_w),height/max(1e-9,fit_h),cap)
+            block=_contain(_scale(u['items'],factor),slot,height)
+        else:
+            block=_unit(u,slot,height,scale*1.8)
+        blocks.append(block)
     sizes=[_bounds(b) for b in blocks]
     used=sum(b[2]-b[0] for b in sizes)+gap*(len(blocks)-1)
     row_h=max(b[3]-b[1] for b in sizes)
@@ -548,7 +558,7 @@ def _editorial_copy(roles,width,height,scale,gap):
     upper=[u for u in roles['tag'] if u.get('source_upper')]
     lower=[u for u in roles['tag'] if not u.get('source_upper')]
     logo,lh=_logo_row(roles['header'],width,height*.18,scale,gap)
-    kicker,kh=_badge_row(upper,width,height*.13,scale*.82,gap)
+    kicker,kh=_badge_row(upper,width,height*.13,scale*.82,gap,align='left')
     actions,ah=_action_band(lower,roles['action'],width,height*.34,scale,gap,True,align='left')
     reserved=sum(v for v in (lh,kh,ah))
     count=sum(bool(v) for v in (lh,kh,ah))+bool(roles['copy'])
@@ -566,7 +576,36 @@ def _editorial_copy(roles,width,height,scale,gap):
     return _contain(output,width,height)
 
 
+def _banner_actions(units,width,height,scale,gap,banner_width=None):
+    """Keep a plain text CTA on one line when the banner has room for it."""
+    block,used=_row(units,width,height,scale,gap)
+    if len(units)==1 and len(units[0]['items'])==1 and units[0]['items'][0]['type']=='text' and not units[0]['label']:
+        e=block[0]
+        desired=_target_font(units[0]['items'][0],units[0],scale)
+        max_text_width=min(width,(banner_width or width)*.32)
+        natural=_text(e,1e9,desired)[1]
+        chosen=desired
+        if natural>max_text_width:
+            lo,hi=1.,desired
+            for _ in range(18):
+                mid=(lo+hi)/2
+                if _text(e,1e9,mid)[1]<=max_text_width:lo=mid
+                else:hi=mid
+            if lo>=max(12.,desired*.55):chosen=lo
+        natural=_text(e,1e9,chosen)[1]
+        if natural<=max_text_width:
+            e['font_size']=_fit_text(e,natural+chosen*.2,height,chosen)
+            natural=_text(e,1e9,e['font_size'])[1]
+            # Leave room for renderer/font-metric differences after the
+            # cached measurement used by the layout engine.
+            e['width']=min(max_text_width,natural*1.18+e['font_size']*.25)
+            e['height']=min(height,_text(e)[0])
+    return _contain(block,width,height),used
+
+
 def _editorial_split_seed(units,width,height,sw,sh,scale,share=.42,reverse=False):
+    if width/height>=3.2:
+        return _banner_seed(units,width,height,scale,share,reverse,(sw,sh))
     margin,gap=min(width,height)*.05,min(width,height)*.035
     cw,ch=width-2*margin,height-2*margin
     roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
@@ -576,8 +615,8 @@ def _editorial_split_seed(units,width,height,sw,sh,scale,share=.42,reverse=False
     side_header=width/height>=2.4 and bool(roles['header'])
     left=margin;main_width=cw;output=[]
     if side_header:
-        logo_w=cw*.15
-        brand,bh=_logo_row(roles['header'],logo_w,available*.75,scale,gap)
+        logo_w=max(cw*.09,min(cw*.16,available*.55))
+        brand,bh=_logo_row(roles['header'],logo_w,available*.75,scale,gap,(sw,sh),fill=True)
         output.extend(_shift(brand,left,top+(available-bh)/2))
         left+=logo_w+gap;main_width-=logo_w+gap
     art_left=bool(roles['visual']) and sum((u['bounds'][0]+u['bounds'][2])/2 for u in roles['visual'])/len(roles['visual'])<sw*.45
@@ -615,22 +654,31 @@ def _reflow(units,width,height,sw,sh,mode,share,scale):
     roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
            for r in ('copy','header','footer','visual','tag','action','decoration')}
     upper=[u for u in roles['tag'] if u['bounds'][1]<sh*.45 and width/height<1.35]
-    roles['header']+=upper
+    vertical_flow=width/height<1.35
+    upper_row=upper if vertical_flow else []
+    if not vertical_flow:
+        roles['header']+=upper
     roles['tag']=[u for u in roles['tag'] if u not in upper]
     side_header=width/height>=2.4 and bool(roles['header'])
-    header,hh=_row([] if side_header else roles['header'],cw,ch*.13,scale,gap)
-    footer,fh=_footer_band(roles['footer'],cw,ch*.10,scale,gap*.6)
-    labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*.20,scale,gap,width/height<1.3)
-    reserved=hh+fh+lh+gap*sum(bool(v) for v in (hh,fh,lh))
-    if reserved>ch*.53:
-        shrink=ch*.53/reserved
-        header,hh=_row([] if side_header else roles['header'],cw,ch*.13,scale*shrink,gap*shrink)
-        footer,fh=_footer_band(roles['footer'],cw,ch*.10,scale*shrink,gap*shrink*.6)
-        labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*.20,scale*shrink,gap*shrink,width/height<1.3)
+    compact_bands=.75<=width/height<=1.3
+    header,hh=_row([] if side_header else roles['header'],cw,ch*(.09 if compact_bands else .13),scale,gap)
+    kicker,kh=_badge_row(upper_row,cw,ch*.09,scale*.82,gap,align='center')
+    footer,fh=_footer_band(roles['footer'],cw,ch*(.06 if compact_bands else .10),scale,gap*.6)
+    labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.11 if compact_bands else .20),scale,gap,width/height<1.3)
+    reserved=hh+kh+fh+lh+gap*sum(bool(v) for v in (hh,kh,fh,lh))
+    reserved_limit=ch*(.34 if compact_bands else .53)
+    if reserved>reserved_limit:
+        shrink=reserved_limit/reserved
+        header,hh=_row([] if side_header else roles['header'],cw,ch*(.09 if compact_bands else .13),scale*shrink,gap*shrink)
+        kicker,kh=_badge_row(upper_row,cw,ch*.09,scale*.82*shrink,gap*shrink,align='center')
+        footer,fh=_footer_band(roles['footer'],cw,ch*(.06 if compact_bands else .10),scale*shrink,gap*shrink*.6)
+        labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.11 if compact_bands else .20),scale*shrink,gap*shrink,width/height<1.3)
     top,bottom=margin,height-margin
     output=[]
     if hh:
         output.extend(_shift(header,margin,top)); top+=hh+gap
+    if kh:
+        output.extend(_shift(kicker,margin,top)); top+=kh+gap
     if fh:
         bottom-=fh; output.extend(_shift(footer,margin,bottom)); bottom-=gap
     if lh:
@@ -786,32 +834,89 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
              for r in ('header','copy','action','tag','visual','footer','decoration')}
     footer, fh = _footer_band(roles['footer'], cw, ch*.12, scale, gap)
     available = ch-fh-(gap if fh else 0)
-    categories = [('header', .13), ('copy', .53), ('action', .17), ('visual', hero_share)]
+    categories = [('header', .16), ('copy', .50), ('action', .34)]
+    if roles['visual']:
+        protected_right=any(u.get('corner_callout') and (u['bounds'][0]+u['bounds'][2])/2>(source_size or (width,height))[0]/2 for u in roles['decoration']) or any(u.get('footer_anchor')=='right' for u in roles['footer'])
+        if protected_right:
+            categories = [('header', .06), ('copy', .47), ('action', .16), ('visual', max(hero_share,.31))]
+        else:
+            categories = [('header', .12), ('copy', .36), ('action', .24), ('visual', max(hero_share,.28))]
     if reverse:
-        categories = [('header', .13), ('visual', hero_share), ('copy', .53), ('action', .17)]
+        categories = ([('header', .06), ('visual', max(hero_share,.31)), ('copy', .47), ('action', .16)]
+                      if roles['visual'] and protected_right else
+                      [('header', .12), ('visual', max(hero_share,.28)), ('copy', .36), ('action', .24)]
+                      if roles['visual'] else categories)
     active = [(key, weight) for key, weight in categories if roles[key]]
     total = sum(weight for _, weight in active) or 1
     usable = cw-gap*max(0, len(active)-1)
-    output, cursor = [], margin
+    slot_widths={key:usable*weight/total for key,weight in active}
+    if any(u['semantic']=='logo' for u in roles['header']) and len(active)>1:
+        logo_min=max(cw*.09,min(cw*.16,available*.55))
+        logo_width=min(usable,max(slot_widths.get('header',0),logo_min))
+        other_weight=sum(weight for key,weight in active if key!='header') or 1
+        slot_widths['header']=logo_width
+        for key,weight in active:
+            if key!='header':
+                slot_widths[key]=(usable-logo_width)*weight/other_weight
+    output, blocks = [], []
     for key, weight in active:
-        w = usable*weight/total
+        w = slot_widths[key]
         if key == 'copy':
             local_roles={**roles,'header':[],'action':[],'visual':[],'footer':[],'decoration':[]}
             block=_editorial_copy(local_roles,w,available,scale,gap)
-            _,_,bw,bh=_bounds(block)
-            output.extend(_move(block,cursor,margin+(available-bh)/2))
         elif key == 'header':
-            block,used=_logo_row(roles[key],w,available*.80,scale,gap)
-            output.extend(_shift(block,cursor,margin+(available-used)/2))
+            block,used=_logo_row(roles[key],w,max(available*.80,available*.70),scale,gap,source_size,fill=True)
         elif key == 'visual':
             block = _visuals(roles[key], w, available, scale, gap)
-            output.extend(_move(block, cursor+(w-_bounds(block)[2])/2, margin+(available-_bounds(block)[3])/2))
         else:
-            block, used = _row(roles[key], w, available*.85, scale, gap)
-            output.extend(_shift(block, cursor, margin+(available-used)/2))
-        cursor += w+gap
+            block, used = _banner_actions(roles[key], w, available*.85, scale, gap,cw)
+        if block:
+            box=_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
+            blocks.append((key,block,bw,bh,box))
+    right_clear=width-margin
+    for u in roles['decoration']:
+        if not u.get('corner_callout'):
+            continue
+        if source_size and (u['bounds'][0]+u['bounds'][2])/2<=source_size[0]/2:
+            continue
+        callout=_callout_block(u,width,height,*(source_size or (width,height)))
+        cb=_bounds(callout);edge=min(width,height)*.025
+        right_clear=min(right_clear,width-edge-(cb[2]-cb[0])-gap)
+    right_footers=[u for u in roles['footer'] if u.get('footer_anchor')=='right']
+    if right_footers:
+        footer_ids={e['id'] for u in right_footers for e in u['items']}
+        fb=_bounds([e for e in footer if e['id'] in footer_ids]) if any(e['id'] in footer_ids for e in footer) else None
+        if fb:
+            right_clear=min(right_clear,fb[0]-gap)
+    # Pack measured artwork/text extents. A tight left-aligned copy column
+    # must not reserve half the banner as invisible whitespace.
+    sum_bw=sum(row[2] for row in blocks)
+    pack_width=min(cw,max(0,right_clear-margin))
+    if len(blocks)>=3:
+        gap_x=max(gap,(pack_width-sum_bw)/max(1,len(blocks)-1))
+        cursor=margin
+    else:
+        gap_x=min(pack_width*.08,max(gap,(pack_width-sum_bw)/max(1,len(blocks)+1)))
+        occupied=sum_bw+gap_x*max(0,len(blocks)-1)
+        cursor=margin+max(0,(pack_width-occupied)/2)
+    for index,(key,block,bw,bh,box) in enumerate(blocks):
+        if key=='visual' and index==len(blocks)-1 and right_clear<width-margin:
+            available_slot=max(.001,right_clear-(cursor+gap))
+            if available_slot<bw:
+                block=_visuals(roles['visual'],available_slot,available,scale,gap)
+                box=_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
+                gap_x=min(gap_x,max(0,available_slot-bw))
+                occupied=sum(row[2] for row in blocks if row[0]!='visual')+bw+gap_x*max(0,len(blocks)-1)
+                if len(blocks)>=3:
+                    cursor=margin+sum(row[2]+gap_x for row in blocks[:index])
+                else:
+                    cursor=margin+max(0,(pack_width-occupied)/2)+sum(row[2]+gap_x for row in blocks[:index])
+        px=cursor-box[0]
+        py=margin+(available-bh)/2-box[1]
+        output.extend(_move(block,px,py))
+        cursor+=bw+gap_x
     if roles['tag'] and not roles['copy']:
-        tags, _ = _row(roles['tag'], cw, available*.2, scale*.8, gap)
+        tags, _ = _row(roles['tag'], cw, available*.2, scale*.8, gap,align='left')
         output.extend(_shift(tags, margin, margin))
     if footer:
         output.extend(_shift(footer, margin, height-margin-fh))
@@ -826,10 +931,8 @@ def _stack_seed(units, width, height, scale, visual_share, hero_first, source_si
     # Use the existing text-aware packing mechanics, but keep top badges out
     # of the CTA row and preserve headline/body order independently of grouping.
     sw, sh = source_size
-    tags = [u for u in working if u['role'] == 'tag' and u['bounds'][1]<sh*.45]
-    # Remove top tags temporarily from the bottom row; place them with header.
-    for u in tags:
-        u['role'] = 'header'
+    # `_reflow` gives upper tags their own centered kicker row. Keep their
+    # semantic role intact so they cannot shift a source-centered logo.
     return _reflow(working,width,height,sw,sh,'visual-first' if hero_first else 'copy-first',visual_share,scale)
 
 
@@ -1163,12 +1266,33 @@ def _text_right_limit(unit,box,records,width,height):
     return max(box[2],limit)
 
 
+def _banner_vertical_neighbor(unit,box,records):
+    """Whether a unit shares a copy column with another vertically stacked unit."""
+    left,top,right,bottom=box
+    for other,items in records:
+        if other is unit or other['role'] not in ('header','copy','tag','action','visual'):
+            continue
+        other_box=_bounds(items)
+        overlap=max(0,min(right,other_box[2])-max(left,other_box[0]))
+        if overlap>=min(right-left,other_box[2]-other_box[0])*.2:
+            return True
+    return False
+
+
+def _banner_centerline(records,width,height):
+    margin=min(width,height)*.05
+    footer_tops=[_bounds(items)[1] for unit,items in records if unit['role']=='footer']
+    bottom=min(footer_tops)-min(width,height)*.035 if footer_tops else height-margin
+    return (margin+max(margin,bottom))/2
+
+
 def _energy_terms(elements, units, source, width, height, desired):
     records = _records(elements,units)
     boxes = [_bounds(items) for _,items in records]
+    state=_aspect_state(source,width,height)
     terms = dict(overlap=0.,boundary=0.,text_fit=0.,readability=0.,balance=0.,
                  hierarchy=0.,alignment=0.,spacing=0.,canvas_use=0.,source_fidelity=0.)
-    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.)
+    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.,banner_action_stack=0.,banner_gap_evenness=0.,banner_centering=0.)
     masses=[]
     for i,((u,items),box) in enumerate(zip(records,boxes)):
         x,y,r,b=box; area=max(1e-9,(r-x)*(b-y))
@@ -1204,10 +1328,23 @@ def _energy_terms(elements, units, source, width, height, desired):
             source_box=u['bounds'];source_share=(source_box[2]-source_box[0])*(source_box[3]-source_box[1])/(source['canvas']['width']*source['canvas']['height'])
             floor=source_share*.45
             terms['hero_prominence']+=max(0,(floor-area/(width*height))/max(1e-9,floor))**2
+            if state['flow'] in ('square','portrait','story','landscape'):
+                source_height=(source_box[3]-source_box[1])/source['canvas']['height']
+                target_height=(b-y)/height
+                minimum=max(source_height*.72,{'square':.42,'portrait':.27,'story':.25,'landscape':.28}[state['flow']])
+                shortfall=max(0,(minimum-target_height)/max(.01,minimum))
+                terms['hero_prominence']+=shortfall if state['flow']=='square' else shortfall**2
         if u['semantic']=='logo' and width/height>=2.4:
             old=u['bounds'];ratio=(old[2]-old[0])/max(1e-9,old[3]-old[1])
+            min_h=min(height*.22,(old[3]-old[1])*desired*.70)
+            min_w=min(width*.055,(old[2]-old[0])*desired*.70)
+            terms['brand_visibility']+=max(0,(min_h-(b-y))/max(1,min_h))**2
+            terms['brand_visibility']+=max(0,(min_w-(r-x))/max(1,min_w))**2
             wanted=min(height*.60,width*.15/max(1e-9,ratio),(old[3]-old[1])*desired*1.8)
             terms['brand_visibility']+=max(0,(wanted-(b-y))/max(1,wanted))**2
+        if state['flow']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
+            center=(y+b)/2
+            terms['banner_centering']+=((center-_banner_centerline(records,width,height))/height)**2
         if _axis_active(u,source,width,height):
             terms['axial']+=((x+r)/2/width-.5)**2*(2 if u['semantic'] in ('logo','hero','headline','cta') else 1)
         if u.get('footer_anchor') in ('left','right'):
@@ -1232,7 +1369,6 @@ def _energy_terms(elements, units, source, width, height, desired):
             original_ratio=max(e.get('font_size',1) for e in a['items'])/max(e.get('font_size',1) for e in b['items'])
             if original_ratio>1.25:
                 terms['hierarchy']+=max(0,min(original_ratio,1.6)-af/max(1,bf))
-    state=_aspect_state(source,width,height)
     if width/height>=1.35:
         left_copy=[b for (u,items),b in zip(records,boxes) if u['role']=='copy' and any(e.get('text_align','left')=='left' for e in items)]
         copy_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='copy']
@@ -1241,14 +1377,36 @@ def _energy_terms(elements, units, source, width, height, desired):
             for (u,_),b in zip(records,boxes):
                 if u['role']=='tag' and u.get('source_upper'):
                     terms['hierarchy']+=max(0,(b[3]-copy_top)/height)
-        if left_copy and width/height<3.2:
+        if left_copy:
             axis=min(b[0] for b in left_copy)
-            bands=[left_copy]
-            bands.append([b for (u,_),b in zip(records,boxes) if u['role']=='action'])
-            for upper in (True,False):
-                bands.append([b for (u,_),b in zip(records,boxes) if u['role']=='tag' and bool(u.get('source_upper'))==upper])
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in left_copy)
-            terms['column_alignment']+=sum(abs(min(b[0] for b in band)-axis)/width for band in bands[1:] if band)
+            tags=[b for (u,_),b in zip(records,boxes) if u['role']=='tag']
+            terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in tags)
+            if state['flow']!='banner':
+                actions=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
+                terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in actions)
+    if state['flow']=='banner':
+        copy_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='copy']
+        action_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
+        tag_count=sum(u['role']=='tag' for u,_ in records)
+        if len(copy_boxes)+len(action_boxes)+tag_count>=3:
+            for action in action_boxes:
+                aw=max(1.,action[2]-action[0])
+                for copy in copy_boxes:
+                    overlap=max(0.,min(action[2],copy[2])-max(action[0],copy[0]))
+                    terms['banner_action_stack']+=overlap/min(aw,max(1.,copy[2]-copy[0]))
+        columns=[]
+        for roles in ({'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}):
+            member_boxes=[box for (u,_),box in zip(records,boxes)
+                          if u['semantic'] in roles or roles=={'headline','subheading','body','kicker'} and u['role']=='tag']
+            if member_boxes:
+                columns.append((min(box[0] for box in member_boxes),max(box[2] for box in member_boxes)))
+        columns.sort()
+        gaps=[b[0]-a[1] for a,b in zip(columns,columns[1:])]
+        if len(gaps)>1:
+            mean=sum(gaps)/len(gaps)
+            normalizer=max(min(width,height)*.04,abs(mean),1.)
+            terms['banner_gap_evenness']=sum(((gap-mean)/normalizer)**2 for gap in gaps)/len(gaps)
     def role_bounds(roles):
         return _bounds([e for (u,items) in records if u['semantic'] in roles for e in items])
     flow_roles=[{'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}]
@@ -1281,7 +1439,7 @@ def _energy_terms(elements, units, source, width, height, desired):
 
 _ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
-                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.,hero_prominence=140.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.)
+                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.,hero_prominence=210.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=8.,banner_centering=80.)
 
 
 def _energy(elements,units,source,width,height,desired):
@@ -1313,6 +1471,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
     first reduce hard-constraint violations, including missing separation gaps.
     """
     rng=Random(seed)
+    state=_aspect_state(source,width,height)
     current=deepcopy(elements)
     current_energy=_energy(current,units,source,width,height,desired)
     current_feasible=_feasible(current,units,width,height)
@@ -1333,6 +1492,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
         proposal=deepcopy(block)
         if motion<2:
             axis=motion
+            current_records=_records(current,units)
             extent=width if axis==0 else height
             old=x if axis==0 else y
             size=r-x if axis==0 else b-y
@@ -1349,6 +1509,13 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
                 target=margin if u['footer_anchor']=='left' else width-margin-size
             elif axis==0 and _axis_active(u,source,width,height) and u['semantic'] in ('logo','hero'):
                 target=(width-size)/2
+            elif axis==0 and state['flow'] in ('banner','landscape') and u['role'] in ('copy','tag'):
+                is_left_column=u['role']=='tag' or any(e.get('text_align')=='left' for e in block)
+                anchors=[_bounds(other)[0] for v,other in current_records if v is not u and v['role'] in ('copy','tag')
+                         and (v['role']=='tag' or any(e.get('text_align')=='left' for e in other))]
+                target=min(anchors,key=lambda value:abs(value-old)) if is_left_column and anchors else old
+            elif axis==1 and state['flow']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
+                target=_banner_centerline(current_records,width,height)-size/2
             else:
                 target=min(targets,key=lambda v:abs(v-old)) if targets and rng.random()<.55 else old+rng.uniform(-1,1)*extent*(.04*cooling+.002)
             proposal=_move(proposal,target if axis==0 else x,target if axis==1 else y)
@@ -1368,6 +1535,11 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             proposal=_move(proposal,left,y)
         else:
             factor=rng.choice((.95,1.05))
+            if u['semantic']=='logo' and factor<1:
+                source_height=u['bounds'][3]-u['bounds'][1]
+                minimum=min(height*.28,source_height*desired*.85)
+                if b-y<minimum:
+                    factor=1.05
             proposal=_scale(proposal,factor)
             left=(x+r-(r-x)*factor)/2
             if u.get('footer_anchor') in ('left','right'):
@@ -1581,7 +1753,8 @@ def _adapt_with_diagnostics(source,target_canvas):
         seeds.append(dict(name='left-hero-banner',elements=_banner_seed(units,width,height,desired*1.15,.24,True,source_size=(sw,sh))))
     if state['flow'] in ('story','portrait','square'):
         for hero_first in (True,False):
-            for share in (.34,.48):
+            shares=(.42,.52,.64,.72,.82) if .75<=width/height<=1.3 else (.34,.42,.48,.52)
+            for share in shares:
                 seeds.append(dict(name=f'semantic-stack-{hero_first}-{share}',elements=_stack_seed(units,width,height,desired*1.15,share,hero_first,(sw,sh))))
     if context['affinities']:
         seeds.append(dict(name='affiliated-features',elements=_affiliated_seed(units,context,width,height,sw,sh,desired)))

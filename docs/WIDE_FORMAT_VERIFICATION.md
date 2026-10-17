@@ -43,6 +43,28 @@ or catalogue-size lookup drives layout decisions.
    prompts for each image. This avoids
    geometric squashing; it does not establish aesthetic-scoring accuracy.
 
+## Banner and square refinements
+
+The four-point follow-up packs banner columns by measured rendered bounds
+instead of unused percentage slots. Plain-text CTAs get a single-line fit
+attempt within 32% of the banner width, including a safety allowance for
+renderer font metrics. At aspect ratios of 3.2 and above, CTA units use their
+own inline column after copy and before hero art. A banner energy term penalizes
+action/copy horizontal overlap when the layout would otherwise form three or
+more vertical tiers.
+
+Square candidates include larger visual shares and reserve less space for
+header, footer and badge/CTA bands. Hero prominence compares target height as
+well as area, so a large headline cannot win merely by reducing a square hero
+to a small icon. When a wide banner has a right corner callout or right-anchored
+footer image, the hero is packed inward and can grow without crossing that
+corner content.
+
+Visual review of the final run confirmed a single-line Level 1 CTA at both
+1600×400 and 728×90, a separate CTA column for the Level 2 leaderboard, a
+larger Level 3 square hero, and a Level 3 web-banner hero that clears the
+corner callout.
+
 ## Reproduce verification
 
 Host tests and model-free format matrix:
@@ -64,7 +86,7 @@ docker run --rm --platform linux/amd64 --network none \
   -v "$PWD/scripts:/app/scripts:ro" \
   --entrypoint python my-chameleon-engine -u \
   scripts/verify_layout_formats.py --require-vision \
-  --output /app/output/format-verification-vision-final
+  --output /app/output/format-verification-docker-final
 ```
 
 The development verification script is mounted separately. The normal scored
@@ -77,7 +99,7 @@ It saves actual PNGs, official-format JSON and separate diagnostics/summary.
 
 ## Recorded checks
 
-- 20 host regression tests passed, including nine new layout/preprocessing
+- 24 host regression tests passed, including new layout/preprocessing
   cases and the existing renderer-export checks. The model-absent test now
   explicitly simulates absence instead of depending on machine setup.
 - All 15 host combinations passed, with repeat-output determinism confirmed.
@@ -85,11 +107,11 @@ It saves actual PNGs, official-format JSON and separate diagnostics/summary.
   the earlier README estimate of 370 MB. Loading and inference succeeded with
   networking disabled. Cold loading measured about 7.5 seconds in this
   linux/amd64 container on the local machine; this is not a latency guarantee.
-- Final offline vision matrix: **15/15 passed**, repeat-output determinism
+- Final Docker vision-scored format matrix (network disabled): **15/15 passed**, repeat-output determinism
   confirmed, and SigLIP used in **13/15** cases. The two unchanged square cases
   had fewer than two competitive candidates and correctly skipped reranking.
   Results are recorded in
-  `output/format-verification-vision-final/summary.json`.
+  `output/format-verification-docker-final/summary.json`.
   The earlier `output/format-verification-vision/` folder was an interrupted
   intermediate run before final ranking adjustments; do not use it as the
   verification summary.

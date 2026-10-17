@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -15,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from engine.resize import resize, _text, _bounds
 from engine.main import self_check
+
+LIGHTBOX_SHORT_SIDE = 1080
+LIGHTBOX_MAX_PIXELS = 40_000_000
+LIGHTBOX_MAX_SIDE = 24_000
 
 
 def validate_task(task):
@@ -81,14 +87,47 @@ def adapt_preview(task):
                 warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3))
 
 
+def render_lightbox(design):
+    """Render a detail-view copy with a 1080px minimum short side when safe."""
+    from renderer.converter.convert import render_design_to_png
+
+    lightbox_design = deepcopy(design)
+    width = design['canvas']['width']
+    height = design['canvas']['height']
+    longest = max(width, height)
+    shortest = min(width, height)
+    scale = min(
+        max(1.0, LIGHTBOX_SHORT_SIDE / shortest),
+        math.sqrt(LIGHTBOX_MAX_PIXELS / (width * height)),
+        LIGHTBOX_MAX_SIDE / longest,
+    )
+
+    if scale > 1:
+        lightbox_design['canvas']['width'] = round(width * scale)
+        lightbox_design['canvas']['height'] = round(height * scale)
+        for element in lightbox_design['elements']:
+            for key in ('x', 'y', 'width', 'height', 'font_size', 'letter_spacing',
+                        'corner_radius', 'stroke_width'):
+                if isinstance(element.get(key), (int, float)):
+                    element[key] *= scale
+
+    max_size = max(lightbox_design['canvas']['width'], lightbox_design['canvas']['height'])
+    with TemporaryDirectory(prefix='magicanvas-lightbox-') as directory:
+        path = Path(directory) / 'detail.png'
+        render_design_to_png(lightbox_design, ROOT/'brand_kit'/'assets', path, max_size=max_size)
+        return path.read_bytes(), lightbox_design['canvas']
+
+
 class Handler(BaseHTTPRequestHandler):
-    def reply(self, status, data, kind='application/json'):
+    def reply(self, status, data, kind='application/json', headers=None):
         body = json.dumps(data).encode() if kind == 'application/json' else data
         self.send_response(status)
         self.send_header('Content-Type', kind)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
         self.end_headers()
         self.wfile.write(body)
 
@@ -97,14 +136,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/samples':
             samples = [dict(name=p.stem, task=json.loads(p.read_text())) for p in sorted((ROOT/'input').glob('*.json'))]
             return self.reply(200, samples)
-        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/theme.mjs': ('theme.mjs', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+        files = {
+            '/': ('index.html', 'text/html; charset=utf-8'),
+            '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+            '/chameleon-loader.mjs': ('chameleon-loader.mjs', 'text/javascript; charset=utf-8'),
+            '/theme.mjs': ('theme.mjs', 'text/javascript; charset=utf-8'),
+            '/style.css': ('style.css', 'text/css; charset=utf-8'),
+        }
         if path in files:
             name, kind = files[path]
             return self.reply(200, (Path(__file__).parent/name).read_bytes(), kind)
         self.reply(404, dict(error='Not found'))
 
     def do_POST(self):
-        if urlparse(self.path).path != '/api/adapt':
+        path = urlparse(self.path).path
+        if path not in ('/api/adapt', '/api/lightbox'):
             return self.reply(404, dict(error='Not found'))
         # The dev server is loopback-only; accept same-origin browser requests.
         origin = self.headers.get('Origin')
@@ -116,6 +162,16 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > 4 * 1024 * 1024:
                 return self.reply(413, dict(error='Task JSON must be smaller than 4 MB.'))
             task = json.loads(self.rfile.read(length))
+            if path == '/api/lightbox':
+                design = task.get('design') if isinstance(task, dict) else None
+                if not isinstance(design, dict):
+                    raise ValueError('Expected a design to render for the lightbox.')
+                source, _ = validate_task({'source': design, 'target_canvas': design.get('canvas', {})})
+                png, canvas = render_lightbox(source)
+                return self.reply(200, png, 'image/png', {
+                    'X-Image-Width': canvas['width'],
+                    'X-Image-Height': canvas['height'],
+                })
             result = adapt_preview(task)
         except (ValueError, TypeError, KeyError) as exc:
             return self.reply(400, dict(error=str(exc)))

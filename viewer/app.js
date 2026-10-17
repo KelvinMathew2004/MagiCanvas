@@ -1,9 +1,23 @@
 import { paletteFromSeed, seedFromDesign, themeSeed } from '/theme.mjs';
+import { ChameleonLoader } from '/chameleon-loader.mjs';
 
 const $ = (id) => document.getElementById(id);
 let task, result, samples = [], requestId = 0;
 let backgroundSeed = null;
 const appearance = matchMedia('(prefers-color-scheme: dark)');
+
+let chameleonLoader = null;
+function getLoader() {
+  if (!chameleonLoader && $('loader-stage') && $('chameleon-canvas')) {
+    chameleonLoader = new ChameleonLoader({
+      container: $('loader-stage'),
+      canvas: $('chameleon-canvas'),
+      outputImg: $('output')
+    });
+  }
+  return chameleonLoader;
+}
+
 function applyTheme(seed) {
   backgroundSeed = seed;
   for (const [name, value] of Object.entries(paletteFromSeed(seed, appearance.matches))) {
@@ -41,14 +55,29 @@ async function adapt() {
   const id = ++requestId;
   document.body.classList.add('busy'); $('adapt').disabled = true;
   setStatus('Adapting…');
+
+  const loader = getLoader();
+  if (loader) {
+    loader.start({
+      targetWidth: width,
+      targetHeight: height,
+      sourceDesign: task.source,
+      sourceImg: $('source')
+    });
+  }
+
   try {
     const response = await fetch('/api/adapt', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:task.source, target_canvas:{width,height}})});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Adaptation failed.');
-    if (id !== requestId) return;
+    if (id !== requestId) {
+      loader?.stop();
+      return;
+    }
     result = data;
     void updateTheme(data.source, data.source_png, id);
-    $('source').src = data.source_png; $('output').src = data.output_png;
+    $('source').src = data.source_png;
+    $('output').src = data.output_png;
     $('source-size').textContent = `${data.source.canvas.width} × ${data.source.canvas.height}`;
     $('output-size').textContent = `${width} × ${height}`;
     $('document').textContent = JSON.stringify(data.design, null, 2);
@@ -56,7 +85,17 @@ async function adapt() {
     $('warning-count').textContent = `(${data.warnings.length})`;
     setStatus(`${data.design.elements.length} elements · ${data.seconds}s${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
     ['json','png','bundle','source-preview','output-preview'].forEach(key => $(key).disabled=false);
-  } catch (error) { if (id === requestId) setStatus(error.message, 'error'); }
+
+    // Transition chameleon scale skin into the final rendered design
+    if (loader) {
+      await loader.transitionToResult(data.output_png);
+    }
+  } catch (error) {
+    if (id === requestId) {
+      loader?.stop();
+      setStatus(error.message, 'error');
+    }
+  }
   finally { if (id === requestId) {document.body.classList.remove('busy');$('adapt').disabled=false;} }
 }
 function download(data, name, type) {
@@ -65,6 +104,9 @@ function download(data, name, type) {
 const imageViewer = $('image-viewer');
 const enlargedImage = $('image-viewer-image');
 let actualSize = false;
+let lightboxRequestId = 0;
+let lightboxObjectUrl = null;
+let lightboxFallback = false;
 function fitImage() {
   actualSize = false;
   imageViewer.classList.remove('actual-size');
@@ -78,22 +120,68 @@ function openImageViewer(kind) {
   if (!result) return;
   fitImage();
   const title = kind === 'source' ? 'Original' : 'Adapted';
+  const design = kind === 'source' ? result.source : result.design;
+  const preview = kind === 'source' ? result.source_png : result.output_png;
+  const requestId = ++lightboxRequestId;
+  if (lightboxObjectUrl) {
+    URL.revokeObjectURL(lightboxObjectUrl);
+    lightboxObjectUrl = null;
+  }
   $('image-viewer-title').textContent = title;
   $('image-viewer-size').textContent = '';
+  $('image-viewer-loading').hidden = false;
+  enlargedImage.hidden = true;
+  lightboxFallback = false;
   enlargedImage.alt = `${title} design`;
-  enlargedImage.src = kind === 'source' ? result.source_png : result.output_png;
+  enlargedImage.removeAttribute('src');
   document.body.classList.add('image-viewer-open');
-  imageViewer.showModal();
+  if (!imageViewer.open) imageViewer.showModal();
+
+  fetch('/api/lightbox', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({design})
+  }).then(async response => {
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || 'Could not prepare the HD preview.');
+    }
+    return response.blob();
+  }).then(blob => {
+    if (requestId !== lightboxRequestId || !imageViewer.open) return;
+    lightboxObjectUrl = URL.createObjectURL(blob);
+    enlargedImage.src = lightboxObjectUrl;
+  }).catch(() => {
+    if (requestId === lightboxRequestId && imageViewer.open) {
+      lightboxFallback = true;
+      $('image-viewer-size').textContent = 'HD preview unavailable · showing standard preview';
+      enlargedImage.src = preview;
+    }
+  });
 }
 enlargedImage.addEventListener('load', () => {
-  $('image-viewer-size').textContent = `${enlargedImage.naturalWidth} × ${enlargedImage.naturalHeight} px`;
+  $('image-viewer-size').textContent = `${lightboxFallback ? 'Standard preview · ' : ''}${enlargedImage.naturalWidth} × ${enlargedImage.naturalHeight} px`;
+  if (actualSize) {
+    enlargedImage.style.width = `${enlargedImage.naturalWidth}px`;
+    enlargedImage.style.height = `${enlargedImage.naturalHeight}px`;
+  }
+  enlargedImage.hidden = false;
+  $('image-viewer-loading').hidden = true;
 });
 $('source-preview').addEventListener('click', () => openImageViewer('source'));
 $('output-preview').addEventListener('click', () => openImageViewer('output'));
 $('image-viewer-close').addEventListener('click', () => imageViewer.close());
 imageViewer.addEventListener('close', () => {
+  lightboxRequestId++;
   document.body.classList.remove('image-viewer-open');
   enlargedImage.removeAttribute('src');
+  enlargedImage.hidden = true;
+  $('image-viewer-loading').hidden = false;
+  $('image-viewer-size').textContent = '';
+  if (lightboxObjectUrl) {
+    URL.revokeObjectURL(lightboxObjectUrl);
+    lightboxObjectUrl = null;
+  }
   fitImage();
 });
 imageViewer.addEventListener('click', event => {

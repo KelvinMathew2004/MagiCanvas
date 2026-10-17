@@ -5,8 +5,8 @@ from pathlib import Path
 import unittest
 from PIL import Image
 
-from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed,
-                           _action_band, _callout_block, _energy_terms)
+from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed, _banner_seed,
+                           _action_band, _callout_block, _energy_terms, _stack_seed, _text)
 from engine.vision import _letterbox_square
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -33,15 +33,14 @@ class LayoutMechanicsTests(unittest.TestCase):
         self.assertLessEqual(after['width']/before['width'],.22*1.8+1e-6)
         self.assertAlmostEqual(after['width']/after['height'],before['width']/before['height'])
 
-    def test_split_keeps_upper_badge_and_cta_with_copy(self):
+    def test_banner_keeps_upper_badge_with_copy_and_cta_in_inline_column(self):
         source=sample(2);units=_analyze(source)[1];before=deepcopy(units)
         elements=_editorial_split_seed(units,1600,400,source['canvas']['width'],source['canvas']['height'],.75,.42)
         by_id={e['id']:e for e in elements}
         def box(role):
             return _bounds([by_id[e['id']] for u in units if u['role']==role for e in u['items']])
         copy=box('copy');action=box('action')
-        self.assertAlmostEqual(copy[0],action[0],places=5)
-        self.assertLessEqual(copy[3],action[1]+1e-6)
+        self.assertGreaterEqual(action[0],copy[2]-1e-6)
         upper=[u for u in units if u['role']=='tag' and u.get('source_upper')]
         self.assertTrue(upper)
         for u in upper:
@@ -49,6 +48,47 @@ class LayoutMechanicsTests(unittest.TestCase):
             self.assertAlmostEqual(badge[0],copy[0],places=5)
             self.assertLess(badge[3],copy[1])
         self.assertEqual(units,before)
+
+    def test_warmup_banner_packs_real_widths_and_keeps_text_cta_single_line(self):
+        source=sample(1);units=_analyze(source)[1]
+        for width,height in ((1600,400),(728,90)):
+            with self.subTest(size=(width,height)):
+                elements=_banner_seed(units,width,height,1.1,.2,False,(1080,1080))
+                by_id={e['id']:e for e in elements}
+                copy=next(u for u in units if u['role']=='copy')
+                action=next(u for u in units if u['role']=='action')
+                cb=_bounds([by_id[e['id']] for e in copy['items']])
+                ab=_bounds([by_id[e['id']] for e in action['items']])
+                self.assertGreaterEqual(ab[0],cb[2]-1e-6)
+                self.assertLess(ab[0]-cb[2],width*.15)
+                self.assertEqual(_text(by_id[action['items'][0]['id']])[2],1)
+
+    def test_leaderboard_cta_has_its_own_inline_column(self):
+        source=sample(2);units=_analyze(source)[1]
+        elements=_banner_seed(units,728,90,1.1,.2,False,(1080,1080))
+        by_id={e['id']:e for e in elements}
+        copy=[u for u in units if u['role']=='copy']
+        action=next(u for u in units if u['role']=='action')
+        cb=_bounds([by_id[e['id']] for u in copy for e in u['items']])
+        ab=_bounds([by_id[e['id']] for e in action['items']])
+        self.assertGreaterEqual(ab[0],cb[2]-1e-6)
+        baseline=_energy_terms(elements,units,source,728,90,1)['banner_action_stack']
+        stacked=deepcopy(elements)
+        stacked_by_id={e['id']:e for e in stacked}
+        for item in action['items']:
+            stacked_by_id[item['id']]['x']=cb[0]
+        self.assertGreater(_energy_terms(stacked,units,source,728,90,1)['banner_action_stack'],baseline)
+
+    def test_wide_hero_clears_right_corner_content_and_uses_height(self):
+        source=sample(3);units=_analyze(source)[1]
+        elements=_banner_seed(units,1600,400,1.1,.3,False,(1080,1350))
+        by_id={e['id']:e for e in elements}
+        hero=next(u for u in units if u['semantic']=='hero')
+        callout=next(u for u in units if u.get('corner_callout'))
+        hb=_bounds([by_id[e['id']] for e in hero['items']])
+        cb=_bounds([by_id[e['id']] for e in callout['items']])
+        self.assertGreaterEqual((hb[3]-hb[1])/400,.64)
+        self.assertLessEqual(hb[2],cb[0]+1e-6)
 
     def test_landscape_peer_tags_stay_separate_from_primary_action(self):
         units=_analyze(sample(3))[1]
@@ -80,6 +120,18 @@ class LayoutMechanicsTests(unittest.TestCase):
         changed=_energy_terms(small,units,source,1080,1350,1)
         self.assertEqual(baseline['hero_prominence'],0)
         self.assertGreater(changed['hero_prominence'],.5)
+
+    def test_square_seed_set_can_expand_hero_beyond_half_the_content_band(self):
+        source=sample(3);units=_analyze(source)[1]
+        hero=next(u for u in units if u['semantic']=='hero')
+        small=_stack_seed(units,1080,1080,1.15,.42,True,(1080,1350))
+        large=_stack_seed(units,1080,1080,1.15,.72,True,(1080,1350))
+        def height(elements):
+            by_id={e['id']:e for e in elements}
+            return _bounds([by_id[e['id']] for e in hero['items']])[3]-_bounds([by_id[e['id']] for e in hero['items']])[1]
+        self.assertGreater(height(large),height(small)*1.35)
+        self.assertGreater(_energy_terms(small,units,source,1080,1080,1)['hero_prominence'],
+                           _energy_terms(large,units,source,1080,1080,1)['hero_prominence'])
 
     def test_avoidable_wrap_penalty_when_horizontal_room_exists(self):
         source=dict(canvas=dict(width=800,height=100),elements=[
