@@ -15,9 +15,6 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from engine.resize import resize, _text, _bounds
-from engine.main import self_check
-
 LIGHTBOX_SHORT_SIDE = 1080
 LIGHTBOX_MAX_PIXELS = 40_000_000
 LIGHTBOX_MAX_SIDE = 24_000
@@ -73,10 +70,15 @@ def render_preview_data(design):
 
 def adapt_preview(task, source_png=None, validated=None):
     import importlib
+    import renderer.converter.assets
     import engine.resize
+    import engine.main
+    importlib.reload(renderer.converter.assets)
     importlib.reload(engine.resize)
+    importlib.reload(engine.main)
     current_adapt = engine.resize._adapt_with_diagnostics
     current_text = engine.resize._text
+    current_self_check = engine.main.self_check
 
     source, target = validated or validate_task(task)
     started = perf_counter()
@@ -87,7 +89,7 @@ def adapt_preview(task, source_png=None, validated=None):
     else:
         source_warnings = []
     output, diagnostics = current_adapt(source, target)
-    warnings = source_warnings + self_check(source, output)
+    warnings = source_warnings + current_self_check(source, output)
     gate = diagnostics.get('quality_gate', {})
     if gate and not gate.get('passed', False):
         faults = ', '.join(gate.get('faults', {}).keys())

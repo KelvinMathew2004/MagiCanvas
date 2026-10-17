@@ -23,10 +23,18 @@ from pathlib import Path
 import re
 from typing import Any
 
+from renderer.converter.assets import visible_content_bounds
+
+
+_ASSETS_DIR=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
+
 
 def _bounds(items):
     boxes = []
     for e in items:
+        if e.get('type')=='image':
+            boxes.append(visible_content_bounds(e,_ASSETS_DIR))
+            continue
         w, h, a = e['width'], e['height'], radians(e.get('rotation', 0))
         rw, rh = abs(w*cos(a))+abs(h*sin(a)), abs(w*sin(a))+abs(h*cos(a))
         cx, cy = e['x']+w/2, e['y']+h/2
@@ -42,6 +50,9 @@ def _overlap(a, b):
 
 
 def _area(e):
+    if e.get('type')=='image':
+        x,y,r,b=_bounds([e])
+        return max(1e-9,(r-x)*(b-y))
     return max(1e-9, e['width']*e['height'])
 
 
@@ -463,26 +474,40 @@ def _copy(units, width, height, scale, gap, align=None):
                         if align=='left':
                             _tighten_text(e)
         sizes = [_bounds(b)[3] for b in blocks]
-        return blocks,sizes,sum(sizes)+gap*max(0,len(blocks)-1)
+        gaps = []
+        for left, right in zip(units, units[1:]):
+            hierarchy_pair = (left.get('semantic') == 'headline' and
+                              right.get('semantic') == 'subheading')
+            gaps.append(gap * (.58 if hierarchy_pair else 1.0))
+        return blocks,sizes,gaps,sum(sizes)+sum(gaps)
     lo,hi = .0001,scale
     for _ in range(16):
         mid = (lo+hi)/2
-        if build(mid)[2] <= height:
+        if build(mid)[3] <= height:
             lo = mid
         else:
             hi = mid
-    blocks,sizes,occupied = build(lo)
+    blocks,sizes,gaps,occupied = build(lo)
     # Impossible low-resolution cases still retain every element. Compress
     # gaps first; a final proportional fit is the last structural fallback.
-    spacing = min(gap, max(0,(height-sum(sizes))/max(1,len(blocks)-1)))
-    if occupied <= height and len(blocks)>1:
-        spacing += min((height-occupied)/(len(blocks)+1),gap*2.5)
-    occupied = sum(sizes)+spacing*max(0,len(blocks)-1)
+    if len(blocks)>1:
+        available=max(0,height-sum(sizes))
+        requested=sum(gaps)
+        if requested>available:
+            gaps=[g*available/max(.001,requested) for g in gaps]
+        elif occupied<=height:
+            # Use some available space, while keeping the headline and its
+            # supporting line visually connected as one copy block.
+            extra=min((height-occupied)/(len(blocks)+1),gap*1.5)
+            gaps=[g+extra*(.55 if units[i].get('semantic')=='headline' and
+                            units[i+1].get('semantic')=='subheading' else 1.0)
+                  for i,g in enumerate(gaps)]
+    occupied=sum(sizes)+sum(gaps)
     cursor,output = max(0,(height-occupied)/2),[]
-    for block,h in zip(blocks,sizes):
+    for i,(block,h) in enumerate(zip(blocks,sizes)):
         w = _bounds(block)[2]
         output.extend(_move(block,0 if align=='left' else (width-w)/2,cursor))
-        cursor += h+spacing
+        cursor += h+(gaps[i] if i<len(gaps) else 0)
     return _contain(output,width,height)
 
 
@@ -559,10 +584,10 @@ def _editorial_copy(roles,width,height,scale,gap):
     lower=[u for u in roles['tag'] if not u.get('source_upper')]
     logo,lh=_logo_row(roles['header'],width,height*.18,scale,gap)
     kicker,kh=_badge_row(upper,width,height*.13,scale*.82,gap,align='left')
-    actions,ah=_action_band(lower,roles['action'],width,height*.34,scale,gap,True,align='left')
+    actions,ah=_action_band(lower,roles['action'],width,height*.38,scale*1.06,gap,True,align='left')
     reserved=sum(v for v in (lh,kh,ah))
     count=sum(bool(v) for v in (lh,kh,ah))+bool(roles['copy'])
-    copy=_copy(roles['copy'],width,max(.001,height-reserved-gap*max(0,count-1)),scale,gap,align='left')
+    copy=_copy(roles['copy'],width,max(.001,height-reserved-gap*max(0,count-1)),scale*1.06,gap,align='left')
     mutable={u['items'][0]['id'] for u in roles['copy']+roles['action']+roles['tag']
              if len(u['items'])==1 and u['items'][0]['type']=='text' and not u['items'][0].get('group_id')}
     output=[];cursor=0
@@ -717,16 +742,48 @@ def _reflow(units,width,height,sw,sh,mode,share,scale):
 
 def _proportional(units,width,height,sw,sh):
     factor=min(width/sw,height/sh)
+    desired=sqrt(width*height/(sw*sh))*1.15
     result=[]
     for u in units:
         block=_contain(_scale(u['items'],factor),width,height)
+        originals={e['id']:e for e in u['items']}
         for e in block:
             if e['type']=='text':
-                e['font_size']=_fit_text(e,e['width'],e['height'],e['font_size'])
+                original=originals[e['id']]
+                target=_target_font(original,u,desired)
+                e['font_size']=_fit_text(e,e['width'],e['height'],max(e['font_size'],target))
         x,y,_,_=u['bounds']; _,_,w,h=_bounds(block)
         px=(width-sw*factor)/2+x*factor; py=(height-sh*factor)/2+y*factor
         result.extend(_move(block,max(0,min(width-w,px)),max(0,min(height-h,py))))
     return result
+
+
+def _repair_copy_hierarchy(elements, units, width, height):
+    """Keep a headline and its supporting line together after geometry repair."""
+    copy=sorted((u for u in units if u['role']=='copy'),key=_semantic_order)
+    by_id={e['id']:e for e in elements}
+    for headline,subhead in zip(copy,copy[1:]):
+        if headline.get('semantic')!='headline' or subhead.get('semantic')!='subheading':
+            continue
+        head=[by_id[e['id']] for e in headline['items'] if e['id'] in by_id]
+        support=[by_id[e['id']] for e in subhead['items'] if e['id'] in by_id]
+        if not head or not support:
+            continue
+        hb,sb=_bounds(head),_bounds(support)
+        if min(hb[2],sb[2])-max(hb[0],sb[0])<=0:
+            continue
+        actual=sb[1]-hb[3]
+        font=min((e.get('font_size',12) for e in head+support if e['type']=='text'),default=12)
+        preferred=max(min(width,height)*.022,font*.65)
+        target=preferred*1.45
+        if actual>target:
+            dy=actual-target
+            old_y=[e['y'] for e in support]
+            for e in support:
+                e['y']-=dy
+            if not _feasible(elements,units,width,height):
+                for e,y in zip(support,old_y):
+                    e['y']=y
 
 
 def _enrich_units(source, units):
@@ -838,7 +895,7 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
     if roles['visual']:
         protected_right=any(u.get('corner_callout') and (u['bounds'][0]+u['bounds'][2])/2>(source_size or (width,height))[0]/2 for u in roles['decoration']) or any(u.get('footer_anchor')=='right' for u in roles['footer'])
         if protected_right:
-            categories = [('header', .06), ('copy', .47), ('action', .16), ('visual', max(hero_share,.31))]
+            categories = [('header', .08), ('copy', .45), ('action', .16), ('visual', max(hero_share,.31))]
         else:
             categories = [('header', .12), ('copy', .36), ('action', .24), ('visual', max(hero_share,.28))]
     if reverse:
@@ -1796,6 +1853,7 @@ def _adapt_with_diagnostics(source,target_canvas):
     for i,candidate in enumerate(feasible[:10]):
         if _feasible(candidate['elements'],units,width,height):
             elements,optimization=_polish(candidate['elements'],units,source,width,height,desired,seed=90210+i,iterations=36)
+            _repair_copy_hierarchy(elements,units,width,height)
         else:
             elements=candidate['elements'];optimization=dict(before=candidate['energy'],after=candidate['energy'],accepted=0,iterations=0)
         optimized.append(dict(name=candidate['name'],elements=elements,energy=_energy(elements,units,source,width,height,desired),optimization=optimization))
