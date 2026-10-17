@@ -1952,6 +1952,36 @@ def _luminance(rgb):
     return sum((v/12.92 if v<=.04045 else ((v+.055)/1.055)**2)*w for v,w in zip(channels,(.2126,.7152,.0722)))
 
 
+def _visual_relationship_context(units,source,width,height):
+    """Compact visual-semantic summary for the image/text judge."""
+    roles={u.get('semantic') for u in units}
+    grouped=[]
+    peer_rows=False
+    for u in units:
+        items=u.get('items',[])
+        group_ids={e.get('group_id') for e in items if e.get('group_id')}
+        if group_ids and len(items)>1:
+            types={e.get('type') for e in items}
+            grouped.append('mixed' if len(types)>1 else next(iter(types),'art'))
+        peer_rows=peer_rows or bool(u.get('peer_ids'))
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    callout_quadrants=[]
+    for u in units:
+        if not u.get('corner_callout'):
+            continue
+        x,y,r,b=u['bounds']
+        vertical='top' if (y+b)/2<sh/2 else 'bottom'
+        horizontal='left' if (x+r)/2<sw/2 else 'right'
+        callout_quadrants.append(f'{vertical}-{horizontal}')
+    bucket=_aspect_state(source,width,height)['bucket']
+    density='dense' if len(units)>=14 else 'moderate' if len(units)>=7 else 'sparse'
+    return dict(roles=sorted(role for role in roles if role),bucket=bucket,density=density,
+                grouped_units=len(grouped),grouped_types=sorted(set(grouped)),
+                repeated_badge_row=peer_rows,
+                callout_quadrants=callout_quadrants,
+                has_footer=any(u.get('role')=='footer' for u in units))
+
+
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
     """Rendered diagnostics plus an optional learned SigLIP perceptual judge.
 
@@ -2019,6 +2049,18 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         if len(shortlist)>=5:break
         if candidate not in shortlist:shortlist.append(candidate)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
+        # Render the source first so it is the reference available before any
+        # adapted candidate is produced or sent to the visual judge.
+        reference_path=Path(directory)/'original.png'
+        reference_image=None
+        try:
+            render_design_to_png(source,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',reference_path,max_size=640)
+            with Image.open(reference_path) as image:
+                reference_image=image.convert('RGB')
+        except Exception:
+            # Source comparison is an optional cue; candidate judging remains
+            # available if an original asset or renderer path is unavailable.
+            pass
         for index,candidate in enumerate(shortlist):
             # All entrants have already passed hard geometry checks. A wider,
             # still bounded band lets perceptual ranking compare meaningful
@@ -2079,7 +2121,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
     heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
-    perceptual=_siglip_rerank(valid,heuristic_cost)
+    relationship_context=_visual_relationship_context(units,source,width,height)
+    perceptual=_siglip_rerank(valid,heuristic_cost,reference_image,relationship_context)
     index=perceptual.get('selected_index')
     selected=valid[index] if index is not None else min(valid,key=heuristic_cost)
     report=dict(used=True,
@@ -2089,7 +2132,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     return selected['candidate'],report
 
 
-def _siglip_rerank(valid, heuristic_cost):
+def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=None):
     """Optional learned SigLIP re-rank among already-valid candidate renders.
 
     Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
@@ -2105,7 +2148,8 @@ def _siglip_rerank(valid, heuristic_cost):
         from engine.vision import score_layouts
     except Exception as exc:
         return dict(used=False,selected_index=None,reason=f'Vision module unavailable: {exc}')
-    result=score_layouts([e['image'] for e in valid])
+    result=score_layouts([e['image'] for e in valid],reference_image=reference_image,
+                         layout_context=layout_context)
     if result is None:
         return dict(used=False,selected_index=None,reason='SigLIP returned no scores')
     scores,note=result
@@ -2231,27 +2275,39 @@ def _adapt_with_diagnostics(source,target_canvas):
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
-    # One bounded, role-aware refinement pass: continue exploring from the
-    # winning composition, then compare that variant against its parent. Roles,
-    # groups, callouts, and hard constraints remain the same; no recursive
-    # generation loop can drift the design or compound a bad classification.
-    refinement=dict(generated=0,accepted=0,used=False)
-    if _feasible(winner['elements'],units,width,height):
-        refined,stats=_polish(winner['elements'],units,source,width,height,desired,
-                              seed=120319,iterations=64)
+    # Run up to two bounded refinement rounds. Each round proposes local
+    # changes from the current best, then compares parent and child against
+    # both the inferred relationship cues and the original rendered design.
+    # Stop early when the judge keeps the parent or the geometry has settled.
+    refinement=dict(generated=0,accepted=0,used=False,rounds=[])
+    for round_index in range(2):
+        if not _feasible(winner['elements'],units,width,height):
+            break
+        parent=winner
+        refined,stats=_polish(parent['elements'],units,source,width,height,desired,
+                              seed=120319+round_index*3571,iterations=48)
         refined_by_id={e['id']:e for e in refined}
         changed=any(any(abs(refined_by_id[old['id']].get(key,0)-old.get(key,0))>.05
                         for key in ('x','y','width','height','font_size'))
-                    for old in winner['elements'] if old['id'] in refined_by_id)
-        refinement.update(generated=1,accepted=stats['accepted'])
-        if changed and _feasible(refined,units,width,height):
-            variant=dict(name=f"refined-{winner['name']}",elements=refined,
-                         energy=_energy(refined,units,source,width,height,desired))
-            refined_winner,refined_visual=_visual_rerank(
-                [winner,variant],backgrounds,units,source,width,height,desired)
-            refinement.update(used=True,winner=refined_winner['name'])
-            visual=dict(refined_visual,first_pass=visual,refinement_judge=refined_visual)
-            winner=refined_winner
+                    for old in parent['elements'] if old['id'] in refined_by_id)
+        refinement['generated']+=1
+        refinement['accepted']+=stats['accepted']
+        round_report=dict(round=round_index+1,accepted=stats['accepted'],used=False)
+        if not changed or not _feasible(refined,units,width,height):
+            refinement['rounds'].append(round_report)
+            break
+        variant=dict(name=f"refined-{parent['name']}",elements=refined,
+                     energy=_energy(refined,units,source,width,height,desired))
+        refined_winner,refined_visual=_visual_rerank(
+            [parent,variant],backgrounds,units,source,width,height,desired)
+        round_report.update(used=True,winner=refined_winner['name'])
+        refinement['rounds'].append(round_report)
+        visual=dict(refined_visual,first_pass=visual,refinement_judge=refined_visual)
+        if refined_winner['name']==parent['name']:
+            break
+        refinement['used']=True
+        refinement['winner']=refined_winner['name']
+        winner=refined_winner
     output=_assemble(winner['elements'],backgrounds,source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],

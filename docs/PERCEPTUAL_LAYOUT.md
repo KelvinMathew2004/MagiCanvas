@@ -32,9 +32,10 @@ output schema fields.
 
 The visual ranker now receives up to five candidates from distinct layout
 families within a bounded energy band; this avoids comparing only proportional
-variants when a split or banner layout is viable. It applies one bounded
-role-aware refinement to the selected layout and compares that variant with its
-parent. The pass is deliberately non-recursive. Source-identified corner
+variants when a split or banner layout is viable. It applies up to two bounded
+role-aware refinements, comparing each variant with its parent against the
+original render and inferred relationship cues; it stops when the parent stays
+best. Source-identified corner
 callouts stay pinned to their corresponding target corner, and banner CTAs
 reserve extra clearance from hero artwork. These are additional soft/layout
 rules, not proof that the ranker understands every asset semantically.

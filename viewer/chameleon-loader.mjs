@@ -37,18 +37,20 @@ function parseColor(str) {
 export function extractPalette(sourceDesign, sourceImgElement) {
   const colors = [];
 
-  // 1. Extract declared colors from design elements
+  // Keep declared colors as palette accents. This preserves vivid brand and
+  // illustration colors that can be underrepresented by a small pixel sample.
   if (sourceDesign && Array.isArray(sourceDesign.elements)) {
     for (const el of sourceDesign.elements) {
-      const candidates = [el.fill_color, el.color, el.stroke_color, el.background_color];
-      for (const c of candidates) {
-        const parsed = parseColor(c);
-        if (parsed) colors.push(parsed);
+      for (const value of [el.fill_color,el.color,el.stroke_color,el.background_color]) {
+        const color = parseColor(value);
+        if (color) colors.push(color);
       }
     }
   }
 
-  // 2. Sample pixel colors from source preview image if available
+  // Add a representative sample from the actual rendered source. The sample
+  // is intentionally varied rather than reduced to only the largest color
+  // regions, which keeps the animation faithful to colorful compositions.
   if (sourceImgElement && sourceImgElement.complete && sourceImgElement.naturalWidth > 0) {
     try {
       const canvas = document.createElement('canvas');
@@ -64,21 +66,12 @@ export function extractPalette(sourceDesign, sourceImgElement) {
         }
       }
     } catch {
-      // Fallback if canvas is tainted
+      // Use declared element colors if the preview cannot be sampled.
     }
   }
-
-  // Organic chameleon palette: turquoise, orange-amber, emerald green, warm rust
-  if (colors.length < 2) {
-    colors.push(
-      [24, 180, 115, 1],
-      [245, 166, 35, 1],
-      [208, 60, 35, 1],
-      [45, 156, 219, 1],
-      [142, 68, 173, 1]
-    );
-  }
-
+  // Organic chameleon palette fallback is used only before the original
+  // preview exists or when the design has no usable declared colors.
+  if (colors.length < 2) colors.push([24,180,115,1],[245,166,35,1],[208,60,35,1],[45,156,219,1],[142,68,173,1]);
   return colors;
 }
 
@@ -117,6 +110,7 @@ export class ChameleonLoader {
     this.state = 'idle'; // 'idle' | 'generating' | 'settling'
     this.blobs = [];
     this.palette = [];
+    this.paletteTransition = null;
     this.startTime = 0;
     this.settleStartTime = 0;
     this.targetImgData = null;
@@ -130,6 +124,7 @@ export class ChameleonLoader {
 
   start({ targetWidth, targetHeight, sourceDesign, sourceImg }) {
     this.palette = extractPalette(sourceDesign, sourceImg);
+    this.paletteTransition = null;
     this.state = 'generating';
     this.startTime = performance.now();
     this.targetImgData = null;
@@ -171,6 +166,24 @@ export class ChameleonLoader {
       this.tick = this.tick.bind(this);
       this.animId = requestAnimationFrame(this.tick);
     }
+  }
+
+  async updateSourcePalette(sourceDesign, sourceImg) {
+    if (sourceImg && !sourceImg.complete) {
+      try { await sourceImg.decode(); } catch { /* Use declared design colors if decoding fails. */ }
+    }
+    const nextPalette = extractPalette(sourceDesign, sourceImg);
+    if (this.state === 'idle' || !this.blobs.length) {
+      this.palette = nextPalette;
+      return;
+    }
+    this.paletteTransition = {
+      from: this.palette,
+      to: nextPalette,
+      start: performance.now(),
+      duration: 420
+    };
+    this.palette = nextPalette;
   }
 
   resizeCanvas() {
@@ -355,10 +368,21 @@ export class ChameleonLoader {
         const pLen = this.palette.length;
         const p1 = this.palette[b.colorIdx % pLen];
         const p2 = this.palette[(b.colorIdx + 1) % pLen];
-
-        r = p1[0] * (1 - norm) + p2[0] * norm;
-        g = p1[1] * (1 - norm) + p2[1] * norm;
-        bCol = p1[2] * (1 - norm) + p2[2] * norm;
+        const sample = (palette) => {
+          const a = palette[b.colorIdx % palette.length];
+          const c = palette[(b.colorIdx + 1) % palette.length];
+          return [0,1,2].map(i => a[i] * (1 - norm) + c[i] * norm);
+        };
+        const nextColor = sample(this.palette);
+        let blend = 1;
+        if (this.paletteTransition) {
+          blend = Math.min(1, (time - this.paletteTransition.start) / this.paletteTransition.duration);
+          const oldColor = sample(this.paletteTransition.from);
+          [r,g,bCol] = nextColor.map((value,i) => oldColor[i] * (1 - blend) + value * blend);
+          if (blend >= 1) this.paletteTransition = null;
+        } else {
+          [r,g,bCol] = nextColor;
+        }
         a = b.opacity;
 
         // Save current color continuously for instantaneous morph snapshot

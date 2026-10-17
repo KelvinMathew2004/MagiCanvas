@@ -60,11 +60,28 @@ def validate_task(task):
     return source, target
 
 
-def adapt_preview(task):
-    source, target = validate_task(task)
+def render_preview_data(design):
+    from renderer.converter.convert import render_design_to_png
+
+    with TemporaryDirectory(prefix='magicanvas-preview-') as directory:
+        path = Path(directory) / 'preview.png'
+        warnings = render_design_to_png(design, ROOT/'brand_kit'/'assets', path,
+                         max_size=max(design['canvas']['width'], design['canvas']['height']))
+        png_data = 'data:image/png;base64,' + base64.b64encode(path.read_bytes()).decode()
+    return png_data, warnings
+
+
+def adapt_preview(task, source_png=None, validated=None):
+    source, target = validated or validate_task(task)
     started = perf_counter()
+    # Render the original before starting the expensive search. The streaming
+    # endpoint sends this preview to the browser immediately, then continues.
+    if source_png is None:
+        source_png, source_warnings = render_preview_data(source)
+    else:
+        source_warnings = []
     output = resize(source, target)
-    warnings = self_check(source, output)
+    warnings = source_warnings + self_check(source, output)
     for e in output['elements']:
         if e['type'] == 'text':
             h, w, lines = _text(e)
@@ -72,19 +89,15 @@ def adapt_preview(task):
                 warnings.append(f"{e['id']}: text may not fit at this resolution.")
             if e['font_size'] < 8:
                 warnings.append(f"{e['id']}: {e['font_size']:.1f}px text is very small. Copy cannot be removed or rewritten under stage-one rules.")
-    # Import failures must be visible; never silently show placeholder boxes.
-    from renderer.converter.convert import render_design_to_png
-    images = []
-    with TemporaryDirectory(prefix='magicanvas-preview-') as directory:
-        for name, design in (('source', source), ('adapted', output)):
-            path = Path(directory) / (name + '.png')
-            # Local exports keep native target pixels, bypassing the renderer's
-            # default 2048px preview cap without modifying the official renderer.
-            warnings.extend(render_design_to_png(design, ROOT/'brand_kit'/'assets', path,
-                            max_size=max(design['canvas']['width'], design['canvas']['height'])))
-            images.append('data:image/png;base64,' + base64.b64encode(path.read_bytes()).decode())
-    return dict(design=output, source=source, source_png=images[0], output_png=images[1],
+    output_png, output_warnings = render_preview_data(output)
+    warnings.extend(output_warnings)
+    return dict(design=output, source=source, source_png=source_png, output_png=output_png,
                 warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3))
+
+
+def _sse_message(event, data):
+    payload=json.dumps(data,separators=(',',':'))
+    return f'event: {event}\ndata: {payload}\n\n'.encode()
 
 
 def render_lightbox(design):
@@ -150,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ('/api/adapt', '/api/lightbox'):
+        if path not in ('/api/adapt', '/api/adapt-stream', '/api/lightbox'):
             return self.reply(404, dict(error='Not found'))
         # The dev server is loopback-only; accept same-origin browser requests.
         origin = self.headers.get('Origin')
@@ -172,6 +185,29 @@ class Handler(BaseHTTPRequestHandler):
                     'X-Image-Width': canvas['width'],
                     'X-Image-Height': canvas['height'],
                 })
+            if path == '/api/adapt-stream':
+                source, target = validate_task(task)
+                source_png, source_warnings = render_preview_data(source)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Connection', 'close')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.end_headers()
+                self.wfile.write(_sse_message('source', dict(source_png=source_png,
+                                                              source_size=source['canvas'])))
+                self.wfile.flush()
+                try:
+                    result = adapt_preview(task, source_png=source_png,
+                                           validated=(source,target))
+                    result['warnings']=list(dict.fromkeys(source_warnings+result['warnings']))
+                    self.wfile.write(_sse_message('adapted', result))
+                    self.wfile.flush()
+                except Exception as exc:
+                    self.wfile.write(_sse_message('error', dict(error=f'Adaptation failed: {exc}')))
+                    self.wfile.flush()
+                self.close_connection=True
+                return
             result = adapt_preview(task)
         except (ValueError, TypeError, KeyError) as exc:
             return self.reply(400, dict(error=str(exc)))

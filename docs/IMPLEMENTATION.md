@@ -69,9 +69,10 @@ network service.
   text-free *diagnostic* rendition measures backing contrast and busyness;
   comparison with the full rendition flags invisible text. Structurally
   different candidates inside a bounded energy band reach the visual ranker,
-  rather than only near-identical geometry winners. One bounded, role-aware
-  refinement pass explores the selected layout and compares it with its parent;
-  refinement does not recurse. The returned document always contains every
+  rather than only near-identical geometry winners. Up to two bounded,
+  role-aware refinement passes compare each variant with its parent using the
+  original-image and relationship cues, stopping when the parent remains best.
+  The returned document always contains every
   original element. Diagnostic renders are temporary.
 - The raster check skips rotated text and canvases above 16 megapixels; if it
   cannot render, retain the best geometry candidate and report the reason.
@@ -80,8 +81,10 @@ network service.
 Deliberate differences from the proposed architecture: no LLM token generation,
 no model downloads at runtime, no training, no SciPy, and no claim of an 80 ms
 runtime. A lightweight SigLIP vision model is used only as an optional, offline
-perceptual *tie-breaker* over already-valid candidate renders (see "SigLIP
-perceptual re-rank" below); it never generates content or alters geometry.
+perceptual judge over already-valid candidate renders (see "SigLIP perceptual
+re-rank" below). It sees the original render, a compact inferred
+role/relationship summary, and each candidate; it never generates content or
+alters geometry.
 Seeded annealing suits discontinuous wrapping and collision topology;
 Cassowary handles each linear placement problem. Intentional source artwork
 layering and within-group overlap are permitted. Arbitrary overlapping text
@@ -95,7 +98,12 @@ Both the output JSON and the rendered PNG are scored, and the PNG is judged by a
 AI evaluator. To better approximate that judgment than the deterministic
 contrast/busyness heuristics alone, a lightweight vision model
 (`google/siglip-base-patch16-224`) ranks the final, already-valid candidate
-renders. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
+renders. The target bucket and estimated content density condition format-aware
+image/text prompts; additional cues cover inferred logo, copy, CTA, artwork,
+grouped-piece, badge-row, and corner-callout relationships. A
+restrained image-embedding similarity to the original render encourages visual
+identity continuity without requiring the adapted composition to copy the
+source. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
 `_siglip_rerank` in `engine/resize.py`.
 
 - **Scope is deliberately narrow.** The model only ranks the bounded visual

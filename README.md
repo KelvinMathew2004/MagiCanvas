@@ -141,8 +141,10 @@ background-busyness-guided candidates, and rendered contrast/busyness checks.
 Banner-only spacing and centering rules stay isolated from regular landscape
 layouts; a separate near-source signal preserves composition when the target
 ratio is similar to the original.
-When the optional local SigLIP weights are installed, it also ranks up to five
-distinct valid layouts and performs one bounded refinement pass. Artwork groups
+When the optional local SigLIP weights are installed, it compares up to five
+distinct valid layouts with the original render, target-format bucket, estimated
+content density, and inferred role/relationship cues, then performs up to two
+bounded refinement passes. Artwork groups
 remain atomic; simple text/backplate pairs can reflow together. The scorer is
 still heuristic, so visual quality needs review on varied designs.
 See [IMPLEMENTATION.md](IMPLEMENTATION.md) for algorithm details and limits.

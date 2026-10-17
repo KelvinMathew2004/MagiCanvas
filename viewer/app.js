@@ -48,13 +48,70 @@ function setTask(value) {
   result = null;
   ['json', 'png', 'bundle', 'source-preview', 'output-preview'].forEach(id => $(id).disabled = true);
 }
+function applyAdaptedResult(data, id, width, height, loader) {
+  result = data;
+  void loader?.updateSourcePalette(data.source, $('source'));
+  void updateTheme(data.source, data.source_png, id);
+  $('source').src = data.source_png;
+  $('output').src = data.output_png;
+  $('source-size').textContent = `${data.source.canvas.width} × ${data.source.canvas.height}`;
+  $('output-size').textContent = `${width} × ${height}`;
+  $('document').textContent = JSON.stringify(data.design, null, 2);
+  $('warnings').replaceChildren(...data.warnings.map(message => {const li=document.createElement('li');li.textContent=message;return li;}));
+  $('warning-count').textContent = `(${data.warnings.length})`;
+  setStatus(`${data.design.elements.length} elements · ${data.seconds}s${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
+  ['json','png','bundle','source-preview','output-preview'].forEach(key => $(key).disabled=false);
+  return loader ? loader.transitionToResult(data.output_png) : Promise.resolve();
+}
+async function readAdaptStream(response, id, width, height, loader) {
+  const reader=response.body?.getReader();
+  if (!reader) throw new Error('The browser could not read the adaptation stream.');
+  const decoder=new TextDecoder();
+  let pending='', completed=false;
+  const handle=async block => {
+    if (!block.trim()) return;
+    let type='message';const dataLines=[];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) type=line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    const payload=JSON.parse(dataLines.join('\n'));
+    if (type==='error') throw new Error(payload.error || 'Adaptation failed.');
+    if (id!==requestId) return;
+    if (type==='source') {
+      result={source:task.source,source_png:payload.source_png,design:null};
+      $('source').src=payload.source_png;
+      $('source-size').textContent=`${payload.source_size.width} × ${payload.source_size.height}`;
+      $('source-preview').disabled=false;
+      await loader?.updateSourcePalette(task.source,$('source'));
+      if (id!==requestId) return;
+      void updateTheme(task.source,payload.source_png,id);
+      setStatus('Original ready · adapting layout…');
+    } else if (type==='adapted') {
+      completed=true;
+      await applyAdaptedResult(payload,id,width,height,loader);
+    }
+  };
+  while (true) {
+    const {value,done}=await reader.read();
+    pending+=decoder.decode(value || new Uint8Array(),{stream:!done}).replaceAll('\r\n','\n');
+    let split;
+    while ((split=pending.indexOf('\n\n'))>=0) {
+      const block=pending.slice(0,split);pending=pending.slice(split+2);
+      await handle(block);
+    }
+    if (done) break;
+  }
+  if (pending.trim()) await handle(pending);
+  if (!completed) throw new Error('The adaptation stream ended before the layout was ready.');
+}
 async function adapt() {
   if (!task) return;
   const width = Number($('width').value), height = Number($('height').value);
   if (![width, height].every(v => Number.isInteger(v) && v > 0)) { setStatus('Enter positive whole-pixel dimensions.', 'error'); return; }
   const id = ++requestId;
   document.body.classList.add('busy'); $('adapt').disabled = true;
-  setStatus('Adapting…');
+  setStatus('Rendering original…');
 
   const loader = getLoader();
   if (loader) {
@@ -67,29 +124,16 @@ async function adapt() {
   }
 
   try {
-    const response = await fetch('/api/adapt', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:task.source, target_canvas:{width,height}})});
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Adaptation failed.');
+    const response = await fetch('/api/adapt-stream', {method:'POST', headers:{'Content-Type':'application/json','Accept':'text/event-stream'}, body:JSON.stringify({source:task.source, target_canvas:{width,height}})});
+    if (!response.ok) {
+      const error=await response.json().catch(()=>({}));
+      throw new Error(error.error || 'Adaptation failed.');
+    }
     if (id !== requestId) {
       loader?.stop();
       return;
     }
-    result = data;
-    void updateTheme(data.source, data.source_png, id);
-    $('source').src = data.source_png;
-    $('output').src = data.output_png;
-    $('source-size').textContent = `${data.source.canvas.width} × ${data.source.canvas.height}`;
-    $('output-size').textContent = `${width} × ${height}`;
-    $('document').textContent = JSON.stringify(data.design, null, 2);
-    $('warnings').replaceChildren(...data.warnings.map(message => {const li=document.createElement('li');li.textContent=message;return li;}));
-    $('warning-count').textContent = `(${data.warnings.length})`;
-    setStatus(`${data.design.elements.length} elements · ${data.seconds}s${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
-    ['json','png','bundle','source-preview','output-preview'].forEach(key => $(key).disabled=false);
-
-    // Transition chameleon scale skin into the final rendered design
-    if (loader) {
-      await loader.transitionToResult(data.output_png);
-    }
+    await readAdaptStream(response,id,width,height,loader);
   } catch (error) {
     if (id === requestId) {
       loader?.stop();

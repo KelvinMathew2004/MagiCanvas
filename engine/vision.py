@@ -100,11 +100,59 @@ def _letterbox_square(image):
     return canvas
 
 
-def score_layouts(images):
+def _relationship_prompts(context):
+    """Turn engine-inferred relationships into visual judging cues."""
+    if not context:
+        return (), ()
+    roles=set(context.get('roles',()))
+    positive=[]
+    negative=[]
+    format_prompts={
+        'banner':('a compact horizontal banner with a readable inline sequence and balanced breathing room',
+                  'a tall stacked poster compressed into a short narrow banner'),
+        'wide':('a wide landscape advertisement with copy and artwork in balanced columns and consistent outer padding',
+                'a wide landscape advertisement with awkwardly scattered sections and uneven gaps'),
+        'square':('a balanced square social graphic with a compact clear hierarchy and even margins',
+                  'a square graphic with content pushed to an edge and large accidental gaps'),
+        'portrait':('a portrait advertisement with a coherent vertical reading flow and comfortable spacing',
+                    'a portrait advertisement with its call to action stranded at the bottom far from related copy'),
+        'story':('a tall story layout with an intentional vertical sequence and balanced negative space',
+                 'a tall story layout with content awkwardly spread across excessive empty space'),
+    }
+    if context.get('bucket') in format_prompts:
+        good,bad=format_prompts[context['bucket']]
+        positive.append(good);negative.append(bad)
+    if context.get('density')=='dense':
+        positive.append('a content-rich design that preserves legibility by grouping related details and protecting the main headline')
+        negative.append('a content-rich design with tiny crowded text and unrelated elements competing for attention')
+    if 'logo' in roles and roles & {'headline','subheading','body'}:
+        positive.append('the brand logo remains visible and distinct while the headline and supporting copy keep a clear reading hierarchy')
+        negative.append('the brand logo overwhelms the headline or is lost among the supporting copy')
+    if roles & {'headline','subheading','body'} and 'cta' in roles:
+        positive.append('the headline, supporting text, and call to action read in a clear order with comfortable spacing')
+        negative.append('the call to action crowds or visually merges with the main text')
+    if roles & {'hero','art'} and 'cta' in roles:
+        positive.append('the product artwork and call to action are both prominent with clear separation')
+        negative.append('the product artwork collides with or crowds the call to action')
+    if context.get('grouped_units'):
+        positive.append('related grouped illustration pieces stay together and read as one coherent visual')
+        negative.append('pieces of one grouped illustration are scattered apart')
+    quadrants=context.get('callout_quadrants',())
+    for quadrant in quadrants:
+        positive.append(f'the promotional callout remains anchored in the {quadrant} corner, outside the main reading flow')
+        negative.append(f'the promotional callout is displaced from the {quadrant} corner into the main content')
+    return tuple(positive),tuple(negative)
+
+
+def score_layouts(images, reference_image=None, layout_context=None):
     """Rank candidate renders by learned design quality.
 
     Args:
         images: list of PIL.Image candidate renders, in the caller's order.
+        reference_image: optional render of the original design. Its visual
+            embedding is used as a restrained identity/palette continuity cue.
+        layout_context: optional compact role and relationship summary inferred
+            by the deterministic engine. It conditions the image/text prompts.
 
     Returns:
         ``(scores, note)`` where ``scores`` is a ``list[float]`` the same length
@@ -121,19 +169,39 @@ def score_layouts(images):
         )
     model, processor, torch = loaded
     try:
-        prompts = list(_POSITIVE) + list(_NEGATIVE)
+        contextual_positive,contextual_negative=_relationship_prompts(layout_context)
+        positive_prompts=list(_POSITIVE)+list(contextual_positive)
+        negative_prompts=list(_NEGATIVE)+list(contextual_negative)
+        prompts=positive_prompts+negative_prompts
+        scored_images=list(images)+([reference_image] if reference_image is not None else [])
         # One forward pass shares the identical prompt encoding across images.
         with torch.inference_mode():
             inputs = processor(
                 text=prompts,
-                images=[_letterbox_square(image) for image in images],
+                images=[_letterbox_square(image) for image in scored_images],
                 padding="max_length",
                 return_tensors="pt",
             )
-            logits = model(**inputs).logits_per_image
-            positive = logits[:, :len(_POSITIVE)].mean(dim=1)
-            negative = logits[:, len(_POSITIVE):].mean(dim=1)
-            scores = (positive-negative).tolist()
-        return scores, f"SigLIP perceptual re-rank over {len(images)} candidate(s)"
+            output=model(**inputs)
+            logits=output.logits_per_image[:len(images)]
+            positive=logits[:,:len(positive_prompts)].mean(dim=1)
+            negative=logits[:,len(positive_prompts):].mean(dim=1)
+            quality=(positive-negative)
+            reference_similarity=None
+            image_features=getattr(output,'image_embeds',None)
+            if reference_image is not None and image_features is not None:
+                normalized=torch.nn.functional.normalize(image_features.float(),dim=-1)
+                reference_similarity=(normalized[:len(images)] @ normalized[-1]).clamp(-1,1)
+                # Similarity is deliberately a modest tie-breaker: layouts
+                # should retain brand/art identity without copying the source
+                # composition into a very different aspect ratio.
+                quality=quality+.35*reference_similarity
+            scores=quality.tolist()
+        note=f"SigLIP judged {len(images)} candidate(s)"
+        if contextual_positive or contextual_negative:
+            note+=f" with {len(contextual_positive)} inferred relationship cue(s)"
+        if reference_similarity is not None:
+            note+=" against the original design"
+        return scores,note
     except Exception as exc:
         return None, f"SigLIP scoring failed: {exc}"
