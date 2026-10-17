@@ -24,118 +24,7 @@ import re
 from typing import Any
 
 
-@lru_cache(maxsize=256)
-def _png_alpha_rect(asset_id):
-    """Normalized visible-pixel bounds for a PNG asset, or None if opaque."""
-    if not isinstance(asset_id,str) or Path(asset_id).suffix.lower() != '.png':
-        return None
-    path=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'/asset_id
-    try:
-        from PIL import Image
-        with Image.open(path) as image:
-            rgba=image.convert('RGBA')
-            alpha=rgba.getchannel('A')
-            if alpha.getextrema()==(255,255):
-                return None
-            # Ignore tiny alpha noise from antialiasing/export fringes; those
-            # pixels should not reserve layout space for an otherwise clear PNG.
-            box=alpha.point(lambda value:255 if value>8 else 0).getbbox()
-            if not box:
-                return None
-            left,top,right,bottom=box
-            width,height=rgba.size
-            if box==(0,0,width,height):
-                return None
-            return left/width,top/height,right/width,bottom/height
-    except (OSError,ValueError):
-        return None
-
-
-def _image_content_rect(e):
-    """Visible image rectangle inside its layout box, honoring the fit mode."""
-    rect=_png_alpha_rect(e.get('asset_id'))
-    x,y,w,h=e['x'],e['y'],e['width'],e['height']
-    if rect is None or w<=0 or h<=0:
-        return x,y,x+w,y+h
-    left,top,right,bottom=rect
-    path=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'/e['asset_id']
-    try:
-        from PIL import Image
-        with Image.open(path) as image:
-            iw,ih=image.size
-    except (OSError,ValueError):
-        return x,y,x+w,y+h
-    fit=e.get('fit','contain')
-    if fit=='contain':
-        factor=min(w/iw,h/ih)
-        draw_w,draw_h=iw*factor,ih*factor
-        ox,oy=(w-draw_w)/2,(h-draw_h)/2
-        l,r=ox+left*draw_w,ox+right*draw_w
-        t,b=oy+top*draw_h,oy+bottom*draw_h
-    elif fit=='cover':
-        factor=max(w/iw,h/ih)
-        draw_w,draw_h=iw*factor,ih*factor
-        ox,oy=(w-draw_w)/2,(h-draw_h)/2
-        l,r=ox+left*draw_w,ox+right*draw_w
-        t,b=oy+top*draw_h,oy+bottom*draw_h
-        l,r=max(0,min(w,l)),max(0,min(w,r))
-        t,b=max(0,min(h,t)),max(0,min(h,b))
-        if r<l:l=r=(l+r)/2
-        if b<t:t=b=(t+b)/2
-    else:
-        l,r=left*w,right*w
-        t,b=top*h,bottom*h
-    return x+l,y+t,x+r,y+b
-
-
-def _trim_transparent_frame(items):
-    """Crop the dominant transparent PNG gutter without scaling visible pixels."""
-    if len(items)!=1 or items[0].get('type')!='image':
-        return items
-    e=items[0]
-    rect=_png_alpha_rect(e.get('asset_id'))
-    if rect is None or e.get('fit')=='fill':
-        return items
-    path=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'/e['asset_id']
-    try:
-        from PIL import Image
-        with Image.open(path) as image:
-            iw,ih=image.size
-    except (OSError,ValueError):
-        return items
-    left,top,right,bottom=rect
-    # The cover window is centered, so its minimum safe extent is the distance
-    # from the image center to the farther visible edge on each axis.
-    crop_w=max((right-left)*iw,2*max(.5-left,right-.5)*iw)
-    crop_h=max((bottom-top)*ih,2*max(.5-top,bottom-.5)*ih)
-    # Trim one axis only. This preserves the raster scale exactly and keeps
-    # asymmetric but visible artwork inside a centered cover viewport.
-    trim_x=1-crop_w/iw
-    trim_y=1-crop_h/ih
-    if max(trim_x,trim_y)<.12:
-        return items
-    x,y,w,h=e['x'],e['y'],e['width'],e['height']
-    fit=e.get('fit','contain')
-    scale=(max(w/iw,h/ih) if fit=='cover' else min(w/iw,h/ih))
-    draw_w,draw_h=iw*scale,ih*scale
-    ox,oy=(w-draw_w)/2,(h-draw_h)/2
-    if trim_x>=trim_y:
-        crop_left=(iw-crop_w)/2
-        e['x']=x+ox+crop_left*scale
-        e['y']=y+oy
-        e['width']=crop_w*scale
-        e['height']=ih*scale
-    else:
-        crop_top=(ih-crop_h)/2
-        e['x']=x+ox
-        e['y']=y+oy+crop_top*scale
-        e['width']=iw*scale
-        e['height']=crop_h*scale
-    e['fit']='cover'
-    return items
-
-
-def _raw_bounds(items):
+def _bounds(items):
     boxes = []
     for e in items:
         w, h, a = e['width'], e['height'], radians(e.get('rotation', 0))
@@ -146,30 +35,6 @@ def _raw_bounds(items):
                       max(e['x']+w,cx+rw/2), max(e['y']+h,cy+rh/2)))
     return (min(b[0] for b in boxes), min(b[1] for b in boxes),
             max(b[2] for b in boxes), max(b[3] for b in boxes)) if boxes else (0, 0, 0, 0)
-
-
-def _visual_bounds(items):
-    """Visible-pixel bounds used for layout scoring and alignment."""
-    boxes=[]
-    for e in items:
-        if e['type']=='image':
-            left,top,right,bottom=_image_content_rect(e)
-        else:
-            left,top,right,bottom=e['x'],e['y'],e['x']+e['width'],e['y']+e['height']
-        angle=radians(e.get('rotation',0))
-        cx,cy=e['x']+e['width']/2,e['y']+e['height']/2
-        corners=[(left,top),(right,top),(right,bottom),(left,bottom)]
-        rotated=[(cx+(px-cx)*cos(angle)-(py-cy)*sin(angle),
-                  cy+(px-cx)*sin(angle)+(py-cy)*cos(angle)) for px,py in corners]
-        boxes.append((min(p[0] for p in rotated),min(p[1] for p in rotated),
-                      max(p[0] for p in rotated),max(p[1] for p in rotated)))
-    return (min(b[0] for b in boxes),min(b[1] for b in boxes),
-            max(b[2] for b in boxes),max(b[3] for b in boxes)) if boxes else (0,0,0,0)
-
-
-def _bounds(items):
-    """Full element-frame bounds used for transforms and schema safety."""
-    return _raw_bounds(items)
 
 
 def _overlap(a, b):
@@ -348,12 +213,6 @@ def _move(items, x, y):
     return items
 
 
-def _move_visual(items, x, y):
-    """Place visible pixels at x/y while preserving each image's transparent frame."""
-    left, top, _, _ = _visual_bounds(items)
-    return _shift(items, x-left, y-top)
-
-
 def _shift(items, x, y):
     """Translate a slot's contents without discarding its internal padding."""
     for e in items:
@@ -406,8 +265,7 @@ def _analyze(source):
         grouped.setdefault(root(i), []).append(e)
     units = []
     for items in grouped.values():
-        image_only=all(e['type']=='image' for e in items)
-        x, y, r, b = _visual_bounds(items) if image_only else _bounds(items)
+        x, y, r, b = _bounds(items)
         texts = [e for e in items if e['type']=='text']
         shapes = [e for e in items if e['type']=='shape']
         images = [e for e in items if e['type']=='image']
@@ -437,30 +295,6 @@ def _analyze(source):
 def _unit(u, width, height, scale, fill=False):
     width, height = max(.0001, width), max(.0001, height)
     items, (x,y,r,b) = u['items'], u['bounds']
-    # A transparent PNG's frame can contain substantial empty space. Fit its
-    # visible pixels to the slot, then position by those pixels while retaining
-    # the original PNG and element frame. This is generic alpha geometry, not
-    # a logo-specific scale multiplier.
-    if len(items)==1 and items[0]['type']=='image' and _png_alpha_rect(items[0].get('asset_id')):
-        visible=_visual_bounds(items)
-        visual_w=max(1e-9,visible[2]-visible[0]);visual_h=max(1e-9,visible[3]-visible[1])
-        factor=min(width/visual_w,height/visual_h)
-        if not fill:
-            factor=min(factor,scale)
-        raw=_raw_bounds(items)
-        raw_w=max(1e-9,raw[2]-raw[0]);raw_h=max(1e-9,raw[3]-raw[1])
-        # Visible pixels may fit a narrow slot while the transparent frame
-        # still exceeds the real canvas. Cap by both the local vertical slot
-        # and the actual target canvas before the projection phase.
-        factor=min(factor,height/raw_h)
-        target_w,target_h=u.get('target_canvas',(0,0))
-        if target_w>0 and target_h>0:
-            factor=min(factor,target_w/raw_w,target_h/raw_h)
-        result=_scale(items,factor)
-        _trim_transparent_frame(result)
-        visible=_visual_bounds(result)
-        return _move_visual(result,(width-(visible[2]-visible[0]))/2,
-                            (height-(visible[3]-visible[1]))/2)
     if len(items)==1 and items[0]['type']=='text':
         e = deepcopy(items[0])
         desired=_target_font(e,u,scale)
@@ -490,14 +324,7 @@ def _unit(u, width, height, scale, fill=False):
             e['font_size'] = _fit_text(old,e['width'],fit_height,desired_font)
             e['height'] = _text(e)[0]
             total_h += e['height']
-        if u.get('semantic') == 'cta' and shape['width'] > 0:
-            # The text can force a narrower CTA slot than the source button.
-            # Derive its height from the fitted width so the pill keeps its
-            # source proportions instead of collapsing into a thin strip.
-            fitted_shape_h = label_w * shape['height'] / shape['width']
-        else:
-            fitted_shape_h = shape['height']*scale
-        label_h = min(height, max(fitted_shape_h, total_h*1.5))
+        label_h = min(height, max(shape['height']*scale, total_h*1.5))
         back.update(x=0, y=0, width=label_w, height=label_h)
         if 'corner_radius' in back:
             back['corner_radius'] = min(label_h/2, shape['corner_radius']*scale)
@@ -565,45 +392,10 @@ def _action_band(tags,actions,width,height,scale,gap,stacked,align='center'):
     return output,bh+gap+ah
 
 
-def _footer_band(units,width,height,scale,gap,one_line_text=False):
+def _footer_band(units,width,height,scale,gap):
     """Keep small source-corner images subordinate to centered footer copy."""
     corners=[u for u in units if u.get('footer_anchor') in ('left','right')]
     central=[u for u in units if u not in corners]
-    if (one_line_text and len(central)==1 and len(central[0]['items'])==1
-            and central[0]['items'][0]['type']=='text'
-            and '\n' not in central[0]['items'][0].get('content','')):
-        # Reserve the footer's horizontal span for the full legal sentence.
-        # Source footnote frames (often only a small fraction of the canvas)
-        # should not force it to wrap after a wide-banner conversion.
-        unit=central[0]
-        e=deepcopy(unit['items'][0])
-        desired=_target_font(unit['items'][0],unit,scale)
-        e['width']=width
-        e['font_size']=_fit_text(e,width,height,desired)
-        text_h,text_w,_=_text(e)
-        # Keep a generous text frame: the layout's measurement font and the
-        # final renderer can differ slightly, and a tightly measured frame
-        # makes a visually single-line disclaimer wrap in the exported PNG.
-        e['width']=max(width*.72,text_w+e['font_size']*2)
-        e['height']=min(height,text_h)
-        e['text_align']='center'
-        e['x']=(width-e['width'])/2
-        e['y']=(height-e['height'])/2
-        output=[e]
-        for side in ('left','right'):
-            items=[u for u in corners if u.get('footer_anchor')==side]
-            if not items:
-                continue
-            block,bh=_row(items,width*.14,height,scale,gap)
-            left,_,right,_=_visual_bounds(block)
-            bw=right-left
-            x=0 if side=='left' else width-bw
-            if side=='left' and x+bw>=e['x']-gap:
-                continue
-            if side=='right' and x<=e['x']+e['width']+gap:
-                continue
-            output.extend(_move_visual(block,x,(height-bh)/2))
-        return output,e['height']
     if not corners:
         return _row(central,width,height,scale,gap)
     text,th=_row(central,width,height*.40 if central else height,scale,gap)
@@ -622,7 +414,7 @@ def _footer_band(units,width,height,scale,gap,one_line_text=False):
 
 def _axis_active(u,source,width,height):
     state=_aspect_state(source,width,height)
-    vertical=state['bucket'] in ('story','portrait','square')
+    vertical=state['flow'] in ('story','portrait','square') or (state['flow']=='preserve' and width/height<1.3)
     return vertical and u.get('source_centered',False)
 
 
@@ -739,25 +531,20 @@ def _logo_row(units,width,height,scale,gap,source_size=None,fill=False):
     blocks=[]
     for u in units:
         if fill:
-            if len(u['items'])==1 and u['items'][0]['type']=='image' and _png_alpha_rect(u['items'][0].get('asset_id')):
-                cap=max(scale*3.4,min(width/source_size[0],height/source_size[1])*3.4) if source_size else scale*3.4
-                block=_unit(u,slot,height,cap,fill=True)
-                blocks.append(block)
-                continue
             fit_w,fit_h=u.get('fit_size',(u['bounds'][2]-u['bounds'][0],u['bounds'][3]-u['bounds'][1]))
-            cap=max(scale*3.4,min(width/source_size[0],height/source_size[1])*3.4) if source_size else scale*3.4
+            cap=max(scale*1.6,min(width/source_size[0],height/source_size[1])*1.35) if source_size else scale*1.6
             factor=min(slot/max(1e-9,fit_w),height/max(1e-9,fit_h),cap)
             block=_contain(_scale(u['items'],factor),slot,height)
         else:
             block=_unit(u,slot,height,scale*1.8)
         blocks.append(block)
-    sizes=[_visual_bounds(b) for b in blocks]
+    sizes=[_bounds(b) for b in blocks]
     used=sum(b[2]-b[0] for b in sizes)+gap*(len(blocks)-1)
     row_h=max(b[3]-b[1] for b in sizes)
     output=[];x=max(0,(width-used)/2)
     for block,b in zip(blocks,sizes):
         w,h=b[2]-b[0],b[3]-b[1]
-        output.extend(_move_visual(block,x,(row_h-h)/2));x+=w+gap
+        output.extend(_move(block,x,(row_h-h)/2));x+=w+gap
     return output,row_h
 
 
@@ -828,7 +615,7 @@ def _editorial_split_seed(units,width,height,sw,sh,scale,share=.42,reverse=False
     side_header=width/height>=2.4 and bool(roles['header'])
     left=margin;main_width=cw;output=[]
     if side_header:
-        logo_w=max(cw*.12,min(cw*.18,available*.70))
+        logo_w=max(cw*.09,min(cw*.16,available*.55))
         brand,bh=_logo_row(roles['header'],logo_w,available*.75,scale,gap,(sw,sh),fill=True)
         output.extend(_shift(brand,left,top+(available-bh)/2))
         left+=logo_w+gap;main_width-=logo_w+gap
@@ -855,31 +642,7 @@ def _editorial_split_seed(units,width,height,sw,sh,scale,share=.42,reverse=False
         b=_bounds(art);bw,bh=b[2]-b[0],b[3]-b[1]
         output.extend(_move(art,vx+(vw-bw)/2,top+art_clear+(available-art_clear-bh)/2))
     if footer:output.extend(_shift(footer,margin,height-margin-fh))
-    decoration_layout=_decorations(roles['decoration'],width,height,sw,sh,output)
-    output.extend(decoration_layout)
-    # If a source logo nearly touches a large decorative ellipse, preserve that
-    # visual relationship after reflow: center the mark over its nearby accent.
-    # The logo remains its own movable unit; this only chooses its seed position.
-    for logo_unit in (u for u in roles['header'] if u['semantic']=='logo'):
-        lx,ly,lr,lb=logo_unit['bounds']
-        nearby=[]
-        for deco_unit in roles['decoration']:
-            if not any(e.get('shape_type')=='ellipse' for e in deco_unit['items'] if e['type']=='shape'):
-                continue
-            dx,dy,dr,db=deco_unit['bounds']
-            vertical_gap=max(0,dy-lb,ly-db);horizontal_gap=max(0,dx-lr,lx-dr)
-            if vertical_gap<=sh*.12 and horizontal_gap<=sw*.08:
-                nearby.append((vertical_gap/max(1,sh)+horizontal_gap/max(1,sw),deco_unit))
-        if nearby:
-            deco_unit=min(nearby,key=lambda pair:pair[0])[1]
-            logo_ids={e['id'] for e in logo_unit['items']}
-            deco_ids={e['id'] for e in deco_unit['items']}
-            logo_items=[e for e in output if e['id'] in logo_ids]
-            deco_items=[e for e in output if e['id'] in deco_ids]
-            if logo_items and deco_items:
-                logo_box=_visual_bounds(logo_items);deco_box=_visual_bounds(deco_items)
-                delta=(deco_box[0]+deco_box[2]-logo_box[0]-logo_box[2])/2
-                _shift(logo_items,delta,0)
+    output.extend(_decorations(roles['decoration'],width,height,sw,sh,output))
     return output
 
 
@@ -901,7 +664,7 @@ def _reflow(units,width,height,sw,sh,mode,share,scale):
     header,hh=_row([] if side_header else roles['header'],cw,ch*(.09 if compact_bands else .13),scale,gap)
     kicker,kh=_badge_row(upper_row,cw,ch*.09,scale*.82,gap,align='center')
     footer,fh=_footer_band(roles['footer'],cw,ch*(.06 if compact_bands else .10),scale,gap*.6)
-    labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.14 if compact_bands else .20),scale,gap,width/height<1.3)
+    labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.11 if compact_bands else .20),scale,gap,width/height<1.3)
     reserved=hh+kh+fh+lh+gap*sum(bool(v) for v in (hh,kh,fh,lh))
     reserved_limit=ch*(.34 if compact_bands else .53)
     if reserved>reserved_limit:
@@ -909,7 +672,7 @@ def _reflow(units,width,height,sw,sh,mode,share,scale):
         header,hh=_row([] if side_header else roles['header'],cw,ch*(.09 if compact_bands else .13),scale*shrink,gap*shrink)
         kicker,kh=_badge_row(upper_row,cw,ch*.09,scale*.82*shrink,gap*shrink,align='center')
         footer,fh=_footer_band(roles['footer'],cw,ch*(.06 if compact_bands else .10),scale*shrink,gap*shrink*.6)
-        labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.14 if compact_bands else .20),scale*shrink,gap*shrink,width/height<1.3)
+        labels,lh=_action_band(roles['tag'],roles['action'],cw,ch*(.11 if compact_bands else .20),scale*shrink,gap*shrink,width/height<1.3)
     top,bottom=margin,height-margin
     output=[]
     if hh:
@@ -974,9 +737,7 @@ def _enrich_units(source, units):
     """
     sw, sh = source['canvas']['width'], source['canvas']['height']
     image_units = [u for u in units if any(e['type'] == 'image' for e in u['items'])]
-    image_areas=[(lambda box:(box[2]-box[0])*(box[3]-box[1]))(_visual_bounds([e]))
-                 for u in image_units for e in u['items'] if e['type']=='image']
-    largest_image=max(image_areas,default=1)
+    largest_image = max((_area(e) for u in image_units for e in u['items'] if e['type'] == 'image'), default=1)
     text_units = [u for u in units if u['role'] == 'copy']
     headline = max(text_units, key=lambda u: (max(e.get('font_size', 0) for e in u['items']),
                    -u['bounds'][1], u['bounds'][2]-u['bounds'][0]), default=None)
@@ -1046,24 +807,17 @@ def _enrich_units(source, units):
 def _aspect_state(source, width, height):
     ratio = width/height
     delta = ratio/(source['canvas']['width']/source['canvas']['height'])
-    # Bucket only by the selected target format. Keep `flow=preserve` as a
-    # separate signal for near-identical source/target ratios; format-specific
-    # rules still come from the bucket and therefore remain predictable.
-    if ratio >= 3.2:
-        bucket='banner'
-    elif ratio <= .68:
-        bucket='story'
-    elif .82 <= ratio <= 1.2:
-        bucket='square'
-    elif ratio > 1.2:
-        bucket='wide'
-    else:
-        bucket='portrait'
     if abs(log(delta)) < .18:
         flow = 'preserve'
+    elif ratio >= 3.2:
+        flow = 'banner'
+    elif ratio <= .68:
+        flow = 'story'
+    elif .82 <= ratio <= 1.2:
+        flow = 'square'
     else:
-        flow = bucket
-    return dict(flow=flow, bucket=bucket, delta=delta, ratio=ratio)
+        flow = 'landscape' if ratio > 1 else 'portrait'
+    return dict(flow=flow, delta=delta, ratio=ratio)
 
 
 def _semantic_order(u):
@@ -1074,12 +828,11 @@ def _semantic_order(u):
 
 def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, source_size=None):
     """True inline banner: logo | copy | action | hero, plus secondary rows."""
-    margin, gap = max(min(width, height)*.05,width*.02), min(width, height)*.06
+    margin, gap = min(width, height)*.05, min(width, height)*.035
     cw, ch = width-2*margin, height-2*margin
     roles = {r: sorted((u for u in units if u['role'] == r), key=_semantic_order)
              for r in ('header','copy','action','tag','visual','footer','decoration')}
-    footer, fh = _footer_band(roles['footer'], cw, ch*.12, scale, gap,
-                              one_line_text=width/max(1,height)>=3)
+    footer, fh = _footer_band(roles['footer'], cw, ch*.12, scale, gap)
     available = ch-fh-(gap if fh else 0)
     categories = [('header', .16), ('copy', .50), ('action', .34)]
     if roles['visual']:
@@ -1098,7 +851,7 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
     usable = cw-gap*max(0, len(active)-1)
     slot_widths={key:usable*weight/total for key,weight in active}
     if any(u['semantic']=='logo' for u in roles['header']) and len(active)>1:
-        logo_min=max(cw*.12,min(cw*.18,available*.70))
+        logo_min=max(cw*.09,min(cw*.16,available*.55))
         logo_width=min(usable,max(slot_widths.get('header',0),logo_min))
         other_weight=sum(weight for key,weight in active if key!='header') or 1
         slot_widths['header']=logo_width
@@ -1112,15 +865,13 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
             local_roles={**roles,'header':[],'action':[],'visual':[],'footer':[],'decoration':[]}
             block=_editorial_copy(local_roles,w,available,scale,gap)
         elif key == 'header':
-            # A banner logo should support the headline, not consume the full
-            # short-side height. Alpha-aware fitting still uses only its mark.
-            block,used=_logo_row(roles[key],w,available*.50,scale,gap,source_size,fill=True)
+            block,used=_logo_row(roles[key],w,max(available*.80,available*.70),scale,gap,source_size,fill=True)
         elif key == 'visual':
             block = _visuals(roles[key], w, available, scale, gap)
         else:
             block, used = _banner_actions(roles[key], w, available*.85, scale, gap,cw)
         if block:
-            box=_visual_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
+            box=_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
             blocks.append((key,block,bw,bh,box))
     right_clear=width-margin
     for u in roles['decoration']:
@@ -1129,56 +880,46 @@ def _banner_seed(units, width, height, scale, hero_share=.18, reverse=False, sou
         if source_size and (u['bounds'][0]+u['bounds'][2])/2<=source_size[0]/2:
             continue
         callout=_callout_block(u,width,height,*(source_size or (width,height)))
-        cb=_visual_bounds(callout);edge=min(width,height)*.025
+        cb=_bounds(callout);edge=min(width,height)*.025
         right_clear=min(right_clear,width-edge-(cb[2]-cb[0])-gap)
     right_footers=[u for u in roles['footer'] if u.get('footer_anchor')=='right']
     if right_footers:
         footer_ids={e['id'] for u in right_footers for e in u['items']}
-        fb=_visual_bounds([e for e in footer if e['id'] in footer_ids]) if any(e['id'] in footer_ids for e in footer) else None
+        fb=_bounds([e for e in footer if e['id'] in footer_ids]) if any(e['id'] in footer_ids for e in footer) else None
         if fb:
             right_clear=min(right_clear,fb[0]-gap)
-    # Use actual transparent-frame insets to establish a shared visible margin.
-    # This keeps a padded PNG mark from appearing detached while text/actions
-    # sit much closer to the opposite canvas edge.
-    edge_insets=[]
-    for _,block,_,_,visual_box in (blocks[:1]+blocks[-1:] if blocks else []):
-        raw_box=_raw_bounds(block)
-        edge_insets.extend((max(0.,visual_box[0]-raw_box[0]),
-                            max(0.,raw_box[2]-visual_box[2])))
-    content_margin=max([margin]+edge_insets)
-    right_clear=min(right_clear,width-content_margin)
     # Pack measured artwork/text extents. A tight left-aligned copy column
     # must not reserve half the banner as invisible whitespace.
     sum_bw=sum(row[2] for row in blocks)
-    pack_width=min(max(0,width-2*content_margin),max(0,right_clear-content_margin))
+    pack_width=min(cw,max(0,right_clear-margin))
     if len(blocks)>=3:
         gap_x=max(gap,(pack_width-sum_bw)/max(1,len(blocks)-1))
-        cursor=content_margin
+        cursor=margin
     else:
         gap_x=min(pack_width*.08,max(gap,(pack_width-sum_bw)/max(1,len(blocks)+1)))
         occupied=sum_bw+gap_x*max(0,len(blocks)-1)
-        cursor=content_margin+max(0,(pack_width-occupied)/2)
+        cursor=margin+max(0,(pack_width-occupied)/2)
     for index,(key,block,bw,bh,box) in enumerate(blocks):
         if key=='visual' and index==len(blocks)-1 and right_clear<width-margin:
             available_slot=max(.001,right_clear-(cursor+gap))
             if available_slot<bw:
                 block=_visuals(roles['visual'],available_slot,available,scale,gap)
-                box=_visual_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
+                box=_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
                 gap_x=min(gap_x,max(0,available_slot-bw))
                 occupied=sum(row[2] for row in blocks if row[0]!='visual')+bw+gap_x*max(0,len(blocks)-1)
                 if len(blocks)>=3:
-                    cursor=content_margin+sum(row[2]+gap_x for row in blocks[:index])
+                    cursor=margin+sum(row[2]+gap_x for row in blocks[:index])
                 else:
-                    cursor=content_margin+max(0,(pack_width-occupied)/2)+sum(row[2]+gap_x for row in blocks[:index])
+                    cursor=margin+max(0,(pack_width-occupied)/2)+sum(row[2]+gap_x for row in blocks[:index])
         px=cursor-box[0]
         py=margin+(available-bh)/2-box[1]
-        output.extend(_move_visual(block,px,py))
+        output.extend(_move(block,px,py))
         cursor+=bw+gap_x
     if roles['tag'] and not roles['copy']:
         tags, _ = _row(roles['tag'], cw, available*.2, scale*.8, gap,align='left')
         output.extend(_shift(tags, margin, margin))
     if footer:
-        output.extend(_shift(footer, margin, height-margin*.45-fh))
+        output.extend(_shift(footer, margin, height-margin-fh))
     output.extend(_decorations(roles['decoration'],width,height,
                   (source_size or (width,height))[0],(source_size or (width,height))[1],output))
     return output
@@ -1193,53 +934,6 @@ def _stack_seed(units, width, height, scale, visual_share, hero_first, source_si
     # `_reflow` gives upper tags their own centered kicker row. Keep their
     # semantic role intact so they cannot shift a source-centered logo.
     return _reflow(working,width,height,sw,sh,'visual-first' if hero_first else 'copy-first',visual_share,scale)
-
-
-def _centered_content_seed(units, width, height, scale, source_size):
-    """Keep simple logo/copy/action compositions as one balanced, centered stack."""
-    margin=min(width,height)*.06
-    gap=min(width,height)*.055
-    usable_w=width-2*margin
-    roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
-           for r in ('header','copy','tag','action')}
-    blocks=[]
-    if roles['header']:
-        block,_=_logo_row(roles['header'],usable_w,min(height*.16,usable_w*.28),scale,gap,fill=True)
-        if block:blocks.append(block)
-    if roles['copy']:
-        block=_copy(roles['copy'],usable_w,height*.34,scale,gap,align='center')
-        if block:blocks.append(block)
-    if roles['tag'] or roles['action']:
-        block,_=_action_band(roles['tag'],roles['action'],usable_w,height*.18,scale,gap,False,align='center')
-        if block:blocks.append(block)
-    if not blocks:
-        return []
-    sizes=[]
-    for block in blocks:
-        box=_visual_bounds(block)
-        sizes.append((box[2]-box[0],box[3]-box[1]))
-    # Use an even flex-like gap, but preserve each semantic block internally.
-    total_h=sum(h for _,h in sizes)
-    actual_gap=min(gap,max(0,(height*.66-total_h)/max(1,len(blocks)-1)))
-    occupied=total_h+actual_gap*max(0,len(blocks)-1)
-    # If content cannot fit the preferred cluster, scale each atomic block
-    # together so text and related artwork keep their own proportions.
-    if occupied>height*.72:
-        factor=height*.72/occupied
-        blocks=[_scale(block,factor) for block in blocks]
-        sizes=[(w*factor,h*factor) for w,h in sizes]
-        total_h=sum(h for _,h in sizes)
-        actual_gap=min(gap*factor,max(0,(height*.66-total_h)/max(1,len(blocks)-1)))
-        occupied=total_h+actual_gap*max(0,len(blocks)-1)
-    cursor=(height-occupied)/2
-    output=[]
-    for block,(bw,bh) in zip(blocks,sizes):
-        box=_visual_bounds(block)
-        output.extend(_move_visual(block,(width-bw)/2,cursor))
-        cursor+=bh+actual_gap
-    output.extend(_decorations([u for u in units if u['role']=='decoration'],width,height,
-                               source_size[0],source_size[1],output))
-    return output
 
 
 def _safe_grid(units, width, height, scale):
@@ -1285,31 +979,18 @@ def _unit_margin(box, width, height):
                (width-box[2]+box[0])/2, (height-box[3]+box[1])/2))
 
 
-def _pair_gap(a, b, width, height):
-    """Keep a banner CTA visibly separate from product artwork."""
-    roles={a.get('semantic'),b.get('semantic')}
-    if width/max(1,height)>=3 and 'cta' in roles and roles & {'hero','art'}:
-        return max(min(width,height)*.008,height*.10)
-    return min(width,height)*.008
-
-
 def _feasible(elements, units, width, height):
-    records = [(u,_visual_bounds(items)) for u,items in _records(elements,units)]
-    raw_records=[(u,_raw_bounds(items)) for u,items in _records(elements,units)]
-    for i,((u,b),(_,raw)) in enumerate(zip(records,raw_records)):
+    records = [(u,_bounds(items)) for u,items in _records(elements,units)]
+    gap = min(width,height)*.008
+    for i,(u,b) in enumerate(records):
         if not all(isfinite(v) for v in b):
             return False
         margin = 0 if u['role']=='decoration' else _unit_margin(b,width,height)
         if b[0]<margin-1e-5 or b[1]<margin-1e-5 or b[2]>width-margin+1e-5 or b[3]>height-margin+1e-5:
             return False
-        # Transparent pixels are ignored for layout margins, but the original
-        # element frame must remain on-canvas for renderer/schema validity.
-        if raw[0]<-1e-5 or raw[1]<-1e-5 or raw[2]>width+1e-5 or raw[3]>height+1e-5:
-            return False
         for v,c in records[:i]:
             if _layered(u,v):
                 continue
-            gap=_pair_gap(u,v,width,height)
             if not (b[2]+gap<=c[0]+1e-5 or c[2]+gap<=b[0]+1e-5 or b[3]+gap<=c[1]+1e-5 or c[3]+gap<=b[1]+1e-5):
                 return False
     return True
@@ -1327,10 +1008,11 @@ def _constrain(elements, units, width, height, topology='nearest'):
     except ImportError:
         return None
     records = _records(elements, units)
-    boxes = [_visual_bounds(items) for _,items in records]
+    boxes = [_bounds(items) for _,items in records]
     solver = kiwi.Solver()
     xs = [kiwi.Variable(f'x{i}') for i in range(len(records))]
     ys = [kiwi.Variable(f'y{i}') for i in range(len(records))]
+    gap = min(width,height)*.008
     try:
         for i, ((u,_),box) in enumerate(zip(records,boxes)):
             x,y,r,b = box
@@ -1340,27 +1022,13 @@ def _constrain(elements, units, width, height, topology='nearest'):
             solver.addConstraint(ys[i]>=margin)
             solver.addConstraint(xs[i]+w<=width-margin)
             solver.addConstraint(ys[i]+h<=height-margin)
-            raw=_raw_bounds(records[i][1])
-            solver.addConstraint(xs[i]+raw[0]-x>=0)
-            solver.addConstraint(ys[i]+raw[1]-y>=0)
-            solver.addConstraint(xs[i]+raw[2]-x<=width)
-            solver.addConstraint(ys[i]+raw[3]-y<=height)
-            if u.get('corner_callout'):
-                sw,sh=u.get('source_canvas',(width,height))
-                sx,sy,sr,_=u['bounds']
-                edge=min(width,height)*.025
-                anchor_x=width-edge-w if (sx+sr)/2>sw/2 else edge
-                solver.addConstraint(xs[i]==anchor_x)
-                solver.addConstraint(ys[i]==edge)
-            else:
-                solver.addConstraint((xs[i]==x) | kiwi.strength.strong)
-                solver.addConstraint((ys[i]==y) | kiwi.strength.strong)
+            solver.addConstraint((xs[i]==x) | kiwi.strength.strong)
+            solver.addConstraint((ys[i]==y) | kiwi.strength.strong)
         for i,(u,_) in enumerate(records):
             a=boxes[i]; aw,ah=a[2]-a[0],a[3]-a[1]
             for j,(v,_) in enumerate(records[:i]):
                 if _layered(u,v):
                     continue
-                gap=_pair_gap(u,v,width,height)
                 b=boxes[j]; bw,bh=b[2]-b[0],b[3]-b[1]
                 # Prefer the closest separating direction, in normalized units.
                 choices=[((a[2]+gap-b[0])/width, xs[i]+aw+gap<=xs[j]),
@@ -1387,7 +1055,7 @@ def _constrain(elements, units, width, height, topology='nearest'):
         return None
     output=[]
     for i,(_,items) in enumerate(records):
-        output.extend(_move_visual(deepcopy(items),xs[i].value(),ys[i].value()))
+        output.extend(_move(deepcopy(items),xs[i].value(),ys[i].value()))
     return output if _feasible(output,units,width,height) else None
 
 
@@ -1592,7 +1260,7 @@ def _text_right_limit(unit,box,records,width,height):
     limit=width-min(width,height)*.045;gap=min(width,height)*.008
     for other,items in records:
         if other is unit or _layered(unit,other):continue
-        b=_visual_bounds(items)
+        b=_bounds(items)
         if min(box[3],b[3])>max(box[1],b[1]) and b[0]>=box[2]-1e-6:
             limit=min(limit,b[0]-gap)
     return max(box[2],limit)
@@ -1604,7 +1272,7 @@ def _banner_vertical_neighbor(unit,box,records):
     for other,items in records:
         if other is unit or other['role'] not in ('header','copy','tag','action','visual'):
             continue
-        other_box=_visual_bounds(items)
+        other_box=_bounds(items)
         overlap=max(0,min(right,other_box[2])-max(left,other_box[0]))
         if overlap>=min(right-left,other_box[2]-other_box[0])*.2:
             return True
@@ -1613,18 +1281,18 @@ def _banner_vertical_neighbor(unit,box,records):
 
 def _banner_centerline(records,width,height):
     margin=min(width,height)*.05
-    footer_tops=[_visual_bounds(items)[1] for unit,items in records if unit['role']=='footer']
+    footer_tops=[_bounds(items)[1] for unit,items in records if unit['role']=='footer']
     bottom=min(footer_tops)-min(width,height)*.035 if footer_tops else height-margin
     return (margin+max(margin,bottom))/2
 
 
 def _energy_terms(elements, units, source, width, height, desired):
     records = _records(elements,units)
-    boxes = [_visual_bounds(items) for _,items in records]
+    boxes = [_bounds(items) for _,items in records]
     state=_aspect_state(source,width,height)
     terms = dict(overlap=0.,boundary=0.,text_fit=0.,readability=0.,balance=0.,
                  hierarchy=0.,alignment=0.,spacing=0.,canvas_use=0.,source_fidelity=0.)
-    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.,banner_action_stack=0.,banner_gap_evenness=0.,banner_centering=0.,centered_flow=0.)
+    terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.,banner_action_stack=0.,banner_gap_evenness=0.,banner_centering=0.)
     masses=[]
     for i,((u,items),box) in enumerate(zip(records,boxes)):
         x,y,r,b=box; area=max(1e-9,(r-x)*(b-y))
@@ -1660,21 +1328,21 @@ def _energy_terms(elements, units, source, width, height, desired):
             source_box=u['bounds'];source_share=(source_box[2]-source_box[0])*(source_box[3]-source_box[1])/(source['canvas']['width']*source['canvas']['height'])
             floor=source_share*.45
             terms['hero_prominence']+=max(0,(floor-area/(width*height))/max(1e-9,floor))**2
-            if state['bucket'] in ('square','portrait','story','wide'):
+            if state['flow'] in ('square','portrait','story','landscape'):
                 source_height=(source_box[3]-source_box[1])/source['canvas']['height']
                 target_height=(b-y)/height
-                minimum=max(source_height*.72,{'square':.42,'portrait':.27,'story':.25,'wide':.28}[state['bucket']])
+                minimum=max(source_height*.72,{'square':.42,'portrait':.27,'story':.25,'landscape':.28}[state['flow']])
                 shortfall=max(0,(minimum-target_height)/max(.01,minimum))
-                terms['hero_prominence']+=shortfall if state['bucket']=='square' else shortfall**2
+                terms['hero_prominence']+=shortfall if state['flow']=='square' else shortfall**2
         if u['semantic']=='logo' and width/height>=2.4:
             old=u['bounds'];ratio=(old[2]-old[0])/max(1e-9,old[3]-old[1])
-            min_h=min(height*.16,(old[3]-old[1])*desired*.75)
-            min_w=min(width*.07,(old[2]-old[0])*desired*.75)
+            min_h=min(height*.22,(old[3]-old[1])*desired*.70)
+            min_w=min(width*.055,(old[2]-old[0])*desired*.70)
             terms['brand_visibility']+=max(0,(min_h-(b-y))/max(1,min_h))**2
             terms['brand_visibility']+=max(0,(min_w-(r-x))/max(1,min_w))**2
             wanted=min(height*.60,width*.15/max(1e-9,ratio),(old[3]-old[1])*desired*1.8)
             terms['brand_visibility']+=max(0,(wanted-(b-y))/max(1,wanted))**2
-        if state['bucket']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
+        if state['flow']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
             center=(y+b)/2
             terms['banner_centering']+=((center-_banner_centerline(records,width,height))/height)**2
         if _axis_active(u,source,width,height):
@@ -1714,10 +1382,10 @@ def _energy_terms(elements, units, source, width, height, desired):
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in left_copy)
             tags=[b for (u,_),b in zip(records,boxes) if u['role']=='tag']
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in tags)
-            if state['bucket']!='banner':
+            if state['flow']!='banner':
                 actions=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
                 terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in actions)
-    if state['bucket']=='banner':
+    if state['flow']=='banner':
         copy_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='copy']
         action_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
         tag_count=sum(u['role']=='tag' for u,_ in records)
@@ -1739,39 +1407,17 @@ def _energy_terms(elements, units, source, width, height, desired):
             mean=sum(gaps)/len(gaps)
             normalizer=max(min(width,height)*.04,abs(mean),1.)
             terms['banner_gap_evenness']=sum(((gap-mean)/normalizer)**2 for gap in gaps)/len(gaps)
-    # Simple centered ads benefit from a shared axis and a compact, even stack.
-    # Score only independent semantic bands; the contents of linked units remain atomic.
-    simple_centered=(state['bucket']!='banner') and not any(
-        u['role']=='visual' or u['semantic'] in ('hero','art') for u,_ in records)
-    if simple_centered:
-        bands=[]
-        for roles in ({'logo'},{'headline','subheading','body','kicker'},{'cta'}):
-            members=[box for (u,_),box in zip(records,boxes) if u['semantic'] in roles]
-            if members:
-                bands.append((min(b[0] for b in members),min(b[1] for b in members),
-                              max(b[2] for b in members),max(b[3] for b in members)))
-        if len(bands)>=2:
-            centers=[((b[0]+b[2])/2,(b[1]+b[3])/2) for b in bands]
-            terms['centered_flow']+=sum(((x-width/2)/width)**2 for x,_ in centers)*5
-            cluster_top=min(b[1] for b in bands);cluster_bottom=max(b[3] for b in bands)
-            max_cluster=.42 if state['bucket']=='story' else .64
-            terms['centered_flow']+=max(0,(cluster_bottom-cluster_top)/height-max_cluster)**2*8
-            gaps=[b[1]-a[3] for a,b in zip(bands,bands[1:])]
-            if len(gaps)>1:
-                mean=sum(gaps)/len(gaps)
-                terms['centered_flow']+=sum(((g-mean)/height)**2 for g in gaps)*5
-            terms['centered_flow']+=((sum((b[1]+b[3])/2 for b in bands)/len(bands)-height/2)/height)**2*3
     def role_bounds(roles):
-        return _visual_bounds([e for (u,items) in records if u['semantic'] in roles for e in items])
+        return _bounds([e for (u,items) in records if u['semantic'] in roles for e in items])
     flow_roles=[{'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}]
-    if state['bucket']=='story':
+    if state['flow']=='story':
         flow_roles=[{'logo'},{'hero','art'},{'headline','subheading','body','kicker'},{'cta'}]
     flow=[]
     for roles in flow_roles:
         if any(u['semantic'] in roles for u,_ in records):
             flow.append(role_bounds(roles))
-    if state['bucket'] in ('banner','story'):
-        axis,extent=(0,width) if state['bucket']=='banner' else (1,height)
+    if state['flow'] in ('banner','story'):
+        axis,extent=(0,width) if state['flow']=='banner' else (1,height)
         for a,b in zip(flow,flow[1:]):
             ac=(a[axis]+a[axis+2])/2;bc=(b[axis]+b[axis+2])/2
             terms['hierarchy']+=max(0,(ac-bc)/extent)*2
@@ -1779,8 +1425,7 @@ def _energy_terms(elements, units, source, width, height, desired):
     if main:
         left,top=min(b[0] for b in main),min(b[1] for b in main)
         right,bottom=max(b[2] for b in main),max(b[3] for b in main)
-        min_height_use=.40 if simple_centered and state['bucket']=='story' else .76
-        terms['canvas_use']=(max(0,.80-(right-left)/width)**2+max(0,min_height_use-(bottom-top)/height)**2)
+        terms['canvas_use']=(max(0,.80-(right-left)/width)**2+max(0,.76-(bottom-top)/height)**2)
     terms['badge_flow']=_badge_flow(records,width,height)
     terms.update(_perceptual_terms(records,boxes,units,width,height))
     change=abs(log(state['delta']))
@@ -1794,7 +1439,7 @@ def _energy_terms(elements, units, source, width, height, desired):
 
 _ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
-                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.,hero_prominence=210.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=80.,banner_centering=80.,centered_flow=95.)
+                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=45.,footer_anchor=100.,hero_prominence=210.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=8.,banner_centering=80.)
 
 
 def _energy(elements,units,source,width,height,desired):
@@ -1804,18 +1449,14 @@ def _energy(elements,units,source,width,height,desired):
 
 def _constraint_violation(elements, units, width, height):
     """Continuous repair cost, including required gaps that IoU alone misses."""
-    records=[(u,_visual_bounds(items)) for u,items in _records(elements,units)]
-    value=0.
-    raw_records=[(u,_raw_bounds(items)) for u,items in _records(elements,units)]
-    for i,((u,b),(_,raw)) in enumerate(zip(records,raw_records)):
+    records=[(u,_bounds(items)) for u,items in _records(elements,units)]
+    value=0.;gap=min(width,height)*.008
+    for i,(u,b) in enumerate(records):
         margin=0 if u['role']=='decoration' else _unit_margin(b,width,height)
         value+=(max(0,margin-b[0])+max(0,b[2]-width+margin))/width
         value+=(max(0,margin-b[1])+max(0,b[3]-height+margin))/height
-        value+=(max(0,-raw[0])+max(0,raw[2]-width))/width
-        value+=(max(0,-raw[1])+max(0,raw[3]-height))/height
         for v,c in records[:i]:
             if not _layered(u,v):
-                gap=_pair_gap(u,v,width,height)
                 value+=max(0,min((b[2]+gap-c[0])/width,(c[2]+gap-b[0])/width,
                                  (b[3]+gap-c[1])/height,(c[3]+gap-b[1])/height))
     return value
@@ -1837,8 +1478,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
     violation=_constraint_violation(current,units,width,height)
     best,best_energy=deepcopy(current),current_energy
     best_feasible=current_feasible
-    moving=[u for u in units if (u['role']!='decoration' or not current_feasible)
-            and not u.get('corner_callout')]
+    moving=[u for u in units if u['role']!='decoration' or not current_feasible]
     if not moving:
         return current,dict(before=current_energy,after=current_energy,accepted=0,iterations=0)
     accepted=0
@@ -1846,7 +1486,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
         u=moving[step%len(moving)] if step<len(moving)*2 else rng.choice(moving)
         ids={e['id'] for e in u['items']}
         block=[e for e in current if e['id'] in ids]
-        bounds=_visual_bounds(block); x,y,r,b=bounds
+        bounds=_bounds(block); x,y,r,b=bounds
         cooling=1-step/max(1,iterations)
         motion=rng.randrange(5)
         proposal=deepcopy(block)
@@ -1861,34 +1501,27 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             for v,other in _records(current,units):
                 if v is u:
                     continue
-                box=_visual_bounds(other)
+                box=_bounds(other)
                 targets.extend([box[axis],box[axis+2]-size,(box[axis]+box[axis+2]-size)/2])
             targets=[v for v in targets if abs(v-old)>extent*.001]
             if axis==0 and u.get('footer_anchor') in ('left','right'):
                 margin=min(width,height)*.05
                 target=margin if u['footer_anchor']=='left' else width-margin-size
-            elif axis==0 and state['bucket']=='banner' and u['semantic']=='logo':
-                target=min(width*.05,max(0,width-size))
             elif axis==0 and _axis_active(u,source,width,height) and u['semantic'] in ('logo','hero'):
                 target=(width-size)/2
-            elif axis==0 and state['bucket']=='banner' and u['role'] in ('copy','tag'):
+            elif axis==0 and state['flow'] in ('banner','landscape') and u['role'] in ('copy','tag'):
                 is_left_column=u['role']=='tag' or any(e.get('text_align')=='left' for e in block)
-                anchors=[_visual_bounds(other)[0] for v,other in current_records if v is not u and v['role'] in ('copy','tag')
+                anchors=[_bounds(other)[0] for v,other in current_records if v is not u and v['role'] in ('copy','tag')
                          and (v['role']=='tag' or any(e.get('text_align')=='left' for e in other))]
                 target=min(anchors,key=lambda value:abs(value-old)) if is_left_column and anchors else old
-            elif axis==1 and state['bucket']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
+            elif axis==1 and state['flow']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
                 target=_banner_centerline(current_records,width,height)-size/2
             else:
                 target=min(targets,key=lambda v:abs(v-old)) if targets and rng.random()<.55 else old+rng.uniform(-1,1)*extent*(.04*cooling+.002)
-            proposal=_move_visual(proposal,target if axis==0 else x,target if axis==1 else y)
+            proposal=_move(proposal,target if axis==0 else x,target if axis==1 else y)
         elif motion==2 and len(block)==1 and block[0]['type']=='text':
             e=proposal[0]
-            if u['role']=='footer':
-                # Footer width is an explicit layout affordance, particularly
-                # for legal copy in banners; annealing must not tighten it back
-                # to a renderer-dependent text measurement.
-                e['width']=block[0]['width']
-            elif width/height>=1.35 and '\n' not in e.get('content','') and rng.random()<.5:
+            if width/height>=1.35 and '\n' not in e.get('content','') and rng.random()<.5:
                 room=_text_right_limit(u,bounds,_records(current,units),width,height)-x
                 e['width']=max(1,min(room,_text(e,1e9)[1]+e['font_size']*.02))
             else:
@@ -1896,10 +1529,10 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             e['font_size']=_fit_text(e,e['width'],height*.7,max(1,e['font_size']*rng.choice((1.,1.04))))
             e['height']=_text(e)[0]
             _tighten_text(e)
-            new_box=_visual_bounds(proposal);new_w=new_box[2]-new_box[0]
+            new_box=_bounds(proposal);new_w=new_box[2]-new_box[0]
             align=e.get('text_align','left')
             left=(x+r-new_w)/2 if align=='center' else r-new_w if align=='right' else x
-            proposal=_move_visual(proposal,left,y)
+            proposal=_move(proposal,left,y)
         else:
             factor=rng.choice((.95,1.05))
             if u['semantic']=='logo' and factor<1:
@@ -1912,7 +1545,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             if u.get('footer_anchor') in ('left','right'):
                 margin=min(width,height)*.05
                 left=margin if u['footer_anchor']=='left' else width-margin-(r-x)*factor
-            proposal=_move_visual(proposal,left,(y+b-(b-y)*factor)/2)
+            proposal=_move(proposal,left,(y+b-(b-y)*factor)/2)
         changed=[e for e in current if e['id'] not in ids]+proposal
         feasible=_feasible(changed,units,width,height)
         if current_feasible and not feasible:
@@ -1952,36 +1585,6 @@ def _luminance(rgb):
     return sum((v/12.92 if v<=.04045 else ((v+.055)/1.055)**2)*w for v,w in zip(channels,(.2126,.7152,.0722)))
 
 
-def _visual_relationship_context(units,source,width,height):
-    """Compact visual-semantic summary for the image/text judge."""
-    roles={u.get('semantic') for u in units}
-    grouped=[]
-    peer_rows=False
-    for u in units:
-        items=u.get('items',[])
-        group_ids={e.get('group_id') for e in items if e.get('group_id')}
-        if group_ids and len(items)>1:
-            types={e.get('type') for e in items}
-            grouped.append('mixed' if len(types)>1 else next(iter(types),'art'))
-        peer_rows=peer_rows or bool(u.get('peer_ids'))
-    sw,sh=source['canvas']['width'],source['canvas']['height']
-    callout_quadrants=[]
-    for u in units:
-        if not u.get('corner_callout'):
-            continue
-        x,y,r,b=u['bounds']
-        vertical='top' if (y+b)/2<sh/2 else 'bottom'
-        horizontal='left' if (x+r)/2<sw/2 else 'right'
-        callout_quadrants.append(f'{vertical}-{horizontal}')
-    bucket=_aspect_state(source,width,height)['bucket']
-    density='dense' if len(units)>=14 else 'moderate' if len(units)>=7 else 'sparse'
-    return dict(roles=sorted(role for role in roles if role),bucket=bucket,density=density,
-                grouped_units=len(grouped),grouped_types=sorted(set(grouped)),
-                repeated_badge_row=peer_rows,
-                callout_quadrants=callout_quadrants,
-                has_footer=any(u.get('role')=='footer' for u in units))
-
-
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
     """Rendered diagnostics plus an optional learned SigLIP perceptual judge.
 
@@ -2001,71 +1604,10 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     except ImportError as exc:
         return candidates[0],dict(used=False,reason=f'Renderer unavailable: {exc}')
     entries=[]
-    sw,sh=source['canvas']['width'],source['canvas']['height']
-    source_ratio=sw/sh
-    target_ratio=width/height
-    ratio_shift=max(target_ratio/source_ratio,source_ratio/target_ratio)
     base_energy=candidates[0]['energy']
-    def family(name):
-        if name.startswith('proportional'):
-            return 'proportional'
-        if 'centered-content' in name:
-            return 'centered'
-        if 'semantic-stack' in name:
-            return 'stack'
-        if 'inline-banner' in name or 'hero-banner' in name:
-            return 'banner'
-        if 'editorial-split' in name:
-            return 'editorial-split'
-        if name.startswith(('split-','copy-first-','visual-first-')):
-            return 'reflow'
-        if 'affiliated' in name:
-            return 'affiliated'
-        if 'quiet-region' in name:
-            return 'quiet-region'
-        return name.split('-',1)[0]
-    # A large aspect-ratio change needs a true reflow. Proportional scaling is
-    # still generated as a fallback, but on its own it preserves the source
-    # hierarchy and leaves the newly available axis unused. Letting SigLIP
-    # choose it here repeatedly produced attractive-looking thumbnails with
-    # the original stack merely enlarged, so omit that topology from judging
-    # when a feasible structural alternative exists.
-    judge_pool=candidates
-    if ratio_shift>=1.6:
-        reflowed=[candidate for candidate in candidates
-                  if not candidate['name'].startswith('proportional')]
-        if reflowed:
-            judge_pool=reflowed
-    # Give the rendered judge genuinely different layout topologies. Sorting
-    # only by geometry energy often leaves a single candidate in its shortlist.
-    shortlist=[];seen_families=set()
-    for candidate in judge_pool:
-        key=family(candidate['name'])
-        if key not in seen_families:
-            shortlist.append(candidate);seen_families.add(key)
-        if len(shortlist)>=5:
-            break
-    for candidate in judge_pool:
-        if len(shortlist)>=5:break
-        if candidate not in shortlist:shortlist.append(candidate)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
-        # Render the source first so it is the reference available before any
-        # adapted candidate is produced or sent to the visual judge.
-        reference_path=Path(directory)/'original.png'
-        reference_image=None
-        try:
-            render_design_to_png(source,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',reference_path,max_size=640)
-            with Image.open(reference_path) as image:
-                reference_image=image.convert('RGB')
-        except Exception:
-            # Source comparison is an optional cue; candidate judging remains
-            # available if an original asset or renderer path is unavailable.
-            pass
-        for index,candidate in enumerate(shortlist):
-            # All entrants have already passed hard geometry checks. A wider,
-            # still bounded band lets perceptual ranking compare meaningful
-            # structures instead of nearly identical energy winners only.
-            if candidate['energy']>base_energy+max(50,base_energy*.85):
+        for index,candidate in enumerate(candidates[:3]):
+            if candidate['energy']>base_energy+max(8,base_energy*.20):
                 continue
             doc=_assemble(candidate['elements'],backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
@@ -2121,8 +1663,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
     heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
-    relationship_context=_visual_relationship_context(units,source,width,height)
-    perceptual=_siglip_rerank(valid,heuristic_cost,reference_image,relationship_context)
+    perceptual=_siglip_rerank(valid,heuristic_cost)
     index=perceptual.get('selected_index')
     selected=valid[index] if index is not None else min(valid,key=heuristic_cost)
     report=dict(used=True,
@@ -2132,14 +1673,15 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     return selected['candidate'],report
 
 
-def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=None):
-    """Optional learned SigLIP re-rank among already-valid candidate renders.
+def _siglip_rerank(valid, heuristic_cost):
+    """Optional learned SigLIP tie-break among already-valid candidate renders.
 
     Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
     entry in ``valid``; otherwise it is ``None`` and the caller keeps the pure
-    heuristic winner. SigLIP may only pick among the bounded, hard-valid visual
-    shortlist whose heuristic cost is within a generous but finite band, so it
-    cannot rescue an illegible or off-canvas layout. Degrades to a no-op
+    heuristic winner. SigLIP may only pick among candidates whose heuristic cost
+    (layout energy + legibility/busyness cost) is within a near-tie band of the
+    best -- so it reorders geometry-preference ties but can never rescue a
+    materially worse (e.g. illegible or off-balance) layout. Degrades to a no-op
     when torch/transformers or the baked weights are absent.
     """
     if len(valid)<2:
@@ -2148,8 +1690,7 @@ def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=N
         from engine.vision import score_layouts
     except Exception as exc:
         return dict(used=False,selected_index=None,reason=f'Vision module unavailable: {exc}')
-    result=score_layouts([e['image'] for e in valid],reference_image=reference_image,
-                         layout_context=layout_context)
+    result=score_layouts([e['image'] for e in valid])
     if result is None:
         return dict(used=False,selected_index=None,reason='SigLIP returned no scores')
     scores,note=result
@@ -2160,20 +1701,12 @@ def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=N
     # Near-tie band: candidates within this tolerance of the best heuristic cost
     # are considered interchangeable on the heuristics, so the learned judge
     # decides among them. Anything worse than the band is never chosen here.
-    tolerance=max(45.,abs(best_cost)*.85)
+    tolerance=max(8.,abs(best_cost)*.15)
     band=[i for i,c in enumerate(costs) if c<=best_cost+tolerance]
-    best_cost=min(costs)
-    # Let the visual model decide between layouts, while a small capped
-    # geometry penalty keeps a barely higher image/text similarity from
-    # overruling a clearly more balanced deterministic layout.
-    penalties=[min(.18,max(0.,cost-best_cost)*.04) for cost in costs]
-    adjusted=[score-penalty for score,penalty in zip(scores,penalties)]
-    chosen=max(band,key=lambda i:adjusted[i])
+    chosen=max(band,key=lambda i:scores[i])
     return dict(used=True,note=note,selected_index=chosen,
                 scores=[round(s,4) for s in scores],
-                adjusted_scores=[round(s,4) for s in adjusted],
                 heuristic_costs=[round(c,4) for c in costs],
-                heuristic_penalties=[round(p,4) for p in penalties],
                 tie_band=band,tolerance=round(tolerance,4),
                 overrode_heuristic=costs[chosen]>best_cost+1e-9)
 
@@ -2199,9 +1732,6 @@ def _adapt_with_diagnostics(source,target_canvas):
     if len({e['id'] for e in source['elements']})!=len(source['elements']):
         raise ValueError('Source element IDs must be unique.')
     backgrounds,units=_analyze(source)
-    for unit in units:
-        unit['target_canvas']=(width,height)
-        unit['source_canvas']=(sw,sh)
     desired=sqrt(width*height/(sw*sh))
     state=_aspect_state(source,width,height)
     context=_perceptual_context(source,backgrounds,units,width,height)
@@ -2217,18 +1747,15 @@ def _adapt_with_diagnostics(source,target_canvas):
     if width/height>=1.35:
         seeds.append(dict(name='editorial-split',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42)))
         seeds.append(dict(name='editorial-split-reversed',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42,True)))
-    if state['bucket']=='banner':
+    if state['flow'] in ('banner','landscape'):
         for share in (.14,.22,.30):
             seeds.append(dict(name=f'inline-banner-{share}',elements=_banner_seed(units,width,height,desired*1.15,share,source_size=(sw,sh))))
         seeds.append(dict(name='left-hero-banner',elements=_banner_seed(units,width,height,desired*1.15,.24,True,source_size=(sw,sh))))
-    if state['bucket'] in ('story','portrait','square'):
+    if state['flow'] in ('story','portrait','square'):
         for hero_first in (True,False):
             shares=(.42,.52,.64,.72,.82) if .75<=width/height<=1.3 else (.34,.42,.48,.52)
             for share in shares:
                 seeds.append(dict(name=f'semantic-stack-{hero_first}-{share}',elements=_stack_seed(units,width,height,desired*1.15,share,hero_first,(sw,sh))))
-    if state['bucket']!='banner' and not any(
-        u['role']=='visual' or u['semantic'] in ('hero','art') for u in units):
-        seeds.append(dict(name='centered-content-stack',elements=_centered_content_seed(units,width,height,desired*1.15,(sw,sh))))
     if context['affinities']:
         seeds.append(dict(name='affiliated-features',elements=_affiliated_seed(units,context,width,height,sw,sh,desired)))
     if context['background_map']:
@@ -2275,45 +1802,11 @@ def _adapt_with_diagnostics(source,target_canvas):
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
-    # Run up to two bounded refinement rounds. Each round proposes local
-    # changes from the current best, then compares parent and child against
-    # both the inferred relationship cues and the original rendered design.
-    # Stop early when the judge keeps the parent or the geometry has settled.
-    refinement=dict(generated=0,accepted=0,used=False,rounds=[])
-    for round_index in range(2):
-        if not _feasible(winner['elements'],units,width,height):
-            break
-        parent=winner
-        refined,stats=_polish(parent['elements'],units,source,width,height,desired,
-                              seed=120319+round_index*3571,iterations=48)
-        refined_by_id={e['id']:e for e in refined}
-        changed=any(any(abs(refined_by_id[old['id']].get(key,0)-old.get(key,0))>.05
-                        for key in ('x','y','width','height','font_size'))
-                    for old in parent['elements'] if old['id'] in refined_by_id)
-        refinement['generated']+=1
-        refinement['accepted']+=stats['accepted']
-        round_report=dict(round=round_index+1,accepted=stats['accepted'],used=False)
-        if not changed or not _feasible(refined,units,width,height):
-            refinement['rounds'].append(round_report)
-            break
-        variant=dict(name=f"refined-{parent['name']}",elements=refined,
-                     energy=_energy(refined,units,source,width,height,desired))
-        refined_winner,refined_visual=_visual_rerank(
-            [parent,variant],backgrounds,units,source,width,height,desired)
-        round_report.update(used=True,winner=refined_winner['name'])
-        refinement['rounds'].append(round_report)
-        visual=dict(refined_visual,first_pass=visual,refinement_judge=refined_visual)
-        if refined_winner['name']==parent['name']:
-            break
-        refinement['used']=True
-        refinement['winner']=refined_winner['name']
-        winner=refined_winner
     output=_assemble(winner['elements'],backgrounds,source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
                 energy_terms=_energy_terms(winner['elements'],units,source,width,height,desired),
                 candidates=[{k:v for k,v in c.items() if k!='elements'} for c in optimized],
-                refinement=refinement,
                 visual=visual,hard_constraints_passed=_feasible(winner['elements'],units,width,height),
                 seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),total=round(perf_counter()-start,4)))
     return output,report

@@ -72,6 +72,12 @@ def render_preview_data(design):
 
 
 def adapt_preview(task, source_png=None, validated=None):
+    import importlib
+    import engine.resize
+    importlib.reload(engine.resize)
+    current_adapt = engine.resize._adapt_with_diagnostics
+    current_text = engine.resize._text
+
     source, target = validated or validate_task(task)
     started = perf_counter()
     # Render the original before starting the expensive search. The streaming
@@ -80,11 +86,20 @@ def adapt_preview(task, source_png=None, validated=None):
         source_png, source_warnings = render_preview_data(source)
     else:
         source_warnings = []
-    output = resize(source, target)
+    output, diagnostics = current_adapt(source, target)
     warnings = source_warnings + self_check(source, output)
+    gate = diagnostics.get('quality_gate', {})
+    if gate and not gate.get('passed', False):
+        faults = ', '.join(gate.get('faults', {}).keys())
+        repair_passes = sum(bool(item.get('used'))
+                            for item in diagnostics.get('refinement', {}).get('rounds', []))
+        warnings.append(
+            f"Layout quality checks still flag {faults} after "
+            f"{repair_passes} automatic repair pass(es)."
+        )
     for e in output['elements']:
         if e['type'] == 'text':
-            h, w, lines = _text(e)
+            h, w, lines = current_text(e)
             if h > e['height'] + .1 or w > e['width'] + .1 or (e.get('max_lines') and lines > e['max_lines']):
                 warnings.append(f"{e['id']}: text may not fit at this resolution.")
             if e['font_size'] < 8:

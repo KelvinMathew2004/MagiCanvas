@@ -183,7 +183,9 @@ def score_layouts(images, reference_image=None, layout_context=None):
                 return_tensors="pt",
             )
             output=model(**inputs)
-            logits=output.logits_per_image[:len(images)]
+            logits=output.logits_per_image
+            if reference_image is not None:
+                logits=logits[:len(images)]
             positive=logits[:,:len(positive_prompts)].mean(dim=1)
             negative=logits[:,len(positive_prompts):].mean(dim=1)
             quality=(positive-negative)
