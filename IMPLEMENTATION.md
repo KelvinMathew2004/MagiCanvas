@@ -20,7 +20,9 @@ training data, model weights, or model dependencies.
    does not turn a whole design into one group.
 3. Preserve artwork proportions with a common transform for the entire group.
    Simple backing/label units may widen together and refit their labels.
-4. Generate a proportional preservation candidate and portrait/landscape reflow
+4. Classify the selected target into a format bucket (banner, wide, square,
+   portrait or story), while retaining a separate near-source `preserve` signal.
+   Generate a proportional preservation candidate and bucket-appropriate reflow
    candidates with different copy/art allocations and typography scales. Fonts
    can grow as well as shrink. Support multiple visuals and rows of badges.
 5. Measure supplied local brand fonts with Pillow, using a wrap calculation based
@@ -108,6 +110,9 @@ renders. It lives in `engine/vision.py` and is invoked from `_visual_rerank` /
   When the aspect-ratio shift is at least 1.6×, proportional scaling remains a
   fallback but is left out of visual ranking whenever a feasible reflow exists;
   large format changes should use the newly available canvas axis.
+  Banner composition and its spacing/centering terms are active only in the
+  banner bucket; regular landscape formats use editorial and split candidates
+  without inheriting the compact-banner layout rules.
 - **Offline by construction.** Weights are baked into the Docker image at *build*
   time by `scripts/fetch_siglip.py` into `models/siglip` and loaded with
   `local_files_only=True`; nothing is fetched at runtime, so `--network none`

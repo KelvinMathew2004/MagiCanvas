@@ -134,10 +134,13 @@ image proportions, rotations, unusual content, and determinism.
 
 ### Inspect the layout engine
 
-The engine now combines feature-based semantic roles, aspect-ratio layout
-families, Cassowary bounds/separation constraints, deterministic multi-start
+The engine now combines feature-based semantic roles, target-format buckets
+(banner, wide, square, portrait, story), Cassowary bounds/separation constraints, deterministic multi-start
 energy refinement, balanced typography, repeated icon/caption affinities,
 background-busyness-guided candidates, and rendered contrast/busyness checks.
+Banner-only spacing and centering rules stay isolated from regular landscape
+layouts; a separate near-source signal preserves composition when the target
+ratio is similar to the original.
 When the optional local SigLIP weights are installed, it also ranks up to five
 distinct valid layouts and performs one bounded refinement pass. Artwork groups
 remain atomic; simple text/backplate pairs can reflow together. The scorer is

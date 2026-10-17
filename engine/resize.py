@@ -622,7 +622,7 @@ def _footer_band(units,width,height,scale,gap,one_line_text=False):
 
 def _axis_active(u,source,width,height):
     state=_aspect_state(source,width,height)
-    vertical=state['flow'] in ('story','portrait','square') or (state['flow']=='preserve' and width/height<1.3)
+    vertical=state['bucket'] in ('story','portrait','square')
     return vertical and u.get('source_centered',False)
 
 
@@ -1046,17 +1046,24 @@ def _enrich_units(source, units):
 def _aspect_state(source, width, height):
     ratio = width/height
     delta = ratio/(source['canvas']['width']/source['canvas']['height'])
+    # Bucket only by the selected target format. Keep `flow=preserve` as a
+    # separate signal for near-identical source/target ratios; format-specific
+    # rules still come from the bucket and therefore remain predictable.
+    if ratio >= 3.2:
+        bucket='banner'
+    elif ratio <= .68:
+        bucket='story'
+    elif .82 <= ratio <= 1.2:
+        bucket='square'
+    elif ratio > 1.2:
+        bucket='wide'
+    else:
+        bucket='portrait'
     if abs(log(delta)) < .18:
         flow = 'preserve'
-    elif ratio >= 3.2:
-        flow = 'banner'
-    elif ratio <= .68:
-        flow = 'story'
-    elif .82 <= ratio <= 1.2:
-        flow = 'square'
     else:
-        flow = 'landscape' if ratio > 1 else 'portrait'
-    return dict(flow=flow, delta=delta, ratio=ratio)
+        flow = bucket
+    return dict(flow=flow, bucket=bucket, delta=delta, ratio=ratio)
 
 
 def _semantic_order(u):
@@ -1653,12 +1660,12 @@ def _energy_terms(elements, units, source, width, height, desired):
             source_box=u['bounds'];source_share=(source_box[2]-source_box[0])*(source_box[3]-source_box[1])/(source['canvas']['width']*source['canvas']['height'])
             floor=source_share*.45
             terms['hero_prominence']+=max(0,(floor-area/(width*height))/max(1e-9,floor))**2
-            if state['flow'] in ('square','portrait','story','landscape'):
+            if state['bucket'] in ('square','portrait','story','wide'):
                 source_height=(source_box[3]-source_box[1])/source['canvas']['height']
                 target_height=(b-y)/height
-                minimum=max(source_height*.72,{'square':.42,'portrait':.27,'story':.25,'landscape':.28}[state['flow']])
+                minimum=max(source_height*.72,{'square':.42,'portrait':.27,'story':.25,'wide':.28}[state['bucket']])
                 shortfall=max(0,(minimum-target_height)/max(.01,minimum))
-                terms['hero_prominence']+=shortfall if state['flow']=='square' else shortfall**2
+                terms['hero_prominence']+=shortfall if state['bucket']=='square' else shortfall**2
         if u['semantic']=='logo' and width/height>=2.4:
             old=u['bounds'];ratio=(old[2]-old[0])/max(1e-9,old[3]-old[1])
             min_h=min(height*.16,(old[3]-old[1])*desired*.75)
@@ -1667,7 +1674,7 @@ def _energy_terms(elements, units, source, width, height, desired):
             terms['brand_visibility']+=max(0,(min_w-(r-x))/max(1,min_w))**2
             wanted=min(height*.60,width*.15/max(1e-9,ratio),(old[3]-old[1])*desired*1.8)
             terms['brand_visibility']+=max(0,(wanted-(b-y))/max(1,wanted))**2
-        if state['flow']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
+        if state['bucket']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
             center=(y+b)/2
             terms['banner_centering']+=((center-_banner_centerline(records,width,height))/height)**2
         if _axis_active(u,source,width,height):
@@ -1707,10 +1714,10 @@ def _energy_terms(elements, units, source, width, height, desired):
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in left_copy)
             tags=[b for (u,_),b in zip(records,boxes) if u['role']=='tag']
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in tags)
-            if state['flow']!='banner':
+            if state['bucket']!='banner':
                 actions=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
                 terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in actions)
-    if state['flow']=='banner':
+    if state['bucket']=='banner':
         copy_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='copy']
         action_boxes=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
         tag_count=sum(u['role']=='tag' for u,_ in records)
@@ -1734,7 +1741,7 @@ def _energy_terms(elements, units, source, width, height, desired):
             terms['banner_gap_evenness']=sum(((gap-mean)/normalizer)**2 for gap in gaps)/len(gaps)
     # Simple centered ads benefit from a shared axis and a compact, even stack.
     # Score only independent semantic bands; the contents of linked units remain atomic.
-    simple_centered=(.68<=width/height<3.2 or state['flow']=='story') and not any(
+    simple_centered=(state['bucket']!='banner') and not any(
         u['role']=='visual' or u['semantic'] in ('hero','art') for u,_ in records)
     if simple_centered:
         bands=[]
@@ -1747,7 +1754,7 @@ def _energy_terms(elements, units, source, width, height, desired):
             centers=[((b[0]+b[2])/2,(b[1]+b[3])/2) for b in bands]
             terms['centered_flow']+=sum(((x-width/2)/width)**2 for x,_ in centers)*5
             cluster_top=min(b[1] for b in bands);cluster_bottom=max(b[3] for b in bands)
-            max_cluster=.42 if state['flow']=='story' else .64
+            max_cluster=.42 if state['bucket']=='story' else .64
             terms['centered_flow']+=max(0,(cluster_bottom-cluster_top)/height-max_cluster)**2*8
             gaps=[b[1]-a[3] for a,b in zip(bands,bands[1:])]
             if len(gaps)>1:
@@ -1757,14 +1764,14 @@ def _energy_terms(elements, units, source, width, height, desired):
     def role_bounds(roles):
         return _visual_bounds([e for (u,items) in records if u['semantic'] in roles for e in items])
     flow_roles=[{'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}]
-    if state['flow']=='story':
+    if state['bucket']=='story':
         flow_roles=[{'logo'},{'hero','art'},{'headline','subheading','body','kicker'},{'cta'}]
     flow=[]
     for roles in flow_roles:
         if any(u['semantic'] in roles for u,_ in records):
             flow.append(role_bounds(roles))
-    if state['flow'] in ('banner','story'):
-        axis,extent=(0,width) if state['flow']=='banner' else (1,height)
+    if state['bucket'] in ('banner','story'):
+        axis,extent=(0,width) if state['bucket']=='banner' else (1,height)
         for a,b in zip(flow,flow[1:]):
             ac=(a[axis]+a[axis+2])/2;bc=(b[axis]+b[axis+2])/2
             terms['hierarchy']+=max(0,(ac-bc)/extent)*2
@@ -1772,7 +1779,7 @@ def _energy_terms(elements, units, source, width, height, desired):
     if main:
         left,top=min(b[0] for b in main),min(b[1] for b in main)
         right,bottom=max(b[2] for b in main),max(b[3] for b in main)
-        min_height_use=.40 if simple_centered and state['flow']=='story' else .76
+        min_height_use=.40 if simple_centered and state['bucket']=='story' else .76
         terms['canvas_use']=(max(0,.80-(right-left)/width)**2+max(0,min_height_use-(bottom-top)/height)**2)
     terms['badge_flow']=_badge_flow(records,width,height)
     terms.update(_perceptual_terms(records,boxes,units,width,height))
@@ -1860,16 +1867,16 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             if axis==0 and u.get('footer_anchor') in ('left','right'):
                 margin=min(width,height)*.05
                 target=margin if u['footer_anchor']=='left' else width-margin-size
-            elif axis==0 and state['flow']=='banner' and u['semantic']=='logo':
+            elif axis==0 and state['bucket']=='banner' and u['semantic']=='logo':
                 target=min(width*.05,max(0,width-size))
             elif axis==0 and _axis_active(u,source,width,height) and u['semantic'] in ('logo','hero'):
                 target=(width-size)/2
-            elif axis==0 and state['flow'] in ('banner','landscape') and u['role'] in ('copy','tag'):
+            elif axis==0 and state['bucket']=='banner' and u['role'] in ('copy','tag'):
                 is_left_column=u['role']=='tag' or any(e.get('text_align')=='left' for e in block)
                 anchors=[_visual_bounds(other)[0] for v,other in current_records if v is not u and v['role'] in ('copy','tag')
                          and (v['role']=='tag' or any(e.get('text_align')=='left' for e in other))]
                 target=min(anchors,key=lambda value:abs(value-old)) if is_left_column and anchors else old
-            elif axis==1 and state['flow']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
+            elif axis==1 and state['bucket']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
                 target=_banner_centerline(current_records,width,height)-size/2
             else:
                 target=min(targets,key=lambda v:abs(v-old)) if targets and rng.random()<.55 else old+rng.uniform(-1,1)*extent*(.04*cooling+.002)
@@ -2166,16 +2173,16 @@ def _adapt_with_diagnostics(source,target_canvas):
     if width/height>=1.35:
         seeds.append(dict(name='editorial-split',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42)))
         seeds.append(dict(name='editorial-split-reversed',elements=_editorial_split_seed(units,width,height,sw,sh,desired*1.15,.42,True)))
-    if state['flow'] in ('banner','landscape'):
+    if state['bucket']=='banner':
         for share in (.14,.22,.30):
             seeds.append(dict(name=f'inline-banner-{share}',elements=_banner_seed(units,width,height,desired*1.15,share,source_size=(sw,sh))))
         seeds.append(dict(name='left-hero-banner',elements=_banner_seed(units,width,height,desired*1.15,.24,True,source_size=(sw,sh))))
-    if state['flow'] in ('story','portrait','square'):
+    if state['bucket'] in ('story','portrait','square'):
         for hero_first in (True,False):
             shares=(.42,.52,.64,.72,.82) if .75<=width/height<=1.3 else (.34,.42,.48,.52)
             for share in shares:
                 seeds.append(dict(name=f'semantic-stack-{hero_first}-{share}',elements=_stack_seed(units,width,height,desired*1.15,share,hero_first,(sw,sh))))
-    if (.68<=width/height<3.2 or state['flow']=='story') and not any(
+    if state['bucket']!='banner' and not any(
         u['role']=='visual' or u['semantic'] in ('hero','art') for u in units):
         seeds.append(dict(name='centered-content-stack',elements=_centered_content_seed(units,width,height,desired*1.15,(sw,sh))))
     if context['affinities']:
