@@ -6,7 +6,9 @@ import unittest
 from PIL import Image
 
 from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed, _banner_seed,
-                           _action_band, _callout_block, _energy_terms, _stack_seed, _text)
+                           _action_band, _callout_block, _decorations, _energy_terms,
+                           _badge_flow, _constrain, _move, _align_peer_rows,
+                           _stack_balance, _stack_seed, _text)
 from engine.vision import _letterbox_square
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -99,7 +101,71 @@ class LayoutMechanicsTests(unittest.TestCase):
         action_box=_bounds([by_id[e['id']] for u in actions for e in u['items']])
         self.assertAlmostEqual(tag_box[0],action_box[0])
         self.assertLess(tag_box[3],action_box[1])
+        tag_heights=[_bounds([by_id[e['id']] for e in u['items']])[3]-
+                     _bounds([by_id[e['id']] for e in u['items']])[1] for u in tags]
+        self.assertLess(max(tag_heights)-min(tag_heights),1e-5)
         self.assertLessEqual(h,260+1e-5)
+        self.assertGreater(action_box[3]-action_box[1],
+                           max(_bounds([by_id[e['id']] for e in u['items']])[3]-
+                               _bounds([by_id[e['id']] for e in u['items']])[1] for u in tags))
+
+    def test_peer_button_row_is_repaired_to_a_shared_vertical_axis(self):
+        source=sample(3);units=_analyze(source)[1]
+        tags=[u for u in units if u['role']=='tag'];actions=[u for u in units if u['role']=='action']
+        elements=_banner_seed(units,1200,260,1.1,.3,False,(1080,1350))
+        by_id={e['id']:e for e in elements}
+        for e in tags[0]['items']:
+            by_id[e['id']]['y']+=8
+        repaired=_constrain(elements,units,1200,260)
+        self.assertIsNotNone(repaired)
+        for e in tags[1]['items']:
+            next(item for item in repaired if item['id']==e['id'])['y']+=6
+        _align_peer_rows(repaired,units)
+        fixed={e['id']:e for e in repaired}
+        centers=[]
+        for unit in tags:
+            box=_bounds([fixed[e['id']] for e in unit['items']])
+            centers.append((box[1]+box[3])/2)
+        self.assertLess(max(centers)-min(centers),1e-5)
+        heights=[_bounds([fixed[e['id']] for e in unit['items']])[3]-
+                 _bounds([fixed[e['id']] for e in unit['items']])[1] for unit in tags]
+        self.assertLess(max(heights)-min(heights),1e-5)
+
+    def test_contrasting_badge_stays_between_matching_button_colors(self):
+        colors=['#eb6b35','#241725','#eb6b35']
+        units=[];records=[]
+        for i,color in enumerate(colors):
+            x=i*40
+            item=dict(id=f'tag{i}',type='shape',shape_type='rectangle',fill_color=color,
+                      x=x,y=0,width=30,height=12)
+            unit=dict(items=[item],bounds=(x,0,x+30,12),role='tag',semantic='badge',
+                      peer_ids=('tag0','tag1','tag2'),source_upper=False)
+            units.append(unit);records.append((unit,[item]))
+        centered=_badge_flow(records,120,40)
+        displaced=deepcopy(records)
+        # Move the contrasting black pill to the edge, leaving both orange pills together.
+        displaced[0][1][0]['x']=40
+        displaced[1][1][0]['x']=0
+        displaced[2][1][0]['x']=80
+        self.assertGreater(_badge_flow(displaced,120,40),centered)
+
+    def test_banner_cta_keeps_clearance_from_product_when_room_exists(self):
+        source=sample(3);units=_analyze(source)[1]
+        elements=_banner_seed(units,1600,400,1.1,.3,False,(1080,1350))
+        by_id={e['id']:e for e in elements}
+        action=next(u for u in units if u['semantic']=='cta')
+        hero=next(u for u in units if u['semantic']=='hero')
+        action_items=[by_id[e['id']] for e in action['items']]
+        ab,hb=_bounds(action_items),_bounds([by_id[e['id']] for e in hero['items']])
+        spaced=deepcopy(elements);spaced_by_id={e['id']:e for e in spaced}
+        spaced_items=[spaced_by_id[e['id']] for e in action['items']]
+        _move(spaced_items,50,ab[1])
+        before=_energy_terms(spaced,units,source,1600,400,1.1)['primary_clearance']
+        cramped=deepcopy(elements);cramped_by_id={e['id']:e for e in cramped}
+        cramped_items=[cramped_by_id[e['id']] for e in action['items']]
+        _move(cramped_items,hb[0]-(ab[2]-ab[0])*.15,(hb[1]+hb[3]-ab[3]+ab[1])/2)
+        after=_energy_terms(cramped,units,source,1600,400,1.1)['primary_clearance']
+        self.assertGreater(after,before)
 
     def test_callout_grows_above_short_side_scale_with_bounded_height(self):
         source=sample(3);u=next(u for u in _analyze(source)[1] if u.get('corner_callout'))
@@ -121,7 +187,7 @@ class LayoutMechanicsTests(unittest.TestCase):
         self.assertEqual(baseline['hero_prominence'],0)
         self.assertGreater(changed['hero_prominence'],.5)
 
-    def test_square_seed_set_can_expand_hero_beyond_half_the_content_band(self):
+    def test_square_hero_stays_within_source_relative_scale_when_slot_expands(self):
         source=sample(3);units=_analyze(source)[1]
         hero=next(u for u in units if u['semantic']=='hero')
         small=_stack_seed(units,1080,1080,1.15,.42,True,(1080,1350))
@@ -129,9 +195,44 @@ class LayoutMechanicsTests(unittest.TestCase):
         def height(elements):
             by_id={e['id']:e for e in elements}
             return _bounds([by_id[e['id']] for e in hero['items']])[3]-_bounds([by_id[e['id']] for e in hero['items']])[1]
-        self.assertGreater(height(large),height(small)*1.35)
-        self.assertGreater(_energy_terms(small,units,source,1080,1080,1)['hero_prominence'],
-                           _energy_terms(large,units,source,1080,1080,1)['hero_prominence'])
+        source_height=hero['bounds'][3]-hero['bounds'][1]
+        self.assertLessEqual(height(large),source_height*1.15+1e-5)
+        self.assertLessEqual(height(small),source_height*1.15+1e-5)
+        self.assertLess(height(small),height(large))
+
+    def test_background_circle_keeps_its_crop_at_the_canvas_edge(self):
+        units=_analyze(sample(2))[1]
+        circle=next(u for u in units if u['role']=='decoration' and u['items'][0].get('shape_type')=='ellipse')
+        box=_bounds(_decorations([circle],1080,1080,1080,1080,[]))
+        self.assertLess(box[0],0)
+        self.assertLess(box[1],0)
+
+    def test_smaller_supporting_copy_keeps_subheading_relationship(self):
+        units=_analyze(sample(2))[1]
+        headline=next(u for u in units if u['semantic']=='headline')
+        supporting=next(u for u in units if u['semantic']=='subheading')
+        self.assertLess(max(e['font_size'] for e in supporting['items']),
+                        max(e['font_size'] for e in headline['items'])*.48)
+
+    def test_vertical_stack_prefers_balanced_group_and_outer_gaps(self):
+        units=[
+            dict(semantic='logo',role='header',source_upper=False),
+            dict(semantic='hero',role='visual',source_upper=False),
+            dict(semantic='headline',role='copy',source_upper=False),
+            dict(semantic='cta',role='action',source_upper=False),
+        ]
+        records=[(u,[]) for u in units]
+        balanced=[(0,50,20,100),(0,200,20,300),(0,400,20,500),(0,600,20,650)]
+        uneven=[(0,10,20,60),(0,90,20,190),(0,500,20,600),(0,900,20,950)]
+        self.assertLess(_stack_balance(records,balanced,1000,1000),
+                        _stack_balance(records,uneven,1000,1000))
+
+    def test_decorative_shapes_can_scale_with_available_space(self):
+        source=sample(2);units=_analyze(source)[1]
+        circle=next(u for u in units if u['role']=='decoration' and u['items'][0].get('shape_type')=='ellipse')
+        result=_decorations([circle],1080,1080,1080,1080,[])
+        box=_bounds(result)
+        self.assertGreater(box[2]-box[0],1080*.32)
 
     def test_avoidable_wrap_penalty_when_horizontal_room_exists(self):
         source=dict(canvas=dict(width=800,height=100),elements=[

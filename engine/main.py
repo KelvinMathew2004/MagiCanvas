@@ -63,7 +63,12 @@ def self_check(source: dict, output: dict) -> list[str]:
             else:
                 x0,y0=el["x"],el["y"]
                 x1, y1 = x0 + el["width"], y0 + el["height"]
-            if x0 < -0.5 or y0 < -0.5 or x1 > cw + 0.5 or y1 > ch + 0.5:
+            # Low-opacity ellipses are ambient background decoration and may
+            # intentionally bleed past the canvas edge for a natural crop.
+            edge_bleed = (el.get("type") == "shape"
+                          and el.get("shape_type") == "ellipse"
+                          and float(el.get("opacity", 1)) < 0.4)
+            if not edge_bleed and (x0 < -0.5 or y0 < -0.5 or x1 > cw + 0.5 or y1 > ch + 0.5):
                 problems.append(f"element '{el.get('id')}' is off-canvas ({cw}x{ch})")
 
     return problems

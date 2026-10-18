@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 from copy import deepcopy
+import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -12,6 +13,7 @@ import sys
 from tempfile import TemporaryDirectory
 from time import perf_counter
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -239,7 +241,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=5050)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    try:
+        server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise
+        try:
+            with urlopen(f'http://127.0.0.1:{args.port}/', timeout=1) as response:
+                is_preview = response.status == 200 and b'<title>MagiCanvas</title>' in response.read(8192)
+        except Exception:
+            is_preview = False
+        if is_preview:
+            print(f'MagiCanvas preview is already running: http://127.0.0.1:{args.port}', flush=True)
+            return
+        raise SystemExit(
+            f'Port {args.port} is already in use by another service. '
+            f'Close it or start the preview with --port {args.port + 1}.'
+        ) from None
     print(f'MagiCanvas preview: http://127.0.0.1:{args.port}', flush=True)
     try:
         server.serve_forever()

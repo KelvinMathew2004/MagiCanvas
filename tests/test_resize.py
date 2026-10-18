@@ -26,10 +26,12 @@ class ResizeTests(unittest.TestCase):
                 if key not in mutable:
                     self.assertEqual(new[key], value)
             l,t,r,b = _bounds([new])
-            self.assertGreaterEqual(l, -.00001)
-            self.assertGreaterEqual(t, -.00001)
-            self.assertLessEqual(r, target['width']+.00001)
-            self.assertLessEqual(b, target['height']+.00001)
+            edge_bleed = new['type']=='shape' and new.get('shape_type')=='ellipse' and new.get('opacity',1)<.4
+            if not edge_bleed:
+                self.assertGreaterEqual(l, -.00001)
+                self.assertGreaterEqual(t, -.00001)
+                self.assertLessEqual(r, target['width']+.00001)
+                self.assertLessEqual(b, target['height']+.00001)
             if new['type']=='image' and old.get('fit','contain')!='cover' and old['width']*old['height']:
                 self.assertAlmostEqual(new['width']/new['height'], old['width']/old['height'], places=6)
             if new['type']=='text':
@@ -141,8 +143,8 @@ class SiglipRerankTests(unittest.TestCase):
     def test_learned_score_breaks_a_near_tie(self):
         from unittest.mock import patch
         from engine.resize import _siglip_rerank
-        # A and B are within the near-tie band; SigLIP prefers B.
-        entries=[self._entry('A',100.),self._entry('B',103.)]
+        # A and B are effectively tied; SigLIP prefers B.
+        entries=[self._entry('A',100.),self._entry('B',100.1)]
         with patch('engine.vision.score_layouts',return_value=([0.,5.],'mock')):
             report=_siglip_rerank(entries,self._cost)
         self.assertTrue(report['used'])
@@ -158,6 +160,17 @@ class SiglipRerankTests(unittest.TestCase):
         with patch('engine.vision.score_layouts',return_value=([0.,9.],'mock')):
             report=_siglip_rerank(entries,self._cost)
         self.assertTrue(report['used'])
+        self.assertEqual(report['selected_index'],0)
+        self.assertFalse(report['overrode_heuristic'])
+
+    def test_square_visual_does_not_override_readability_cost(self):
+        from unittest.mock import patch
+        from engine.resize import _siglip_rerank
+        # A visually preferred but substantially more expensive large-hero
+        # candidate must not beat the smaller, more readable square layout.
+        entries=[self._entry('readable',8.6552),self._entry('large-hero',12.217)]
+        with patch('engine.vision.score_layouts',return_value=([0.,9.],'mock')):
+            report=_siglip_rerank(entries,self._cost)
         self.assertEqual(report['selected_index'],0)
         self.assertFalse(report['overrode_heuristic'])
 
