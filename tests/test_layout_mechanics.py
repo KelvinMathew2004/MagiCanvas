@@ -8,7 +8,7 @@ from PIL import Image
 from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed, _banner_seed,
                            _action_band, _badge_row, _callout_block, _decorations, _energy_terms,
                            _badge_flow, _constrain, _move, _align_peer_rows,
-                           _stack_balance, _stack_seed, _text)
+                           _stack_balance, _stack_seed, _text, _copy)
 from engine.vision import _letterbox_square
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -213,15 +213,43 @@ class LayoutMechanicsTests(unittest.TestCase):
     def test_shared_badges_wrap_in_a_narrow_skyscraper_slot(self):
         units=_analyze(sample(3))[1]
         tags=[u for u in units if u['role']=='tag']
-        for unit in tags:unit['target_aspect_ratio']=160/600
+        for unit in tags:
+            unit['target_aspect_ratio']=160/600
+            unit['target_short_side']=160
+            unit['font_median']=20
         # The badge band itself can be wider than tall even on a skyscraper;
         # the target canvas aspect still needs to trigger the readable wrap.
         elements,height=_badge_row(tags,144,100,1.,8.)
         by_id={e['id']:e for e in elements}
-        boxes=[_bounds([by_id[e['id']] for e in unit['items']]) for unit in tags]
+        boxes=sorted((_bounds([by_id[e['id']] for e in unit['items']]) for unit in tags),key=lambda box:box[1])
         self.assertGreater(height,boxes[0][3]-boxes[0][1])
         self.assertTrue(all(boxes[i+1][1]>=boxes[i][3] for i in range(len(boxes)-1)))
         self.assertTrue(all(box[2]-box[0]>=120 for box in boxes))
+        self.assertTrue(all(max(e['font_size'] for e in by_id.values() if e['type']=='text'
+                                and e['id'] in {item['id'] for item in unit['items']})>=8.8
+                            for unit in tags))
+        wide_elements,_=_badge_row(tags,400,100,.30,10.)
+        wide_by_id={e['id']:e for e in wide_elements}
+        wide_boxes=[_bounds([wide_by_id[e['id']] for e in unit['items']]) for unit in tags]
+        wide_centers=[(box[1]+box[3])/2 for box in wide_boxes]
+        self.assertLess(max(wide_centers)-min(wide_centers),1.)
+
+    def test_narrow_reflow_can_move_and_unrotate_corner_callout_into_flow(self):
+        source=sample(3);units=_analyze(source)[1]
+        callout=next(u for u in units if u.get('corner_callout'))
+        ids={e['id'] for e in callout['items']}
+        elements=_stack_seed(units,160,600,.30,.42,True,(1080,1350),move_corner_callouts=True)
+        moved=[e for e in elements if e['id'] in ids]
+        box=_bounds(moved)
+        self.assertTrue(moved)
+        self.assertTrue(all(e.get('rotation',0)==0 for e in moved))
+        self.assertLess(box[1],600*.20)
+        self.assertAlmostEqual((box[0]+box[2])/2,80,delta=2)
+        footer_asset=[e for e in elements if e['id']=='holiday_watermark']
+        asset_box=_bounds(footer_asset)
+        self.assertGreater(asset_box[1],300)
+        self.assertLess(asset_box[1],600*.85)
+        self.assertLess(asset_box[2]-asset_box[0],160*.30)
 
     def test_smaller_supporting_copy_keeps_subheading_relationship(self):
         units=_analyze(sample(2))[1]
@@ -229,6 +257,20 @@ class LayoutMechanicsTests(unittest.TestCase):
         supporting=next(u for u in units if u['semantic']=='subheading')
         self.assertLess(max(e['font_size'] for e in supporting['items']),
                         max(e['font_size'] for e in headline['items'])*.48)
+
+    def test_copy_spacing_responds_to_canvas_padding(self):
+        units=sorted((u for u in _analyze(sample(3))[1] if u['role']=='copy'),
+                     key=lambda u:u['bounds'][1])
+        tight=_copy(units,900,1300,.8,24)
+        padded=_copy(units,900,1300,.8,54)
+        tight_by_id={e['id']:e for e in tight};padded_by_id={e['id']:e for e in padded}
+        head=next(u for u in units if u['semantic']=='headline')
+        sub=next(u for u in units if u['semantic']=='subheading')
+        def gap(by_id,a,b):
+            ab=_bounds([by_id[e['id']] for e in a['items']])
+            bb=_bounds([by_id[e['id']] for e in b['items']])
+            return bb[1]-ab[3]
+        self.assertGreater(gap(padded_by_id,head,sub),gap(tight_by_id,head,sub))
 
     def test_vertical_stack_prefers_balanced_group_and_outer_gaps(self):
         units=[
