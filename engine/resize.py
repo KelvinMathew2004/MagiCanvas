@@ -354,6 +354,8 @@ def _unit(u, width, height, scale, fill=False):
         scale_cap=min(scale*1.35,1.) if (u['role']=='footer' and u.get('footer_anchor') in ('left','right')
                                          and any(e['type']=='image' for e in items)) else scale
         factor = min(factor, scale_cap)
+    # PNGs keep their original frame scale; visible alpha bounds, rather than
+    # transparent padding, determine where their artwork fits.
     result = _scale(items, factor)
     for e in result:
         if e['type']=='text':
@@ -423,13 +425,26 @@ def _badge_row(units,width,height,scale,gap,align='center'):
     # Keep verified peers on one row by sharing a fitting scale when possible.
     shared_peers=(len(units)>1 and units[0].get('peer_ids') and
                   all(u.get('peer_ids')==units[0]['peer_ids'] for u in units))
+    stacked=False
     if shared_peers:
-        widths=[_bounds(_unit(u,width,height,scale))[2] for u in units]
+        widths=[]
+        for unit in units:
+            box=_bounds(_unit(unit,width,height,scale))
+            widths.append(box[2]-box[0])
         needed=sum(widths)
         if needed+gap*(len(units)-1)>width:
-            gap=min(gap,width/max(1,len(units)*8))
-            scale*=max(.001,(width-gap*(len(units)-1))/max(.001,needed))*.995
-    return _row(units,width,height,scale,gap,align,equalize_control_height=bool(shared_peers))
+            target_ratio=units[0].get('target_aspect_ratio',width/max(.001,height))
+            narrow_skyscraper=(min(target_ratio,width/max(.001,height))<.55 and
+                               needed+gap*(len(units)-1)>width*1.25)
+            # Only stack a peer group when the available slot is genuinely
+            # narrow and a single row would demand unreadable compression.
+            if not narrow_skyscraper:
+                gap=min(gap,width/max(1,len(units)*8))
+                scale*=max(.001,(width-gap*(len(units)-1))/max(.001,needed))*.995
+            else:
+                stacked=True
+    return _row(units,width,height,scale,gap,align,
+                equalize_control_height=bool(shared_peers and not stacked))
 
 
 def _action_band(tags,actions,width,height,scale,gap,stacked,align='center'):
@@ -618,15 +633,16 @@ def _decorations(units,width,height,sw,sh,occupied):
         decoration_scale=sqrt((width/sw)*(height/sh))
         block=_callout_block(u,width,height,sw,sh) if u.get('corner_callout') else _unit(u,width*.40,height*.40,decoration_scale)
         _,_,w,h=_bounds(block)
-        # Keep decorative anchors in canvas-relative positions. Allowing the
-        # accent to bleed past an edge preserves the source's cropped-circle
-        # treatment instead of shrinking or pinning it inside the frame.
+        # Keep decorative anchors in canvas-relative positions while respecting
+        # the raw exported frame boundary.
         preferred=((x+r)/2/sw*width-w/2,(y+b)/2/sh*height-h/2)
-        positions=[preferred,(-w/2,-h/2),(width-w/2,-h/2),
-                   (-w/2,height-h/2),(width-w/2,height-h/2)]
+        max_x,max_y=max(0,width-w),max(0,height-h)
+        preferred=(min(max(0,preferred[0]),max_x),min(max(0,preferred[1]),max_y))
+        positions=[preferred,(0,0),(max_x,0),(0,max_y),(max_x,max_y)]
         if u.get('corner_callout'):
             edge=min(width,height)*.045
             preferred=(width-edge-w if (x+r)/2>sw/2 else edge,edge)
+            preferred=(min(max(0,preferred[0]),max_x),min(max(0,preferred[1]),max_y))
             positions=[preferred]
         def cost(p):
             box=(p[0],p[1],p[0]+w,p[1]+h)
@@ -1194,9 +1210,8 @@ def _layered(a, b):
 
 
 def _can_bleed(u):
-    """Low-opacity ellipse accents may intentionally crop at canvas edges."""
-    return (u['role']=='decoration' and bool(u['items'])
-            and all(e['type']=='shape' and e.get('shape_type')=='ellipse' for e in u['items']))
+    """Raw output frames must remain on-canvas, including decoration."""
+    return False
 
 
 def _records(elements, units):
@@ -1215,6 +1230,11 @@ def _unit_margin(box, width, height, unit=None):
 
 
 def _feasible(elements, units, width, height):
+    if any(not all(isfinite(v) for v in (e.get('x',0),e.get('y',0),e.get('width',0),e.get('height',0)))
+           or (e.get('type')!='image' and (e['x'] < -1e-5 or e['y'] < -1e-5
+           or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5))
+           for e in elements):
+        return False
     records = [(u,_bounds(items)) for u,items in _records(elements,units)]
     gap = min(width,height)*.008
     for i,(u,b) in enumerate(records):
@@ -1229,6 +1249,23 @@ def _feasible(elements, units, width, height):
             if not (b[2]+gap<=c[0]+1e-5 or c[2]+gap<=b[0]+1e-5 or b[3]+gap<=c[1]+1e-5 or c[3]+gap<=b[1]+1e-5):
                 return False
     return True
+
+
+def _peer_row_groups(indexes,boxes):
+    """Cluster same-peer controls by observed row, preserving deliberate stacks."""
+    ordered=sorted(indexes,key=lambda i:(boxes[i][1]+boxes[i][3])/2)
+    groups=[]
+    for index in ordered:
+        box=boxes[index];center=(box[1]+box[3])/2;height=max(1e-6,box[3]-box[1])
+        if groups:
+            previous=groups[-1][-1];other=boxes[previous]
+            other_center=(other[1]+other[3])/2
+            tolerance=max(2.,min(height,max(1e-6,other[3]-other[1]))*.45)
+            if center-other_center<=tolerance:
+                groups[-1].append(index)
+                continue
+        groups.append([index])
+    return groups
 
 
 def _constrain(elements, units, width, height, topology='nearest'):
@@ -1255,10 +1292,12 @@ def _constrain(elements, units, width, height, topology='nearest'):
                 peer_bands.setdefault(u['peer_ids'],[]).append(i)
         for indexes in peer_bands.values():
             if len(indexes)<2:continue
-            first=indexes[0];first_h=boxes[first][3]-boxes[first][1]
-            for other in indexes[1:]:
-                other_h=boxes[other][3]-boxes[other][1]
-                solver.addConstraint(ys[first]+first_h/2==ys[other]+other_h/2)
+            for row in _peer_row_groups(indexes,boxes):
+                if len(row)<2:continue
+                first=row[0];first_h=boxes[first][3]-boxes[first][1]
+                for other in row[1:]:
+                    other_h=boxes[other][3]-boxes[other][1]
+                    solver.addConstraint(ys[first]+first_h/2==ys[other]+other_h/2)
         for i, ((u,_),box) in enumerate(zip(records,boxes)):
             x,y,r,b = box
             w,h = r-x,b-y
@@ -1267,6 +1306,17 @@ def _constrain(elements, units, width, height, topology='nearest'):
             solver.addConstraint(ys[i]>=margin)
             solver.addConstraint(xs[i]+w<=width-margin)
             solver.addConstraint(ys[i]+h<=height-margin)
+            # visible bounds may be inset from transparent image frames;
+            # retain raw-frame constraints for text/shapes only. Transparent
+            # PNG frames may extend past the canvas while their visible bounds fit.
+            for item in records[i][1]:
+                if item.get('type')=='image':
+                    continue
+                dx=item['x']-x;dy=item['y']-y
+                solver.addConstraint(xs[i]+dx>=0)
+                solver.addConstraint(ys[i]+dy>=0)
+                solver.addConstraint(xs[i]+dx+item['width']<=width)
+                solver.addConstraint(ys[i]+dy+item['height']<=height)
             solver.addConstraint((xs[i]==x) | kiwi.strength.strong)
             solver.addConstraint((ys[i]==y) | kiwi.strength.strong)
         for i,(u,_) in enumerate(records):
@@ -1775,9 +1825,15 @@ def _energy(elements,units,source,width,height,desired):
 
 def _constraint_violation(elements, units, width, height):
     """Continuous repair cost, including required gaps that IoU alone misses."""
-    records=[(u,_bounds(items)) for u,items in _records(elements,units)]
+    element_records=_records(elements,units)
+    records=[(u,_bounds(items)) for u,items in element_records]
     value=0.;gap=min(width,height)*.008
-    for i,(u,b) in enumerate(records):
+    for i,((u,items),(_,b)) in enumerate(zip(element_records,records)):
+        for e in items:
+            if e.get('type')=='image':
+                continue
+            value+=(max(0,-e['x'])+max(0,e['x']+e['width']-width))/width
+            value+=(max(0,-e['y'])+max(0,e['y']+e['height']-height))/height
         margin=-min(width,height)*.20 if _can_bleed(u) else 0 if u['role']=='decoration' else _unit_margin(b,width,height,u)
         value+=(max(0,margin-b[0])+max(0,b[2]-width+margin))/width
         value+=(max(0,margin-b[1])+max(0,b[3]-height+margin))/height
@@ -1800,21 +1856,24 @@ def _align_peer_rows(elements, units):
     for members in bands.values():
         if len(members)<2:continue
         boxes=[_bounds(items) for items in members]
-        center=sum((box[1]+box[3])/2 for box in boxes)/len(boxes)
-        target_height=max(max(box[3]-box[1] for box in boxes),
-                          max((e['height'] for items in members for e in items if e['type']=='text'),default=0.))
-        for items,box in zip(members,boxes):
-            _shift(items,0.,center-(box[1]+box[3])/2)
-            backgrounds=[e for e in items if e['type']=='shape' and e.get('shape_type')=='rectangle']
-            labels=[e for e in items if e['type']=='text']
-            if len(backgrounds)==1 and labels:
-                back=backgrounds[0]
-                back['height']=target_height
-                back['y']=center-target_height/2
-                if 'corner_radius' in back:
-                    back['corner_radius']=min(target_height/2,max(back['corner_radius'],target_height*.35))
-                for label in labels:
-                    label['y']=center-label['height']/2
+        for row in _peer_row_groups(list(range(len(members))),boxes):
+            if len(row)<2:continue
+            row_members=[members[i] for i in row];row_boxes=[boxes[i] for i in row]
+            center=sum((box[1]+box[3])/2 for box in row_boxes)/len(row_boxes)
+            target_height=max(max(box[3]-box[1] for box in row_boxes),
+                              max((e['height'] for items in row_members for e in items if e['type']=='text'),default=0.))
+            for items,box in zip(row_members,row_boxes):
+                _shift(items,0.,center-(box[1]+box[3])/2)
+                backgrounds=[e for e in items if e['type']=='shape' and e.get('shape_type')=='rectangle']
+                labels=[e for e in items if e['type']=='text']
+                if len(backgrounds)==1 and labels:
+                    back=backgrounds[0]
+                    back['height']=target_height
+                    back['y']=center-target_height/2
+                    if 'corner_radius' in back:
+                        back['corner_radius']=min(target_height/2,max(back['corner_radius'],target_height*.35))
+                    for label in labels:
+                        label['y']=center-label['height']/2
     return elements
 
 
@@ -1962,8 +2021,33 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         return candidates[0],dict(used=False,reason=f'Renderer unavailable: {exc}')
     entries=[]
     base_energy=candidates[0]['energy']
+    state=_aspect_state(source,width,height)
+    ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
+    has_reflow=any(c['name']!='proportional' for c in candidates)
+    shortlist=[];families=set()
+    for candidate in candidates:
+        name=candidate['name']
+        if ratio_shift>=1.6 and has_reflow and name=='proportional':
+            continue
+        family=re.sub(r'-\d+(?:\.\d+)?$','',name)
+        if family in families:
+            continue
+        families.add(family);shortlist.append(candidate)
+        if len(shortlist)>=5:
+            break
+    relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
-        for index,candidate in enumerate(candidates[:3]):
+        reference_image=None
+        try:
+            reference_path=Path(directory)/'source.png'
+            render_design_to_png(source,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',reference_path,max_size=640)
+            with Image.open(reference_path) as image:
+                reference_image=image.convert('RGB')
+        except Exception:
+            # Identity continuity is a soft cue; candidate diagnostics remain
+            # useful if the source render fails for an unrelated renderer issue.
+            pass
+        for index,candidate in enumerate(shortlist):
             if candidate['energy']>base_energy+max(8,base_energy*.20):
                 continue
             doc=_assemble(candidate['elements'],backgrounds,source,width,height)
@@ -2020,7 +2104,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
     heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
-    perceptual=_siglip_rerank(valid,heuristic_cost)
+    perceptual=_siglip_rerank(valid,heuristic_cost,reference_image,relationship_context)
     index=perceptual.get('selected_index')
     selected=valid[index] if index is not None else min(valid,key=heuristic_cost)
     report=dict(used=True,
@@ -2030,7 +2114,33 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     return selected['candidate'],report
 
 
-def _siglip_rerank(valid, heuristic_cost):
+def _visual_relationship_context(units,source,width,height):
+    """Summarize inferred semantic relationships for vision prompts."""
+    flow=_aspect_state(source,width,height)['flow']
+    bucket='wide' if flow=='landscape' else 'square' if flow=='preserve' else flow
+    if bucket not in ('banner','wide','square','portrait','story'):
+        ratio=width/height
+        bucket='wide' if ratio>1.15 else 'portrait' if ratio<.87 else 'square'
+    roles=set()
+    for unit in units:
+        semantic=unit.get('semantic')
+        role={'kicker':'headline','badge':'cta','visual':'art'}.get(semantic,semantic)
+        if role in ('logo','headline','subheading','body','cta','hero','art'):
+            roles.add(role)
+    density='dense' if len(units)/max(1,(width*height)/1_000_000)>=14 else 'open'
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    quadrants=[]
+    for unit in units:
+        if not unit.get('corner_callout'):
+            continue
+        x,y,r,b=unit['bounds'];cx=(x+r)/2;cy=(y+b)/2
+        quadrants.append(('top' if cy<sh/2 else 'bottom')+' '+('left' if cx<sw/2 else 'right'))
+    return dict(bucket=bucket,roles=sorted(roles),density=density,
+                grouped_units=any(len(unit['items'])>1 for unit in units),
+                callout_quadrants=sorted(set(quadrants)))
+
+
+def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=None):
     """Optional learned SigLIP tie-break among already-valid candidate renders.
 
     Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
@@ -2047,7 +2157,8 @@ def _siglip_rerank(valid, heuristic_cost):
         from engine.vision import score_layouts
     except Exception as exc:
         return dict(used=False,selected_index=None,reason=f'Vision module unavailable: {exc}')
-    result=score_layouts([e['image'] for e in valid])
+    result=score_layouts([e['image'] for e in valid],reference_image=reference_image,
+                         layout_context=layout_context)
     if result is None:
         return dict(used=False,selected_index=None,reason='SigLIP returned no scores')
     scores,note=result
@@ -2058,16 +2169,20 @@ def _siglip_rerank(valid, heuristic_cost):
     # Near-tie band: candidates within this tolerance of the best heuristic cost
     # are considered interchangeable on the heuristics, so the learned judge
     # decides among them. Anything worse than the band is never chosen here.
-    # Keep the learned scorer to genuine heuristic near-ties. A broad absolute
-    # band let it select a much larger hero and much smaller copy on square
-    # canvases, despite a clearly better readable/balanced candidate.
-    tolerance=min(.20,max(.08,abs(best_cost)*.0025))
-    band=[i for i,c in enumerate(costs) if c<=best_cost+tolerance]
-    chosen=max(band,key=lambda i:scores[i])
+    tolerance=max(8.0,abs(best_cost)*.15)
+    # The advertised band bounds how far the scorer can look; the effective
+    # near-tie band is also relative to the winner so small absolute deltas do
+    # not let a clearly costlier layout win on a low-cost canvas.
+    effective_tolerance=min(tolerance,max(.20,abs(best_cost)*.15))
+    band=[i for i,c in enumerate(costs) if c<=best_cost+effective_tolerance]
+    # Let visual quality break close ties while retaining a small preference
+    # for the lower-cost geometry inside the explicit hard band.
+    chosen=max(band,key=lambda i:scores[i]-.10*(costs[i]-best_cost)/max(effective_tolerance,1e-9))
     return dict(used=True,note=note,selected_index=chosen,
                 scores=[round(s,4) for s in scores],
                 heuristic_costs=[round(c,4) for c in costs],
                 tie_band=band,tolerance=round(tolerance,4),
+                effective_tolerance=round(effective_tolerance,4),
                 overrode_heuristic=costs[chosen]>best_cost+1e-9)
 
 
@@ -2092,6 +2207,8 @@ def _adapt_with_diagnostics(source,target_canvas):
     if len({e['id'] for e in source['elements']})!=len(source['elements']):
         raise ValueError('Source element IDs must be unique.')
     backgrounds,units=_analyze(source)
+    for unit in units:
+        unit['target_aspect_ratio']=width/height
     desired=sqrt(width*height/(sw*sh))
     state=_aspect_state(source,width,height)
     context=_perceptual_context(source,backgrounds,units,width,height)

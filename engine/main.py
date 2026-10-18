@@ -17,11 +17,14 @@ import time
 from pathlib import Path
 
 from engine.resize import resize
-from renderer.converter.assets import visible_content_bounds
 
+# Relative to the current working directory, which is /app both inside the
+# Docker image (WORKDIR /app) and when run locally from this repo's root -
+# so this works identically in both "python -m engine.main" (no Docker) and
+# the containerized entrypoint.
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
-ASSETS_DIR = Path(__file__).resolve().parents[1]/"brand_kit"/"assets"
+ASSETS_DIR = Path("brand_kit/assets")
 
 REQUIRED_COMMON = ["id", "type", "x", "y", "width", "height"]
 REQUIRED_BY_TYPE = {
@@ -58,17 +61,8 @@ def self_check(source: dict, output: dict) -> list[str]:
             if field not in el:
                 problems.append(f"element '{el.get('id')}' (type={el.get('type')}): missing '{field}'")
         if cw and ch and all(k in el for k in ("x", "y", "width", "height")):
-            if el.get("type") == "image":
-                x0,y0,x1,y1=visible_content_bounds(el,ASSETS_DIR)
-            else:
-                x0,y0=el["x"],el["y"]
-                x1, y1 = x0 + el["width"], y0 + el["height"]
-            # Low-opacity ellipses are ambient background decoration and may
-            # intentionally bleed past the canvas edge for a natural crop.
-            edge_bleed = (el.get("type") == "shape"
-                          and el.get("shape_type") == "ellipse"
-                          and float(el.get("opacity", 1)) < 0.4)
-            if not edge_bleed and (x0 < -0.5 or y0 < -0.5 or x1 > cw + 0.5 or y1 > ch + 0.5):
+            x1, y1 = el["x"] + el["width"], el["y"] + el["height"]
+            if el["x"] < -0.5 or el["y"] < -0.5 or x1 > cw + 0.5 or y1 > ch + 0.5:
                 problems.append(f"element '{el.get('id')}' is off-canvas ({cw}x{ch})")
 
     return problems

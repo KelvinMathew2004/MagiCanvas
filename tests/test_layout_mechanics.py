@@ -6,7 +6,7 @@ import unittest
 from PIL import Image
 
 from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed, _banner_seed,
-                           _action_band, _callout_block, _decorations, _energy_terms,
+                           _action_band, _badge_row, _callout_block, _decorations, _energy_terms,
                            _badge_flow, _constrain, _move, _align_peer_rows,
                            _stack_balance, _stack_seed, _text)
 from engine.vision import _letterbox_square
@@ -111,6 +111,7 @@ class LayoutMechanicsTests(unittest.TestCase):
 
     def test_peer_button_row_is_repaired_to_a_shared_vertical_axis(self):
         source=sample(3);units=_analyze(source)[1]
+        for unit in units:unit['raw_frame_limit']=(1200,260)
         tags=[u for u in units if u['role']=='tag'];actions=[u for u in units if u['role']=='action']
         elements=_banner_seed(units,1200,260,1.1,.3,False,(1080,1350))
         by_id={e['id']:e for e in elements}
@@ -200,12 +201,27 @@ class LayoutMechanicsTests(unittest.TestCase):
         self.assertLessEqual(height(small),source_height*1.15+1e-5)
         self.assertLess(height(small),height(large))
 
-    def test_background_circle_keeps_its_crop_at_the_canvas_edge(self):
+    def test_background_circle_stays_inside_raw_canvas_frame(self):
         units=_analyze(sample(2))[1]
         circle=next(u for u in units if u['role']=='decoration' and u['items'][0].get('shape_type')=='ellipse')
         box=_bounds(_decorations([circle],1080,1080,1080,1080,[]))
-        self.assertLess(box[0],0)
-        self.assertLess(box[1],0)
+        self.assertGreaterEqual(box[0],0)
+        self.assertGreaterEqual(box[1],0)
+        self.assertLessEqual(box[2],1080)
+        self.assertLessEqual(box[3],1080)
+
+    def test_shared_badges_wrap_in_a_narrow_skyscraper_slot(self):
+        units=_analyze(sample(3))[1]
+        tags=[u for u in units if u['role']=='tag']
+        for unit in tags:unit['target_aspect_ratio']=160/600
+        # The badge band itself can be wider than tall even on a skyscraper;
+        # the target canvas aspect still needs to trigger the readable wrap.
+        elements,height=_badge_row(tags,144,100,1.,8.)
+        by_id={e['id']:e for e in elements}
+        boxes=[_bounds([by_id[e['id']] for e in unit['items']]) for unit in tags]
+        self.assertGreater(height,boxes[0][3]-boxes[0][1])
+        self.assertTrue(all(boxes[i+1][1]>=boxes[i][3] for i in range(len(boxes)-1)))
+        self.assertTrue(all(box[2]-box[0]>=120 for box in boxes))
 
     def test_smaller_supporting_copy_keeps_subheading_relationship(self):
         units=_analyze(sample(2))[1]
