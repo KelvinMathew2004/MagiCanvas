@@ -8,7 +8,8 @@ from PIL import Image
 from engine.resize import (_analyze, _bounds, _logo_row, _editorial_split_seed, _banner_seed,
                            _action_band, _badge_row, _callout_block, _decorations, _energy_terms,
                            _badge_flow, _constrain, _move, _align_peer_rows,
-                           _stack_balance, _stack_seed, _text, _copy)
+                           _stack_balance, _stack_seed, _text, _copy,
+                           _repair_banner_logo_column_balance)
 from engine.vision import _letterbox_square
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -91,6 +92,20 @@ class LayoutMechanicsTests(unittest.TestCase):
         cb=_bounds([by_id[e['id']] for e in callout['items']])
         self.assertGreaterEqual((hb[3]-hb[1])/400,.64)
         self.assertLessEqual(hb[2],cb[0]+1e-6)
+
+    def test_dense_leaderboard_logo_balances_visible_gutters(self):
+        source=sample(3);units=_analyze(source)[1]
+        elements=_banner_seed(units,728,90,1.1,.2,False,(1080,1350))
+        by_id={e['id']:e for e in elements}
+        logo=next(u for u in units if u['semantic']=='logo')
+        copy=[u for u in units if u['role']=='copy']
+        _repair_banner_logo_column_balance(elements,units,728,90)
+        by_id={e['id']:e for e in elements}
+        logo_box=_bounds([by_id[e['id']] for e in logo['items']])
+        copy_box=_bounds([by_id[e['id']] for u in copy for e in u['items']])
+        inset=90*.05;clearance=90*.025
+        self.assertAlmostEqual(logo_box[0]-inset,
+                               copy_box[0]-clearance-logo_box[2],places=4)
 
     def test_landscape_peer_tags_stay_separate_from_primary_action(self):
         units=_analyze(sample(3))[1]
@@ -284,6 +299,15 @@ class LayoutMechanicsTests(unittest.TestCase):
         uneven=[(0,10,20,60),(0,90,20,190),(0,500,20,600),(0,900,20,950)]
         self.assertLess(_stack_balance(records,balanced,1000,1000),
                         _stack_balance(records,uneven,1000,1000))
+
+    def test_vertical_stack_compacts_disconnected_core_content(self):
+        units=[dict(semantic=role,role=unit_role,source_upper=False,items=[])
+               for role,unit_role in (('logo','header'),('headline','copy'),('cta','action'))]
+        records=[(unit,[]) for unit in units]
+        compact=[(0,210,100,230),(0,260,100,280),(0,310,100,330)]
+        spread=[(0,20,100,40),(0,280,100,300),(0,550,100,570)]
+        self.assertLess(_stack_balance(records,compact,160,600),
+                        _stack_balance(records,spread,160,600))
 
     def test_decorative_shapes_can_scale_with_available_space(self):
         source=sample(2);units=_analyze(source)[1]

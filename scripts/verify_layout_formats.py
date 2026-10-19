@@ -1,4 +1,4 @@
-"""Render and check all official samples in five formats; development tool only."""
+"""Render and check all official samples in six formats; development tool only."""
 import argparse
 from copy import deepcopy
 import json
@@ -11,22 +11,39 @@ sys.path.insert(0,str(ROOT))
 from engine.resize import _adapt_with_diagnostics, _bounds, _text
 from engine.main import self_check
 from renderer.converter.convert import render_design_to_png
+from renderer.converter.assets import visible_content_bounds
 
-FORMATS=(('story',1080,1920),('square',1080,1080),('widescreen',1920,1080),('web-banner',1600,400),('leaderboard',728,90))
-MUTABLE={'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit','text_align'}
+FORMATS=(('story',1080,1920),('square',1080,1080),('portrait',1080,1350),
+         ('widescreen',1920,1080),('web-banner',1600,400),('leaderboard',728,90))
+MUTABLE={'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit','text_align','rotation'}
 
 
 def verify(source,target,result,report):
-    problems=self_check(source,result)
+    image_ids={e['id'] for e in result['elements'] if e['type']=='image'}
+    problems=[problem for problem in self_check(source,result)
+              if not any(f"element '{image_id}' is off-canvas" in problem for image_id in image_ids)]
     if result['canvas']!=target:problems.append('Target canvas differs')
     if [e['id'] for e in source['elements']]!=[e['id'] for e in result['elements']]:problems.append('Element IDs/order differ')
     if not report['hard_constraints_passed']:problems.append('Hard placement constraints failed')
     for old,e in zip(source['elements'],result['elements']):
         if {k:v for k,v in old.items() if k not in MUTABLE}!={k:v for k,v in e.items() if k not in MUTABLE}:
             problems.append(f"{e['id']}: fixed properties changed")
+        if old.get('rotation',0)!=e.get('rotation',0):
+            group=[item for item in source['elements'] if item.get('group_id')==old.get('group_id')]
+            corner_callout=(target['width']/target['height']<.68 and old.get('group_id') and
+                any(item['type']=='text' for item in group) and
+                all(item['y']<source['canvas']['height']*.25 for item in group) and
+                (min(item['x'] for item in group)<source['canvas']['width']*.2 or
+                 max(item['x']+item['width'] for item in group)>source['canvas']['width']*.8))
+            if not corner_callout or e.get('rotation')!=0:
+                problems.append(f"{e['id']}: unexpected rotation change")
         b=_bounds([e])
         if not all(math.isfinite(v) for v in b) or b[0]<-1e-5 or b[1]<-1e-5 or b[2]>target['width']+1e-5 or b[3]>target['height']+1e-5:
             problems.append(f"{e['id']}: visual/raw bounds failed")
+        if e['type']=='image':
+            visible=visible_content_bounds(e,ROOT/'brand_kit'/'assets')
+            if visible[0]<-1e-5 or visible[1]<-1e-5 or visible[2]>target['width']+1e-5 or visible[3]>target['height']+1e-5:
+                problems.append(f"{e['id']}: visible pixels are off-canvas")
         if e['type']=='image' and e.get('fit')!='cover' and old['width']*old['height']:
             if not math.isclose(e['width']/e['height'],old['width']/old['height'],rel_tol=1e-6):problems.append(f"{e['id']}: image proportions changed")
         if e['type']=='text':

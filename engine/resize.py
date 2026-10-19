@@ -287,6 +287,35 @@ def _analyze(source):
     grouped = {}
     for i, e in enumerate(rest):
         grouped.setdefault(root(i), []).append(e)
+    # A sizeable translucent card behind foreground copy is a follower panel,
+    # not hero artwork. Require strict z-order and near-total containment of
+    # text-bearing units so decorative shapes are not mistaken for containers.
+    panel_children={}
+    groups=list(grouped.values())
+    panel_candidates=[]
+    for items in groups:
+        if len(items)!=1:continue
+        panel=items[0]
+        if (panel['type']!='shape' or panel.get('shape_type')!='rectangle'
+                or not sw*sh*.06<=_area(panel)<=sw*sh*.80):continue
+        panel_box=_bounds([panel]);backed=[]
+        for child in groups:
+            if child is items or not any(e['type']=='text' for e in child):continue
+            if not all(panel.get('z_index',0)<e.get('z_index',0) for e in child):continue
+            child_box=_bounds(child);child_area=max(1e-9,(child_box[2]-child_box[0])*(child_box[3]-child_box[1]))
+            if _overlap(panel_box,child_box)/child_area>=.85:
+                backed.extend(e['id'] for e in child)
+        text_groups=sum(any(e['type']=='text' for e in child) and
+                        any(e['id'] in backed for e in child) for child in groups)
+        panel_area=_area(panel)
+        if text_groups>=2 or (text_groups==1 and sw*sh*.16<=panel_area<sw*sh*.75):
+            panel_candidates.append((panel_area,panel,tuple(sorted(set(backed)))) )
+    assigned=set()
+    for _,panel,backed in sorted(panel_candidates,key=lambda candidate:candidate[0]):
+        children=tuple(eid for eid in backed if eid not in assigned)
+        if not children:continue
+        panel_children[panel['id']]=children
+        assigned.update(children)
     units = []
     for items in grouped.values():
         x, y, r, b = _bounds(items)
@@ -303,11 +332,19 @@ def _analyze(source):
             role = 'header'
         elif images and not texts and y/sh>.88 and (r-x)*(b-y)<sw*sh*.05:
             role = 'footer'
+        elif len(items)==1 and shapes and shapes[0]['id'] in panel_children:
+            role = 'decoration'
         elif len(items)==1 and shapes and (shapes[0].get('opacity', 1)<.4 or shapes[0].get('shape_type') in ('ellipse', 'line')):
             role = 'decoration'
         else:
             role = 'visual'
-        units.append(dict(items=items, bounds=(x,y,r,b), role=role, label=label))
+        unit=dict(items=items,bounds=(x,y,r,b),role=role,label=label)
+        if len(items)==1 and items[0]['id'] in panel_children:
+            panel=items[0]
+            unit.update(backing_panel=True,backed_ids=panel_children[panel['id']],
+                        backing_source_width=panel['width'],backing_source_height=panel['height'],
+                        backing_source_radius=panel.get('corner_radius',0.))
+        units.append(unit)
     units=_enrich_units(source, units)
     fonts=sorted(e['font_size'] for e in elements if e['type']=='text')
     median=fonts[len(fonts)//2] if fonts else 24
@@ -581,9 +618,23 @@ def _footer_band(units,width,height,scale,gap,center_corners=False):
     return output,row_h
 
 
-def _axis_active(u,source,width,height):
+def _centered_copy_layout(elements,units,width):
+    by_id={e['id']:e for e in elements}
+    copy_text=[by_id[item['id']] for unit in units if unit['role']=='copy'
+               for item in unit['items'] if item['type']=='text' and item['id'] in by_id]
+    return (bool(copy_text) and all(e.get('text_align','left')=='center' and
+            abs((e['x']+e['width']/2)/max(1.,width)-.5)<.12 for e in copy_text))
+
+
+def _axis_active(u,source,width,height,elements=None,units=None):
     state=_aspect_state(source,width,height)
-    return state['flow']!='banner' and u.get('source_centered',False)
+    # Preserve a source-centered axis only while the target remains a
+    # single-column composition. Landscape reflow intentionally assigns
+    # separate columns to copy and artwork, so centering each source-centered
+    # unit would fight those split candidates in both scoring and polishing.
+    centered_stack=(state['flow']=='landscape' and elements is not None and units is not None
+                    and _centered_copy_layout(elements,units,width))
+    return (state['flow'] in ('preserve','story','portrait','square') or centered_stack) and u.get('source_centered',False)
 
 
 def _badge_flow(records,width,height):
@@ -650,7 +701,31 @@ def _copy(units, width, height, scale, gap, align=None):
     if not units:
         return []
     def build(factor):
-        blocks = [_unit(u,width,height,factor) for u in units]
+        # Compress supporting copy faster than headlines. This keeps a short
+        # headline from collapsing just because one paragraph is long, while
+        # retaining the original relative scale when the slot has room.
+        ratio=max(.0001,factor/max(.0001,scale))
+        compact_banner=width/max(1.,height)>=6 and height<=120
+        blocks=[]
+        headline_width=None
+        for u in units:
+            semantic=u.get('semantic')
+            exponent=(1. if compact_banner else
+                      {'headline':.58,'kicker':.72,'subheading':.88,'body':1.18}.get(semantic,1.))
+            local_scale=scale*(ratio**exponent)
+            block=_unit(u,width,height,local_scale)
+            if semantic=='headline':
+                box=_bounds(block);headline_width=box[2]-box[0]
+            elif (semantic in ('subheading','body') and headline_width
+                  and width>=320 and height>=120 and width>headline_width*1.15):
+                capped_width=min(width,max(width*.52,headline_width*.88))
+                if capped_width<width*.98:
+                    narrower=_unit(u,capped_width,height,local_scale)
+                    original_sizes=[e['font_size'] for e in block if e['type']=='text']
+                    narrower_sizes=[e['font_size'] for e in narrower if e['type']=='text']
+                    if not original_sizes or min(narrower_sizes,default=0)>=min(original_sizes)*.94:
+                        block=narrower
+            blocks.append(block)
         if align is not None:
             for u,block in zip(units,blocks):
                 if len(u['items'])==1 and u['items'][0]['type']=='text' and not u['items'][0].get('group_id'):
@@ -742,9 +817,44 @@ def _decoration_obstacle(element):
     return left,element['y'],left+ink_w,element['y']+min(element['height'],text_h)
 
 
+def _sync_backing_panels(elements,units,width,height):
+    """Resize inferred card backgrounds to follow their adapted children."""
+    by_id={e['id']:e for e in elements}
+    short=min(width,height)
+    for unit in units:
+        if not unit.get('backing_panel'):
+            continue
+        children=[by_id[eid] for eid in unit.get('backed_ids',()) if eid in by_id]
+        if not children:
+            continue
+        left,top,right,bottom=_bounds(children)
+        pad_x,pad_y=short*.028,short*.022
+        x=max(0.,left-pad_x);y=max(0.,top-pad_y)
+        r=min(float(width),right+pad_x);b=min(float(height),bottom+pad_y)
+        panel=by_id.get(unit['items'][0]['id'])
+        if panel is None:
+            panel=deepcopy(unit['items'][0]);elements.append(panel);by_id[panel['id']]=panel
+        source_w=max(1.,unit.get('backing_source_width',panel['width']))
+        source_h=max(1.,unit.get('backing_source_height',panel['height']))
+        panel.update(x=x,y=y,width=max(1.,r-x),height=max(1.,b-y))
+        if 'corner_radius' in panel:
+            panel['corner_radius']=min(panel['width']/2,panel['height']/2,
+                                       unit.get('backing_source_radius',panel['corner_radius'])
+                                       *min(width/source_w,height/source_h))
+    return elements
+
+
 def _decorations(units,width,height,sw,sh,occupied):
     result=[]
     for u in units:
+        if u.get('backing_panel'):
+            backed=set(u.get('backed_ids',()))
+            children=[e for e in occupied if e['id'] in backed]
+            if children:
+                panel=deepcopy(u['items'][0])
+                _sync_backing_panels(children+[panel],[u],width,height)
+                result.append(panel)
+            continue
         x,y,r,b=u['bounds']
         # Match the source's scale to the target's usable short side, then
         # search for modest growth when the surrounding layout leaves room.
@@ -874,7 +984,42 @@ def _editorial_copy(roles,width,height,scale,gap):
     actions,ah=_action_band(lower,roles['action'],width,height*.38,scale*1.06,gap,True,align='left')
     reserved=sum(v for v in (lh,kh,ah))
     count=sum(bool(v) for v in (lh,kh,ah))+bool(roles['copy'])
-    copy=_copy(roles['copy'],width,max(.001,height-reserved-gap*max(0,count-1)),scale*1.06,gap,align='left')
+    copy_height=max(.001,height-reserved-gap*max(0,count-1))
+    copy_units=roles['copy']
+    headline=[u for u in copy_units if u.get('semantic')=='headline']
+    secondary=[u for u in copy_units if u.get('semantic') in ('subheading','body')]
+    secondary_words=[sum(len(e.get('content','').split()) for e in u['items'] if e['type']=='text')
+                     for u in secondary]
+    similar_length=(secondary_words and min(secondary_words)>0 and
+                    max(secondary_words)<=min(secondary_words)*2.2)
+    grid_flow=(width/max(1.,copy_height)>=1.5 and width>=320 and copy_height>=120
+               and len(headline)==1 and len(secondary)>=3 and similar_length
+               and all(len(u['items'])==1 and u['items'][0]['type']=='text' and
+                       not u['items'][0].get('group_id') for u in secondary))
+    if grid_flow:
+        # Keep the headline spanning the copy area; flow comparable supporting
+        # units into two columns only when their measured text can use the
+        # wider banner slot without changing their source reading order.
+        head_height=copy_height*.38
+        head_block=_copy(headline,width,head_height,scale*1.06,gap*.65,align='left')
+        hb=_bounds(head_block);actual_head_h=hb[3]-hb[1]
+        grid_top=hb[3]+gap
+        grid_height=max(1.,copy_height-grid_top)
+        columns=2
+        rows=(len(secondary)+columns-1)//columns
+        cell_gap=min(gap*.8,width*.035)
+        cell_w=(width-cell_gap*(columns-1))/columns
+        cell_h=(grid_height-cell_gap*(rows-1))/rows
+        grid=[]
+        for index,unit in enumerate(secondary):
+            block=_unit(unit,cell_w,cell_h,scale*.98)
+            box=_bounds(block);bw,bh=box[2]-box[0],box[3]-box[1]
+            x=(index%columns)*(cell_w+cell_gap)+(cell_w-bw)/2
+            y=grid_top+(index//columns)*(cell_h+cell_gap)+(cell_h-bh)/2
+            grid.extend(_move(block,x,y))
+        copy=head_block+grid
+    else:
+        copy=_copy(copy_units,width,copy_height,scale*1.06,gap,align='left')
     mutable={u['items'][0]['id'] for u in roles['copy']+roles['action']+roles['tag']
              if len(u['items'])==1 and u['items'][0]['type']=='text' and not u['items'][0].get('group_id')}
     output=[];cursor=0
@@ -1186,6 +1331,27 @@ def _repair_copy_hierarchy(elements, units, width, height):
         hb,sb=_bounds(head),_bounds(support)
         if min(hb[2],sb[2])-max(hb[0],sb[0])<=0:
             continue
+        head_align={e.get('text_align','left') for e in head if e['type']=='text'}
+        support_align={e.get('text_align','left') for e in support if e['type']=='text'}
+        if len(head_align)==len(support_align)==1 and head_align==support_align:
+            align=next(iter(head_align))
+            if align=='left':
+                target=max(hb[0],sb[0]);head_dx=target-hb[0];support_dx=target-sb[0]
+            elif align=='right':
+                target=min(hb[2],sb[2]);head_dx=target-hb[2];support_dx=target-sb[2]
+            elif align=='center':
+                target=(hb[0]+hb[2]+sb[0]+sb[2])/4
+                head_dx=target-(hb[0]+hb[2])/2
+                support_dx=target-(sb[0]+sb[2])/2
+            else:
+                head_dx=support_dx=0.
+            if abs(head_dx)>1e-4 or abs(support_dx)>1e-4:
+                old_x=[e['x'] for e in head+support]
+                for e in head:e['x']+=head_dx
+                for e in support:e['x']+=support_dx
+                if not _feasible(elements,units,width,height):
+                    for e,x in zip(head+support,old_x):
+                        e['x']=x
         actual=sb[1]-hb[3]
         font=min((e.get('font_size',12) for e in head+support if e['type']=='text'),default=12)
         preferred=max(min(width,height)*.022,font*.65)
@@ -1236,6 +1402,31 @@ def _repair_primary_action_shape(elements, units, width, height):
         if not _feasible(elements,units,width,height):
             shape.update(old)
             for label in labels:label['y']-=label_shift
+
+
+def _repair_footer_bottom_anchor(elements, units, width, height):
+    """Place standalone legal copy at the lower safe margin when space allows."""
+    by_id={e['id']:e for e in elements}
+    margin=min(width,height)*.045
+    for unit in units:
+        if unit['role']!='footer' or unit.get('inflow_footer_asset') or any(
+                e['type']=='image' for e in unit['items']):
+            continue
+        items=[by_id[e['id']] for e in unit['items']
+               if e['id'] in by_id and by_id[e['id']]['type']=='text']
+        if not items:
+            continue
+        box=_bounds(items)
+        target_bottom=height-margin
+        dy=max(0.,target_bottom-box[3])
+        if dy<=1e-4:
+            continue
+        old=[e['y'] for e in items]
+        for e in items:
+            e['y']+=dy
+        if not _feasible(elements,units,width,height):
+            for e,y in zip(items,old):
+                e['y']=y
 
 
 def _repair_vertical_hero_spacing(elements, units, width, height):
@@ -1364,6 +1555,49 @@ def _repair_banner_logo_column_balance(elements, units, width, height):
             e['x']=x
 
 
+def _repair_banner_cta_copy_proximity(elements, units, width, height):
+    """Keep a landscape CTA attached to its copy column when a gap is wasteful."""
+    if width/max(1.,height)<1.35:
+        return
+    by_id={e['id']:e for e in elements}
+    copies=[e for u in units if u['role']=='copy'
+            for e in u['items'] if e['id'] in by_id]
+    actions=[u for u in units if u['semantic']=='cta']
+    if not copies or not actions:
+        return
+    copy_box=_bounds([by_id[e['id']] for e in copies])
+    gap=min(width,height)*.06
+    heroes=[_bounds([by_id[e['id']] for e in u['items'] if e['id'] in by_id])
+            for u in units if u['semantic'] in ('hero','art')]
+    for unit in actions:
+        items=[by_id[e['id']] for e in unit['items'] if e['id'] in by_id]
+        if not items:
+            continue
+        box=_bounds(items)
+        # The CTA already belongs to the copy column when it sits under or
+        # inside that column. Only close an oversized horizontal gap.
+        if box[0]<copy_box[2]:
+            continue
+        width_cta=box[2]-box[0]
+        target=copy_box[2]+gap
+        right_limit=width-min(width,height)*.045
+        for hero in heroes:
+            vertical_overlap=min(box[3],hero[3])-max(box[1],hero[1])>0
+            if vertical_overlap and hero[0]>=box[0]:
+                right_limit=min(right_limit,hero[0]-gap)
+        if target+width_cta>right_limit+1e-5:
+            continue
+        dx=target-box[0]
+        if dx>=-1e-4:
+            continue
+        old_x=[e['x'] for e in items]
+        for e in items:
+            e['x']+=dx
+        if not _feasible(elements,units,width,height):
+            for e,x in zip(items,old_x):
+                e['x']=x
+
+
 def _enrich_units(source, units):
     """Feature-based role hypotheses, with uncertainty kept internal.
 
@@ -1394,7 +1628,16 @@ def _enrich_units(source, units):
         source_corner_label=bool(u['label'] and y<sh*.25 and (x<sw*.2 or r>sw*.8))
         u['corner_callout']=bool(source_corner_label and (abs(angle)>2 or not peers))
         if u['corner_callout']:
-            u.update(role='decoration',semantic='callout',confidence=.78)
+            # It is still a content badge: preserve its corner preference by
+            # default, but let reflowed layouts place it as an upper kicker.
+            # Treating it as decoration hid it from the copy/header grouping
+            # logic, which could strand it beside unrelated lower content.
+            # Tilted corner ribbons retain their anchored/decorative role in
+            # landscape formats, where the banner seed uses their corner to
+            # reserve clearance from the hero. Vertical migration explicitly
+            # promotes them to the upper content stack.
+            u.update(role='decoration' if abs(angle)>2 else 'tag',
+                     semantic='callout' if abs(angle)>2 else 'badge',confidence=.78)
             continue
         if u['label'] and peers:
             u['peer_ids']=tuple(sorted(v['items'][0]['id'] for v in [u]+peers))
@@ -1671,6 +1914,71 @@ def _feasible(elements, units, width, height):
     return True
 
 
+def _repair_sparse_vertical_stack(elements, units, width, height):
+    """Tighten a visibly disconnected tall-layout stack and center the block.
+
+    Only sparse portrait/tall formats qualify. Atomic units keep their internal
+    geometry, source order is retained, and legal/footer units remain anchored.
+    This avoids treating every available pixel as a reason to stretch gaps.
+    """
+    if height/max(1.,width)<=1.35:
+        return False
+    by_id={e['id']:e for e in elements}
+    specs=(('brand',lambda u:u['semantic']=='logo' or
+            u['semantic']=='badge' and u.get('source_upper')),
+           ('hero',lambda u:u['semantic'] in ('hero','art')),
+           ('copy',lambda u:u['semantic'] in ('headline','subheading','body','kicker')),
+           ('tags',lambda u:u['role']=='tag' and not u.get('source_upper')),
+           ('action',lambda u:u['semantic']=='cta'))
+    groups=[]
+    for name,predicate in specs:
+        members=[u for u in units if predicate(u)]
+        if not members:
+            continue
+        box=_bounds([by_id[e['id']] for u in members for e in u['items'] if e['id'] in by_id])
+        groups.append(dict(name=name,members=members,box=box))
+    groups.sort(key=lambda g:g['box'][1])
+    if len(groups)<3:
+        return False
+    gaps=[max(0.,b['box'][1]-a['box'][3]) for a,b in zip(groups,groups[1:])]
+    short=min(width,height)
+    if sum(gaps)/len(gaps)<height*.12:
+        return False
+    # Gap rhythm follows hierarchy: same-kind text remains close; a product,
+    # badge band, or CTA gets a little more separation from adjacent content.
+    targets=[]
+    for a,b in zip(groups,groups[1:]):
+        factor=.065
+        if 'hero' in (a['name'],b['name']):
+            factor=.105
+        elif (a['name'],b['name']) in (('copy','tags'),('tags','action')):
+            factor=.085
+        targets.append(short*factor)
+    first_top=groups[0]['box'][1]
+    total_height=sum(g['box'][3]-g['box'][1] for g in groups)+sum(targets)
+    footer=[u for u in units if u['role']=='footer' and
+            not u.get('inflow_footer_asset',False)]
+    bottom_limit=min((_bounds([by_id[e['id']] for e in u['items'] if e['id'] in by_id])[1]
+                      for u in footer),default=height-short*.06)
+    top_limit=short*.06
+    available=max(0.,bottom_limit-top_limit)
+    if total_height>available:
+        return False
+    # Keep the compact stack centered in the safe area above any footer/legal
+    # content, so tightening the gaps does not strand all content at the top.
+    cursor=top_limit+(available-total_height)*.5
+    for i,group in enumerate(groups):
+        dy=cursor-group['box'][1]
+        for unit in group['members']:
+            for item in unit['items']:
+                if item['id'] in by_id:
+                    by_id[item['id']]['y']+=dy
+        cursor+=group['box'][3]-group['box'][1]
+        if i<len(targets):
+            cursor+=targets[i]
+    return True
+
+
 def _peer_row_groups(indexes,boxes):
     """Cluster same-peer controls by observed row, preserving deliberate stacks."""
     ordered=sorted(indexes,key=lambda i:(boxes[i][1]+boxes[i][3])/2)
@@ -1706,6 +2014,25 @@ def _constrain(elements, units, width, height, topology='nearest'):
     ys = [kiwi.Variable(f'y{i}') for i in range(len(records))]
     gap = min(width,height)*.008
     try:
+        # Preserve repeated icon/caption relationships through Cassowary
+        # projection. These are soft directional preferences: hard bounds and
+        # non-overlap remain authoritative when the target cannot fit the pair.
+        id_to_unit={item['id']:i for i,(_,items) in enumerate(records) for item in items}
+        perceptual=units[0].get('perceptual',{}) if units else {}
+        for pair in perceptual.get('affinities',[]):
+            icon=id_to_unit.get(pair.get('icon'));caption=id_to_unit.get(pair.get('caption'))
+            if icon is None or caption is None or icon==caption:continue
+            ix,iy,ir,ib=boxes[icon];cx,cy,cr,cb=boxes[caption]
+            iw,ih=ir-ix,ib-iy;cw,ch=cr-cx,cb-cy
+            preferred_gap=min(width,height)*.018
+            if pair.get('orientation')=='below':
+                solver.addConstraint((xs[caption]+cw/2==xs[icon]+iw/2) | kiwi.strength.medium)
+                solver.addConstraint((ys[caption]>=ys[icon]+ih) | kiwi.strength.weak)
+                solver.addConstraint((ys[caption]<=ys[icon]+ih+preferred_gap*2) | kiwi.strength.weak)
+            elif pair.get('orientation')=='beside':
+                solver.addConstraint((ys[caption]+ch/2==ys[icon]+ih/2) | kiwi.strength.medium)
+                solver.addConstraint((xs[caption]>=xs[icon]+iw) | kiwi.strength.weak)
+                solver.addConstraint((xs[caption]<=xs[icon]+iw+preferred_gap*2) | kiwi.strength.weak)
         peer_bands={}
         for i,(u,_) in enumerate(records):
             if u['role']=='tag' and u.get('peer_ids'):
@@ -1726,9 +2053,6 @@ def _constrain(elements, units, width, height, topology='nearest'):
             solver.addConstraint(ys[i]>=margin)
             solver.addConstraint(xs[i]+w<=width-margin)
             solver.addConstraint(ys[i]+h<=height-margin)
-            # visible bounds may be inset from transparent image frames;
-            # retain raw-frame constraints for text/shapes only. Transparent
-            # PNG frames may extend past the canvas while their visible bounds fit.
             for item in records[i][1]:
                 if item.get('type')=='image':
                     continue
@@ -1771,6 +2095,7 @@ def _constrain(elements, units, width, height, topology='nearest'):
     output=[]
     for i,(_,items) in enumerate(records):
         output.extend(_move(deepcopy(items),xs[i].value(),ys[i].value()))
+    _sync_backing_panels(output,units,width,height)
     return output if _feasible(output,units,width,height) else None
 
 
@@ -1811,8 +2136,9 @@ def _perceptual_context(source, backgrounds, units, width, height):
                and .5<v['width']/max(.001,pair['width'])<2 and .5<v['height']/max(.001,pair['height'])<2]
         if peers:
             affiliations.append({k:v for k,v in pair.items() if k not in ('width','height')})
-    context=dict(affinities=affiliations,background_map=[],background_note='No image background to analyze')
-    if not any(e['type']=='image' for e in backgrounds) or width*height>16000000:
+    context=dict(affinities=affiliations,background_map=[],background_luma=[],
+                 background_note='No stationary background to analyze')
+    if not backgrounds or width*height>16000000:
         return context
     try:
         from renderer.converter.convert import render_design_to_png
@@ -1831,17 +2157,21 @@ def _perceptual_context(source, backgrounds, units, width, height):
                 return context
             with Image.open(path) as image:
                 pixels=image.convert('RGB').resize((96,96))
-            cells=[]
+            cells=[];lumas=[]
             for row in range(3):
                 for col in range(3):
                     tile=pixels.crop((col*32,row*32,(col+1)*32,(row+1)*32))
                     edges=tile.convert('L').filter(ImageFilter.FIND_EDGES).crop((1,1,31,31))
                     edge=ImageStat.Stat(edges).mean[0]/255
-                    variance=sum(ImageStat.Stat(tile).var)/(3*255**2)
+                    stats=ImageStat.Stat(tile)
+                    variance=sum(stats.var)/(3*255**2)
                     cells.append(min(1,edge*3+variance*4))
+                    lumas.append(_luminance(stats.mean))
             if max(cells)-min(cells)>.015:
                 context['background_map']=cells
-            context['background_note']='3x3 edge/color-variance busyness proxy; no subject recognition'
+            if max(lumas)-min(lumas)>.08:
+                context['background_luma']=lumas
+            context['background_note']='3x3 busyness and luminance proxy on stationary backgrounds'
     except Exception as exc:
         context['background_note']=f'Optional background analysis unavailable: {exc}'
     return context
@@ -1967,6 +2297,32 @@ def _perceptual_terms(records, boxes, units, width, height):
             for i,cost in enumerate(cells):
                 cell=((i%3)*width/3,(i//3)*height/3,(i%3+1)*width/3,(i//3+1)*height/3)
                 terms['background_busyness']+=cost*_overlap(b,cell)/area
+    lumas=context.get('background_luma',[])
+    backed_ids={eid for unit in units if unit.get('backing_panel')
+                for eid in unit.get('backed_ids',())}
+    if lumas:
+        for (unit,items),_ in zip(records,boxes):
+            if unit.get('label') or any(e['type']=='shape' for e in items):
+                continue
+            for element in items:
+                if element['type']!='text' or element['id'] in backed_ids:
+                    continue
+                rgba=_rgba(element.get('color',''))
+                if not rgba:continue
+                alpha=rgba[3]*element.get('opacity',1.)
+                text_luma=_luminance(rgba[:3])
+                target=3.0 if element.get('font_size',0)>=24 or (
+                    element.get('font_weight')=='bold' and element.get('font_size',0)>=18) else 4.5
+                area=max(1.,element['width']*element['height'])
+                for i,bg_luma in enumerate(lumas):
+                    cell=((i%3)*width/3,(i//3)*height/3,
+                          (i%3+1)*width/3,(i//3+1)*height/3)
+                    overlap=_overlap(_bounds([element]),cell)
+                    if overlap<=0:continue
+                    weight=overlap/area
+                    foreground=text_luma*alpha+bg_luma*(1-alpha)
+                    contrast=(max(foreground,bg_luma)+.05)/(min(foreground,bg_luma)+.05)
+                    terms['background_busyness']+=weight*max(0.,(target-contrast)/target)**2*2.5
     return terms
 
 
@@ -2005,7 +2361,26 @@ def _stack_balance(records, boxes, width, height):
     # Keep this a gentle preference: the final repair centers a clearly
     # isolated hero directly in its available interval, while this term only
     # nudges broad section spacing and must not reward enlarging the artwork.
-    return sum(((gap-mean)/height)**2 for gap in gaps)/len(gaps)
+    balance=sum(((gap-mean)/height)**2 for gap in gaps)/len(gaps)
+    # On tall canvases, equal but enormous gaps can still make a small set of
+    # related content feel disconnected. Keep the core stack compact and let
+    # the remaining whitespace collect around the group. This does not include
+    # footer/legal copy or corner footer assets, whose anchoring is deliberate.
+    if height/max(1.,width)>1.35:
+        core_predicates=predicates[:4]+(predicates[5],)
+        core=[box for predicate in core_predicates
+              if (box:=group_box(predicate)) is not None]
+        core.sort()
+        if len(core)>=3:
+            inner=[max(0.,b[0]-a[1]) for a,b in zip(core,core[1:])]
+            mean_inner=sum(inner)/len(inner)
+            target_gap=max(min(width,height)*.045,height*.04)
+            overflow=max(0.,(mean_inner-target_gap)/height)
+            # Give excessive gaps enough weight to change the candidate choice
+            # on sparse, tall formats. Equal 150px gaps can be numerically
+            # balanced yet still leave a short message and CTA disconnected.
+            balance+=overflow**2*4.0
+    return balance
 
 
 def _text_right_limit(unit,box,records,width,height):
@@ -2142,7 +2517,7 @@ def _energy_terms(elements, units, source, width, height, desired):
         if state['flow']=='banner' and u['role'] in ('header','copy','tag','action','visual') and not _banner_vertical_neighbor(u,box,records):
             center=(y+b)/2
             terms['banner_centering']+=((center-_banner_centerline(records,width,height))/height)**2
-        if _axis_active(u,source,width,height):
+        if _axis_active(u,source,width,height,elements,units):
             terms['axial']+=((x+r)/2/width-.5)**2*(2 if u['semantic'] in ('logo','hero','headline','cta') else 1)
         if u.get('footer_anchor') in ('left','right'):
             margin=min(width,height)*.05
@@ -2166,6 +2541,14 @@ def _energy_terms(elements, units, source, width, height, desired):
             original_ratio=max(e.get('font_size',1) for e in a['items'])/max(e.get('font_size',1) for e in b['items'])
             if original_ratio>1.25:
                 terms['hierarchy']+=max(0,min(original_ratio,1.6)-af/max(1,bf))
+    headlines=[(u,items) for u,items,_ in copy if u['semantic']=='headline']
+    for head_unit,head_items in headlines:
+        head_width=max((_text_info(e)[1] for e in head_items if e['type']=='text'),default=0.)
+        if head_width<=0:continue
+        for support,support_items,_ in copy:
+            if support['semantic'] not in ('subheading','body'):continue
+            support_width=max((_text_info(e)[1] for e in support_items if e['type']=='text'),default=0.)
+            terms['hierarchy']+=max(0.,support_width/head_width-.95)**2
     main_copy=[b for (u,_),b in zip(records,boxes) if u['semantic'] in ('headline','subheading','body')]
     if state['flow'] in ('story','portrait','square'):
         # Preserve a clear source-evidenced reading order when a tall target
@@ -2215,8 +2598,23 @@ def _energy_terms(elements, units, source, width, height, desired):
         if left_copy:
             axis=min(b[0] for b in left_copy)
             terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in left_copy)
-            tags=[b for (u,_),b in zip(records,boxes) if u['role']=='tag']
-            terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in tags)
+            tag_bands={}
+            for index,(unit,_) in enumerate(records):
+                if unit['role']=='tag':
+                    key=('peer',unit['peer_ids']) if unit.get('peer_ids') else ('single',index)
+                    tag_bands.setdefault(key,[]).append(index)
+            for indexes in tag_bands.values():
+                for row in _peer_row_groups(indexes,boxes):
+                    row_left=min(boxes[index][0] for index in row)
+                    terms['column_alignment']+=abs(row_left-axis)/width
+            copy_top=min(box[1] for box in left_copy)
+            for (unit,_),box in zip(records,boxes):
+                if unit.get('semantic')!='logo' or unit['role']!='header':
+                    continue
+                overlap=max(0.,min(box[2],max(b[2] for b in left_copy))-
+                            max(box[0],min(b[0] for b in left_copy)))
+                if box[3]<=copy_top+height*.08 and overlap>0:
+                    terms['column_alignment']+=abs(box[0]-axis)/width
             if state['flow']!='banner':
                 actions=[b for (u,_),b in zip(records,boxes) if u['role']=='action']
                 terms['column_alignment']+=sum(abs(b[0]-axis)/width for b in actions)
@@ -2234,14 +2632,19 @@ def _energy_terms(elements, units, source, width, height, desired):
                     overlap=max(0.,min(action[2],copy[2])-max(action[0],copy[0]))
                     terms['banner_action_stack']+=overlap/min(aw,max(1.,copy[2]-copy[0]))
         columns=[]
-        for roles in ({'logo'},{'headline','subheading','body','kicker'},{'cta'},{'hero','art'}):
+        for roles in ({'logo'},{'headline','subheading','body','kicker'},
+                      {'cta','badge'},{'hero','art'}):
             member_boxes=[box for (u,_),box in zip(records,boxes)
-                          if u['semantic'] in roles or roles=={'headline','subheading','body','kicker'} and u['role']=='tag']
+                          if u['semantic'] in roles or
+                          roles=={'headline','subheading','body','kicker'} and u['role']=='copy' or
+                          roles=={'cta','badge'} and u['role'] in ('tag','action')]
             if member_boxes:
                 columns.append((min(box[0] for box in member_boxes),max(box[2] for box in member_boxes)))
         columns.sort()
-        gaps=[b[0]-a[1] for a,b in zip(columns,columns[1:])]
-        if len(gaps)>1 and not dense_short_banner:
+        gaps=([max(0.,columns[0][0])]
+              +[max(0.,b[0]-a[1]) for a,b in zip(columns,columns[1:])]
+              +[max(0.,width-columns[-1][1])]) if columns else []
+        if len(gaps)>=3:
             mean=sum(gaps)/len(gaps)
             normalizer=max(min(width,height)*.04,abs(mean),1.)
             terms['banner_gap_evenness']=sum(((gap-mean)/normalizer)**2 for gap in gaps)/len(gaps)
@@ -2286,7 +2689,7 @@ def _energy_terms(elements, units, source, width, height, desired):
 
 _ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
-                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=70.,footer_anchor=100.,hero_prominence=210.,cta_prominence=85.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=8.,banner_centering=80.,stack_balance=120.,badge_alignment=80.,brand_media_spacing=55.,footer_visibility=240.,primary_clearance=65.,callout_migration=8.,source_order=65.,decoration_composition=48.)
+                     canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=70.,footer_anchor=100.,hero_prominence=210.,cta_prominence=85.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=12.,banner_centering=80.,stack_balance=300.,badge_alignment=80.,brand_media_spacing=55.,footer_visibility=240.,primary_clearance=65.,callout_migration=8.,source_order=65.,decoration_composition=48.)
 
 
 def _energy(elements,units,source,width,height,desired):
@@ -2364,11 +2767,15 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
     violation=_constraint_violation(current,units,width,height)
     best,best_energy=deepcopy(current),current_energy
     best_feasible=current_feasible
+    centered_copy=_centered_copy_layout(current,units,width)
     # Decoration size and location have already been selected against the
     # occupied layout in _decorations. Annealing these units afterward used to
     # collapse or cluster them again, undoing that empty-space placement.
     # Keep them fixed while foreground units resolve any remaining conflicts.
-    moving=[u for u in units if u['role']!='decoration']
+    moving=[u for u in units if u['role']!='decoration'
+            and not (u['role']=='footer' and not u.get('inflow_footer_asset'))
+            and not (state['flow'] in ('banner','landscape') and
+                     u['role']=='tag' and u.get('peer_ids'))]
     if not moving:
         return current,dict(before=current_energy,after=current_energy,accepted=0,iterations=0)
     accepted=0
@@ -2397,12 +2804,31 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             if axis==0 and u.get('footer_anchor') in ('left','right'):
                 margin=min(width,height)*.05
                 target=margin if u['footer_anchor']=='left' else width-margin-size
-            elif axis==0 and _axis_active(u,source,width,height) and u['semantic'] in ('logo','hero'):
+            elif axis==0 and _axis_active(u,source,width,height,current,units) and u['semantic'] in ('logo','hero'):
                 target=(width-size)/2
+            elif axis==0 and centered_copy and u['semantic'] in ('logo','hero','headline','subheading','body','cta'):
+                target=(width-size)/2
+            elif (axis==0 and not centered_copy and state['flow'] in ('banner','landscape')
+                  and u['role']=='header' and u.get('semantic')=='logo'):
+                copy_records=[(v,_bounds(other)) for v,other in current_records if v['role']=='copy'
+                              and any(e.get('text_align','left')=='left' for e in other)]
+                logo_box=_bounds(block)
+                copy_left=min((box[0] for _,box in copy_records),default=None)
+                copy_top=min((box[1] for _,box in copy_records),default=None)
+                if (copy_left is not None and copy_top is not None and logo_box[3]<=copy_top+height*.08
+                        and min(logo_box[2],max(box[2] for _,box in copy_records))>
+                            max(logo_box[0],min(box[0] for _,box in copy_records))):
+                    target=copy_left
+                else:
+                    target=old
             elif axis==0 and state['flow'] in ('banner','landscape') and u['role'] in ('copy','tag'):
-                is_left_column=u['role']=='tag' or any(e.get('text_align')=='left' for e in block)
+                left_aligned_copy=any(v['role']=='copy' and any(e.get('text_align','left')=='left' for e in other)
+                                      for v,other in current_records)
+                is_left_column=any(e.get('text_align','left')=='left' for e in block) or (
+                    u['role']=='tag' and left_aligned_copy and not centered_copy)
                 anchors=[_bounds(other)[0] for v,other in current_records if v is not u and v['role'] in ('copy','tag')
-                         and (v['role']=='tag' or any(e.get('text_align')=='left' for e in other))]
+                         and (any(e.get('text_align','left')=='left' for e in other) or
+                              v['role']=='tag' and left_aligned_copy and not centered_copy)]
                 target=min(anchors,key=lambda value:abs(value-old)) if is_left_column and anchors else old
             elif axis==1 and state['flow']=='banner' and not _banner_vertical_neighbor(u,bounds,current_records):
                 target=_banner_centerline(current_records,width,height)-size/2
@@ -2437,6 +2863,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
                 left=margin if u['footer_anchor']=='left' else width-margin-(r-x)*factor
             proposal=_move(proposal,left,(y+b-(b-y)*factor)/2)
         changed=[e for e in current if e['id'] not in ids]+proposal
+        _sync_backing_panels(changed,units,width,height)
         _align_peer_rows(changed,units)
         feasible=_feasible(changed,units,width,height)
         if current_feasible and not feasible:
@@ -2495,7 +2922,6 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     except ImportError as exc:
         return candidates[0],dict(used=False,reason=f'Renderer unavailable: {exc}')
     entries=[]
-    base_energy=candidates[0]['energy']
     state=_aspect_state(source,width,height)
     ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
     has_reflow=any(c['name']!='proportional' for c in candidates)
@@ -2508,7 +2934,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         if family in families:
             continue
         families.add(family);shortlist.append(candidate)
-        if len(shortlist)>=5:
+        if len(shortlist)>=8:
             break
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
@@ -2523,8 +2949,6 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             # useful if the source render fails for an unrelated renderer issue.
             pass
         for index,candidate in enumerate(shortlist):
-            if candidate['energy']>base_energy+max(8,base_energy*.20):
-                continue
             doc=_assemble(candidate['elements'],backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
             backing_path=Path(directory)/f'{index}-backing.png'
@@ -2569,7 +2993,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     if ink.crop((left,top,right,bottom)).getextrema()[1]<5:
                         cost+=3;invisible.append(e['id'])
                     checked+=1
-                cost/=max(1,checked)
+                cost=cost/max(1,checked)+(8.0 if invisible else 0.0)+(4.0 if weak else 0.0)
                 entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,warnings=warnings,image=full.copy()))
             except Exception as exc:
                 # Diagnostics are optional; isolate third-party renderer faults.
@@ -2732,12 +3156,36 @@ def _adapt_with_diagnostics(source,target_canvas):
     role_map={r:[u for u in units if u['role']==r]
               for r in ('header','copy','action','tag','visual','footer','decoration')}
     if _dense_short_banner(role_map,width,height):
-        seeds=[dict(name='dense-short-banner',
-                    elements=_dense_leaderboard_seed(role_map,width,height,desired*1.15,
-                                                     min(width,height)*.035,(sw,sh)))]
+        # Keep the specialized compact leaderboard candidate, but retain the
+        # other generated families as fallbacks if this rigid arrangement is
+        # infeasible or scores poorly for a particular content mix.
+        dense_seed=dict(name='dense-short-banner',
+                        elements=_dense_leaderboard_seed(role_map,width,height,desired*1.15,
+                                                         min(width,height)*.035,(sw,sh)))
+
+        def geometry_signature(seed):
+            return tuple((e['id'],round(e['x'],2),round(e['y'],2),round(e['width'],2),
+                          round(e['height'],2),round(e.get('rotation',0),2),
+                          round(e.get('font_size',0),2),e.get('text_align'))
+                         for e in seed['elements'])
+
+        # Dense layouts are also returned by several generic banner builders.
+        # Drop exact duplicate geometries so they cannot crowd distinct fallbacks
+        # out of the small candidate set polished and visually re-ranked below.
+        seen=set()
+        distinct=[]
+        dense_signature=geometry_signature(dense_seed)
+        for seed in seeds:
+            signature=geometry_signature(seed)
+            if signature==dense_signature or signature in seen:
+                continue
+            seen.add(signature)
+            distinct.append(seed)
+        seeds=distinct+[dense_seed]
     feasible=[]
     rejected=[]
     for seed in seeds:
+        _sync_backing_panels(seed['elements'],units,width,height)
         projected=None
         for topology in ('nearest','centers','alternate'):
             projected=_constrain(seed['elements'],units,width,height,topology)
@@ -2779,10 +3227,19 @@ def _adapt_with_diagnostics(source,target_canvas):
             _repair_copy_hierarchy(elements,units,width,height)
         else:
             elements=candidate['elements'];optimization=dict(before=candidate['energy'],after=candidate['energy'],accepted=0,iterations=0)
-        _repair_primary_action_shape(elements,units,width,height)
-        _repair_vertical_hero_spacing(elements,units,width,height)
-        _repair_vertical_brand_clearance(elements,units,width,height)
+        if candidate['name']!='dense-short-banner':
+            _repair_footer_bottom_anchor(elements,units,width,height)
+            _repair_primary_action_shape(elements,units,width,height)
+            _repair_vertical_hero_spacing(elements,units,width,height)
+            _repair_vertical_brand_clearance(elements,units,width,height)
+        # Balance the logo by its visible artwork bounds for every landscape
+        # family, including the compact dense-leaderboard seed. Transparent
+        # PNG padding must not make a nominally left-aligned logo look flush
+        # with one side of its brand column.
         _repair_banner_logo_column_balance(elements,units,width,height)
+        _repair_banner_cta_copy_proximity(elements,units,width,height)
+        _repair_sparse_vertical_stack(elements,units,width,height)
+        _align_peer_rows(elements,units)
         optimized.append(dict(name=candidate['name'],elements=elements,energy=_energy(elements,units,source,width,height,desired),optimization=optimization))
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start

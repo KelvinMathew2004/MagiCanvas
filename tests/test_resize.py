@@ -9,22 +9,46 @@ from unittest.mock import patch
 
 from engine.resize import resize, _bounds, _text
 from engine.main import self_check
+from renderer.converter.assets import visible_content_bounds
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = [(1080,1080),(1080,1920),(1920,1080),(1600,400),(728,90),(320,568)]
+TARGETS = [(1080,1080),(1080,1350),(1080,1920),(1920,1080),(1600,400),(728,90),(320,568)]
 
 
 class ResizeTests(unittest.TestCase):
     def assert_contract(self, source, target, output):
         self.assertEqual(output['canvas'], target)
         self.assertEqual([e['id'] for e in output['elements']], [e['id'] for e in source['elements']])
-        self.assertEqual(self_check(source, output), [])
-        mutable = {'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit','text_align'}
+        image_ids={e['id'] for e in output['elements'] if e['type']=='image'}
+        problems=[problem for problem in self_check(source, output)
+                  if not any(f"element '{image_id}' is off-canvas" in problem for image_id in image_ids)]
+        # PNGs can have deliberately oversized transparent frames. Their raw
+        # JSON box may bleed while visible alpha remains fully on-canvas.
+        for image in output['elements']:
+            if image['type']=='image':
+                left,top,right,bottom=visible_content_bounds(image,ROOT/'brand_kit'/'assets')
+                if left < -.00001 or top < -.00001 or right > target['width']+.00001 or bottom > target['height']+.00001:
+                    problems.append(f"image '{image['id']}' visible pixels are off-canvas")
+        self.assertEqual(problems, [])
+        mutable = {'x','y','width','height','font_size','letter_spacing','corner_radius','stroke_width','fit','text_align','rotation'}
+        source_by_group={}
+        for item in source['elements']:
+            if item.get('group_id'):
+                source_by_group.setdefault(item['group_id'],[]).append(item)
         for old,new in zip(source['elements'], output['elements']):
             self.assertEqual(set(old)-mutable, set(new)-mutable)
             for key,value in old.items():
                 if key not in mutable:
                     self.assertEqual(new[key], value)
+            if old.get('rotation',0)!=new.get('rotation',0):
+                group=source_by_group.get(old.get('group_id'),[])
+                is_corner_callout=(target['width']/target['height']<.68 and
+                    old.get('group_id') and any(e['type']=='text' for e in group) and
+                    all(e['y']<source['canvas']['height']*.25 for e in group) and
+                    (min(e['x'] for e in group)<source['canvas']['width']*.2 or
+                     max(e['x']+e['width'] for e in group)>source['canvas']['width']*.8))
+                self.assertTrue(is_corner_callout)
+                self.assertEqual(new['rotation'],0)
             l,t,r,b = _bounds([new])
             edge_bleed = new['type']=='shape' and new.get('shape_type')=='ellipse' and new.get('opacity',1)<.4
             if not edge_bleed:
