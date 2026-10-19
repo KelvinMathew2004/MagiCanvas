@@ -1,10 +1,13 @@
 /**
- * Chameleon Organic Pebble Scale AI Generation Loader
- * Reverted to organic Voronoi pebble cobblestone shapes.
- * - Exact pixel sizing matching the target image footprint.
- * - Smooth, continuous Hermite color morph from original palette to generated image.
- * - Organic rounded cobblestone pebble blob shapes (no wobble).
- * - Radial dissolve from the center outward revealing the crisp generated design.
+ * 3D Chrysalis Shed AI Generation Loader
+ * Tactile Reptilian Chameleon Molt:
+ * 1. Generating Phase: Organic cobblestone pebble scales breathe and cycle through the
+ *    source design's palette across the dark interstitial skin with subtle 3D bevels.
+ * 2. Color Harmonization: When the design is ready, scale colors smoothly morph into the
+ *    adapted image's pixels via gamma-corrected blending (1.35s), assembling the new design.
+ * 3. 3D Chrysalis Shed: The scales physically lift off the canvas, cast subtle 3D drop
+ *    shadows, tilt in pseudo-3D space, and roll outward toward the edges like a shedding
+ *    reptile skin, smoothly revealing the crisp photograph underneath.
  */
 
 function parseColor(str) {
@@ -37,20 +40,17 @@ function parseColor(str) {
 export function extractPalette(sourceDesign, sourceImgElement) {
   const colors = [];
 
-  // Keep declared colors as palette accents. This preserves vivid brand and
-  // illustration colors that can be underrepresented by a small pixel sample.
+  // Keep declared colors as palette accents
   if (sourceDesign && Array.isArray(sourceDesign.elements)) {
     for (const el of sourceDesign.elements) {
-      for (const value of [el.fill_color,el.color,el.stroke_color,el.background_color]) {
+      for (const value of [el.fill_color, el.color, el.stroke_color, el.background_color]) {
         const color = parseColor(value);
         if (color) colors.push(color);
       }
     }
   }
 
-  // Add a representative sample from the actual rendered source. The sample
-  // is intentionally varied rather than reduced to only the largest color
-  // regions, which keeps the animation faithful to colorful compositions.
+  // Representative sample from actual rendered source
   if (sourceImgElement && sourceImgElement.complete && sourceImgElement.naturalWidth > 0) {
     try {
       const canvas = document.createElement('canvas');
@@ -66,12 +66,13 @@ export function extractPalette(sourceDesign, sourceImgElement) {
         }
       }
     } catch {
-      // Use declared element colors if the preview cannot be sampled.
+      // Use declared element colors if sampling fails
     }
   }
-  // Organic chameleon palette fallback is used only before the original
-  // preview exists or when the design has no usable declared colors.
-  if (colors.length < 2) colors.push([24,180,115,1],[245,166,35,1],[208,60,35,1],[45,156,219,1],[142,68,173,1]);
+
+  if (colors.length < 2) {
+    colors.push([24, 180, 115, 1], [245, 166, 35, 1], [208, 60, 35, 1], [45, 156, 219, 1], [142, 68, 173, 1]);
+  }
   return colors;
 }
 
@@ -108,7 +109,7 @@ export class ChameleonLoader {
     this.ctx = canvas.getContext('2d');
     this.animId = null;
     this.state = 'idle'; // 'idle' | 'generating' | 'settling'
-    this.blobs = [];
+    this.scales = [];
     this.palette = [];
     this.paletteTransition = null;
     this.startTime = 0;
@@ -117,9 +118,9 @@ export class ChameleonLoader {
     this.width = 300;
     this.height = 300;
     this.dpr = window.devicePixelRatio || 1;
-    this.maxDist = 1;
     this.centerX = 150;
     this.centerY = 150;
+    this.maxDist = 1;
   }
 
   start({ targetWidth, targetHeight, sourceDesign, sourceImg }) {
@@ -160,7 +161,7 @@ export class ChameleonLoader {
     }
 
     this.resizeCanvas();
-    this.initPebbleBlobs();
+    this.initScales();
 
     if (!this.animId) {
       this.tick = this.tick.bind(this);
@@ -173,7 +174,7 @@ export class ChameleonLoader {
       try { await sourceImg.decode(); } catch { /* Use declared design colors if decoding fails. */ }
     }
     const nextPalette = extractPalette(sourceDesign, sourceImg);
-    if (this.state === 'idle' || !this.blobs.length) {
+    if (this.state === 'idle' || !this.scales.length) {
       this.palette = nextPalette;
       return;
     }
@@ -195,20 +196,20 @@ export class ChameleonLoader {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
-  initPebbleBlobs() {
-    this.blobs = [];
-    // Pebble scale spacing (organic chameleon skin cobblestones)
-    const spacing = Math.max(7, Math.min(13, Math.round(Math.min(this.width, this.height) / 28)));
+  initScales() {
+    this.scales = [];
+    // Spacing for tactile reptile cobblestone scales
+    const spacing = Math.max(8, Math.min(15, Math.round(Math.min(this.width, this.height) / 25)));
     const cols = Math.ceil(this.width / spacing) + 3;
     const rows = Math.ceil(this.height / spacing) + 3;
 
-    // Pseudo-random seeded jitter grid
+    // Organic jitter grid for chameleon cobblestones
     const grid = [];
     for (let r = 0; r < rows; r++) {
       const row = [];
       for (let c = 0; c < cols; c++) {
-        const jitterX = (Math.sin(r * 12.9898 + c * 78.233) * 0.5) * 0.45;
-        const jitterY = (Math.cos(r * 4.1414 + c * 34.123) * 0.5) * 0.42;
+        const jitterX = (Math.sin(r * 12.9898 + c * 78.233) * 0.5) * 0.40;
+        const jitterY = (Math.cos(r * 4.1414 + c * 34.123) * 0.5) * 0.38;
         const x = (c - 1 + (r % 2 ? 0.5 : 0) + jitterX) * spacing;
         const y = (r - 1 + jitterY) * spacing;
         row.push([x, y]);
@@ -233,7 +234,7 @@ export class ChameleonLoader {
           [p0[0] - boxRadius, p0[1] + boxRadius]
         ];
 
-        // Clip against 8 surrounding neighbor points to generate Voronoi pebble polygon
+        // Voronoi cell computation against 8 neighbors
         for (let dr = -1; dr <= 1; dr++) {
           for (let dc = -1; dc <= 1; dc++) {
             if (dr === 0 && dc === 0) continue;
@@ -244,7 +245,7 @@ export class ChameleonLoader {
 
         if (poly.length < 3) continue;
 
-        // Inset polygon vertices slightly toward seed center to create dark skin groove seams
+        // Inset polygon to leave narrow skin groove seams
         const insetFactor = 0.86;
         const insetPts = poly.map(pt => [
           p0[0] + (pt[0] - p0[0]) * insetFactor,
@@ -252,17 +253,19 @@ export class ChameleonLoader {
         ]);
 
         const dist = Math.hypot(p0[0] - this.centerX, p0[1] - this.centerY);
+        const relDist = Math.min(1, dist / this.maxDist);
+        const angle = Math.atan2(p0[1] - this.centerY, p0[0] - this.centerX);
         const colorIdx = Math.floor(Math.random() * this.palette.length);
 
-        this.blobs.push({
+        this.scales.push({
           cx: p0[0],
           cy: p0[1],
           pts: insetPts,
           dist,
-          relDist: Math.min(1, dist / this.maxDist),
+          relDist,
+          angle,
           colorIdx,
           phase: Math.random() * Math.PI * 2,
-          speed: 0.8 + Math.random() * 0.5,
           displayColor: [...this.palette[colorIdx]],
           startMorphColor: [...this.palette[colorIdx]],
           targetColor: [...this.palette[colorIdx]],
@@ -283,7 +286,7 @@ export class ChameleonLoader {
         img.onerror = reject;
       });
 
-      // Render into offscreen buffer to sample pixel colors from actual generated design
+      // Sample pixel colors from actual generated design
       const offscreen = document.createElement('canvas');
       offscreen.width = this.width;
       offscreen.height = this.height;
@@ -292,24 +295,23 @@ export class ChameleonLoader {
       this.targetImgData = oCtx.getImageData(0, 0, this.width, this.height).data;
 
       // Assign target colors & snapshot current instantaneous display colors
-      for (const b of this.blobs) {
-        // Snapshot the EXACT color the blob has right now — ensures 0% abruptness!
-        b.startMorphColor = [...b.displayColor];
+      for (const s of this.scales) {
+        s.startMorphColor = [...s.displayColor];
 
-        const sx = Math.max(0, Math.min(this.width - 1, Math.round(b.cx)));
-        const sy = Math.max(0, Math.min(this.height - 1, Math.round(b.cy)));
+        const sx = Math.max(0, Math.min(this.width - 1, Math.round(s.cx)));
+        const sy = Math.max(0, Math.min(this.height - 1, Math.round(s.cy)));
         const idx = (sy * this.width + sx) * 4;
-        const red = this.targetImgData[idx];
-        const green = this.targetImgData[idx + 1];
-        const blue = this.targetImgData[idx + 2];
-        const alpha = this.targetImgData[idx + 3] / 255;
-        b.targetColor = [red, green, blue, alpha];
+        s.targetColor = [
+          this.targetImgData[idx],
+          this.targetImgData[idx + 1],
+          this.targetImgData[idx + 2],
+          this.targetImgData[idx + 3] / 255
+        ];
       }
     } catch {
       // Keep generation colors if sampling fails
     }
 
-    // Keep output image rendered behind canvas so dissolving from center reveals it
     if (this.outputImg) {
       this.outputImg.style.transition = 'none';
       this.outputImg.style.opacity = '1';
@@ -332,105 +334,131 @@ export class ChameleonLoader {
     const isSettling = this.state === 'settling';
     const settleElapsed = isSettling ? (time - this.settleStartTime) / 1000 : 0;
 
-    // Give the color match time to settle before the image reveal travels outward.
-    let radialWave = 0;
+    // Timeline:
+    // 0.0s - 1.35s: Scale colors smoothly morph into the target design (gamma-correct S-curve)
+    // 0.70s - 2.15s: 3D Chrysalis Shed peels and rolls outward toward the edges
+    // 2.2s+: Finish
+    let shedWave = 0;
     let backgroundFade = 1;
 
     if (isSettling) {
-      const revealDelay = 0.58;
-      const revealDuration = 1.42;
+      const revealDelay = 0.70;
+      const shedDuration = 1.45;
       if (settleElapsed > revealDelay) {
-        const progress = Math.min(1, (settleElapsed - revealDelay) / revealDuration);
+        const progress = Math.min(1, (settleElapsed - revealDelay) / shedDuration);
         const easedProgress = progress * progress * (3 - 2 * progress);
-        radialWave = easedProgress * 1.34;
+        shedWave = easedProgress * 1.35;
         backgroundFade = Math.max(0, 1 - easedProgress);
       }
-      if (settleElapsed >= revealDelay + revealDuration + 0.16) {
+      if (settleElapsed >= revealDelay + shedDuration + 0.16) {
         this.finish();
         return;
       }
     }
 
-    // Draw dark chameleon skin interstitial background between pebble scales
+    // Dark under-skin interstitial background between scales
     if (backgroundFade > 0.01) {
-      this.ctx.fillStyle = `rgba(18, 20, 24, ${0.85 * backgroundFade})`;
+      this.ctx.fillStyle = `rgba(16, 18, 22, ${0.88 * backgroundFade})`;
       this.ctx.fillRect(0, 0, this.width, this.height);
     }
 
-    for (const b of this.blobs) {
+    for (const s of this.scales) {
       let r, g, bCol, a;
-      let scaleMult = 1;
+      let scaleX = 1;
+      let scaleY = 1;
+      let transX = 0;
+      let transY = 0;
+      let lift = 0;
 
       if (!isSettling) {
-        // Continuous organic traveling color wave using source image palette
-        const wave = Math.sin(elapsed * 1.7 + (b.cx * 0.016 + b.cy * 0.014) + b.phase);
+        // Continuous traveling wave of source palette
+        const wave = Math.sin(elapsed * 1.5 + (s.cx * 0.016 + s.cy * 0.014) + s.phase);
         const norm = (wave + 1) / 2;
-        const pLen = this.palette.length;
-        const p1 = this.palette[b.colorIdx % pLen];
-        const p2 = this.palette[(b.colorIdx + 1) % pLen];
         const sample = (palette) => {
-          const a = palette[b.colorIdx % palette.length];
-          const c = palette[(b.colorIdx + 1) % palette.length];
-          return [0,1,2].map(i => a[i] * (1 - norm) + c[i] * norm);
+          const c1 = palette[s.colorIdx % palette.length];
+          const c2 = palette[(s.colorIdx + 1) % palette.length];
+          return [0, 1, 2].map(i => Math.sqrt((1 - norm) * (c1[i] ** 2) + norm * (c2[i] ** 2)));
         };
         const nextColor = sample(this.palette);
-        let blend = 1;
         if (this.paletteTransition) {
-          blend = Math.min(1, (time - this.paletteTransition.start) / this.paletteTransition.duration);
+          const blend = Math.min(1, (time - this.paletteTransition.start) / this.paletteTransition.duration);
           const oldColor = sample(this.paletteTransition.from);
-          [r,g,bCol] = nextColor.map((value,i) => oldColor[i] * (1 - blend) + value * blend);
+          [r, g, bCol] = nextColor.map((val, i) => Math.sqrt((1 - blend) * (oldColor[i] ** 2) + blend * (val ** 2)));
           if (blend >= 1) this.paletteTransition = null;
         } else {
-          [r,g,bCol] = nextColor;
+          [r, g, bCol] = nextColor;
         }
-        a = b.opacity;
+        a = s.opacity;
 
-        // Save current color continuously for instantaneous morph snapshot
-        b.displayColor[0] = r;
-        b.displayColor[1] = g;
-        b.displayColor[2] = bCol;
-        b.displayColor[3] = a;
+        s.displayColor[0] = r;
+        s.displayColor[1] = g;
+        s.displayColor[2] = bCol;
+        s.displayColor[3] = a;
       } else {
-        // Seamless Hermite S-curve interpolation from the exact instant of finish to final design
-        const morphT = Math.min(1, settleElapsed / 0.88);
-        const ease = morphT * morphT * (3 - 2 * morphT); // Smoothstep curve
+        // Smooth gamma-corrected color morph into design
+        const morphT = Math.min(1, settleElapsed / 1.35);
+        const ease = morphT * morphT * (3 - 2 * morphT);
 
-        r = b.startMorphColor[0] * (1 - ease) + b.targetColor[0] * ease;
-        g = b.startMorphColor[1] * (1 - ease) + b.targetColor[1] * ease;
-        bCol = b.startMorphColor[2] * (1 - ease) + b.targetColor[2] * ease;
-        a = (b.targetColor[3] || 1) * b.opacity;
+        const rSq = (1 - ease) * (s.startMorphColor[0] ** 2) + ease * (s.targetColor[0] ** 2);
+        const gSq = (1 - ease) * (s.startMorphColor[1] ** 2) + ease * (s.targetColor[1] ** 2);
+        const bSq = (1 - ease) * (s.startMorphColor[2] ** 2) + ease * (s.targetColor[2] ** 2);
+        r = Math.sqrt(rSq);
+        g = Math.sqrt(gSq);
+        bCol = Math.sqrt(bSq);
+        a = (s.targetColor[3] || 1) * s.opacity;
 
-        // Radial dissolve starting from the middle
-        if (radialWave > 0) {
-          if (b.relDist < radialWave) {
-            const depth = Math.max(0, Math.min(1, (radialWave - b.relDist) / 0.34));
-            const factor = 1 - depth * depth * (3 - 2 * depth);
-            a *= factor;
-            scaleMult = 0.5 + 0.5 * factor;
-            if (a <= 0.01) continue; // Fully dissolved
+        // 3D Chrysalis Shed: Scales lift, tilt, and peel outward
+        if (shedWave > 0) {
+          if (s.relDist < shedWave) {
+            const shedDepth = Math.min(1, (shedWave - s.relDist) / 0.35);
+            const shedEase = shedDepth * shedDepth * (3 - 2 * shedDepth);
+
+            lift = shedEase;
+
+            // 3D tilt: scale rotates on edge and rolls outward
+            const tiltAngle = shedEase * (Math.PI * 0.48);
+            scaleX = Math.max(0.06, Math.cos(tiltAngle));
+            scaleY = Math.max(0.35, 1 - shedEase * 0.55);
+
+            // Outward radial slide / peel
+            const slideDist = shedEase * 22;
+            transX = Math.cos(s.angle) * slideDist;
+            transY = Math.sin(s.angle) * slideDist - (shedEase * 4);
+
+            a *= Math.max(0, 1 - shedEase * 1.15);
+            if (a <= 0.01) continue;
           }
         }
       }
 
-      // Draw the smooth organic pebble blob scale (no wobble in coordinates)
-      this.drawPebbleBlob(b.cx, b.cy, b.pts, `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(bCol)}, ${a})`, scaleMult, a);
+      this.drawShedScale(s, `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(bCol)}, ${a})`, transX, transY, scaleX, scaleY, lift, a);
     }
 
     this.animId = requestAnimationFrame(this.tick);
   }
 
-  drawPebbleBlob(cx, cy, pts, fillColor, scaleMult = 1, alpha = 1) {
+  drawShedScale(s, fillColor, transX, transY, scaleX, scaleY, lift, alpha) {
+    const pts = s.pts;
     if (pts.length < 3) return;
     const ctx = this.ctx;
     ctx.save();
 
-    if (scaleMult !== 1) {
-      ctx.translate(cx, cy);
-      ctx.scale(scaleMult, scaleMult);
-      ctx.translate(-cx, -cy);
+    // Position and 3D orientation transform
+    ctx.translate(s.cx + transX, s.cy + transY);
+    ctx.rotate(s.angle);
+    ctx.scale(scaleX, scaleY);
+    ctx.rotate(-s.angle);
+    ctx.translate(-s.cx, -s.cy);
+
+    // Subtle 3D shadow as scale lifts during molt
+    if (lift > 0.05 && alpha > 0.1) {
+      ctx.shadowColor = `rgba(0, 0, 0, ${0.40 * lift * alpha})`;
+      ctx.shadowBlur = 6 * lift;
+      ctx.shadowOffsetX = Math.cos(s.angle) * (3 * lift);
+      ctx.shadowOffsetY = Math.sin(s.angle) * (3 * lift) + (2 * lift);
     }
 
-    // Smooth rounded pebble curve through polygon midpoints
+    // 1. Smooth rounded pebble curve through polygon midpoints
     ctx.beginPath();
     const midX = (pts[0][0] + pts[pts.length - 1][0]) / 2;
     const midY = (pts[0][1] + pts[pts.length - 1][1]) / 2;
@@ -448,9 +476,10 @@ export class ChameleonLoader {
     ctx.fillStyle = fillColor;
     ctx.fill();
 
-    // Subtle 3D pebble bead highlight on top-left (authentic chameleon scale sheen)
-    ctx.strokeStyle = `rgba(255, 255, 255, ${0.1 * alpha})`;
-    ctx.lineWidth = 0.75;
+    // 2. Beveled 3D scale edge highlight
+    const rimAlpha = Math.max(0.06, 0.18 * (1 - lift * 0.4)) * alpha;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${rimAlpha})`;
+    ctx.lineWidth = 0.85;
     ctx.stroke();
 
     ctx.restore();
@@ -463,8 +492,8 @@ export class ChameleonLoader {
       this.animId = null;
     }
     this.container.classList.add('visually-hidden');
-    this.container.parentElement.classList.remove('is-generating');
     this.container.parentElement.classList.remove('is-revealing');
+    this.container.parentElement.classList.remove('is-generating');
     if (this.outputImg) {
       this.outputImg.style.opacity = '1';
     }
