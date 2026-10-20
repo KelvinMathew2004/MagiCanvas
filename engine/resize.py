@@ -267,6 +267,7 @@ def _analyze(source):
         return i
     def join(i, j):
         parent[root(j)] = root(i)
+    inferred_card_ids=set()
     for i, a in enumerate(rest):
         for j, b in enumerate(rest[:i]):
             if a.get('group_id') and a.get('group_id') == b.get('group_id'):
@@ -284,6 +285,52 @@ def _analyze(source):
                              for other in rest)]
         if backs:
             join(i, min(backs, key=lambda p: _area(p[1]))[0])
+    # Infer local product/card relationships only for genuinely multi-image
+    # compositions. Each ungrouped caption is assigned to its uniquely nearest
+    # image, and pairing is enabled only when at least two images have local
+    # copy. This avoids folding ordinary poster headlines into a hero image.
+    if len(rest)>=12:
+        root_sizes={}
+        for i in range(len(rest)):
+            root_sizes[root(i)]=root_sizes.get(root(i),0)+1
+        image_boxes={i:_bounds([e]) for i,e in enumerate(rest)
+                     if e['type']=='image' and not e.get('group_id') and root_sizes[root(i)]==1}
+        root_members={}
+        for i,e in enumerate(rest):
+            root_members.setdefault(root(i),[]).append(e)
+        text_members={r:members for r,members in root_members.items()
+                      if any(e['type']=='text' for e in members)
+                      and all(not e.get('group_id') and e['type']!='image' for e in members)}
+        text_boxes={r:_bounds(members) for r,members in text_members.items()}
+        if len(image_boxes)>=2 and len(text_boxes)>=2:
+            paired={}
+            for ti,tb in text_boxes.items():
+                options=[]
+                for ii,ib in image_boxes.items():
+                    iw,ih=ib[2]-ib[0],ib[3]-ib[1]
+                    if tb[2]-tb[0]>iw*1.7:
+                        continue
+                    dx=max(0.,ib[0]-tb[2],tb[0]-ib[2])
+                    dy=max(0.,ib[1]-tb[3],tb[1]-ib[3])
+                    distance=sqrt(dx*dx+dy*dy)
+                    font=max((e.get('font_size',0.) for e in text_members[ti]),default=0.)
+                    limit=min(min(sw,sh)*.11,
+                              max(min(sw,sh)*.04,min(iw,ih)*.45,font*2.))
+                    if distance<=limit:
+                        options.append((distance,ii))
+                options.sort()
+                if not options:
+                    continue
+                # Skip ambiguous assignments when two cards are equally close.
+                if len(options)>1 and options[1][0]-options[0][0]<min(sw,sh)*.012:
+                    continue
+                paired.setdefault(options[0][1],[]).append(ti)
+            if len(paired)>=2:
+                for image_index,text_indexes in paired.items():
+                    inferred_card_ids.add(rest[image_index]['id'])
+                    for text_index in text_indexes:
+                        inferred_card_ids.update(e['id'] for e in text_members[text_index])
+                        join(image_index,text_index)
     grouped = {}
     for i, e in enumerate(rest):
         grouped.setdefault(root(i), []).append(e)
@@ -339,6 +386,8 @@ def _analyze(source):
         else:
             role = 'visual'
         unit=dict(items=items,bounds=(x,y,r,b),role=role,label=label)
+        if any(e['id'] in inferred_card_ids for e in items):
+            unit['inferred_card_pair']=True
         if len(items)==1 and items[0]['id'] in panel_children:
             panel=items[0]
             unit.update(backing_panel=True,backed_ids=panel_children[panel['id']],
@@ -1680,7 +1729,13 @@ def _enrich_units(source, units):
             semantic, confidence = 'art', .55
         u.update(semantic=semantic, confidence=confidence)
     visuals = [u for u in units if u['role'] == 'visual']
-    if visuals:
+    paired_cards=[u for u in visuals if u.get('inferred_card_pair')]
+    if len(paired_cards)>=2:
+        # A repeated set of image/copy composites is a card grid, not one hero
+        # plus unrelated artwork. Keep every card at the same visual tier.
+        for unit in paired_cards:
+            unit.update(semantic='art',confidence=.78)
+    elif visuals:
         hero = max(visuals, key=lambda u: (u['bounds'][2]-u['bounds'][0])*(u['bounds'][3]-u['bounds'][1]))
         hero.update(semantic='hero', confidence=.80)
     for u in units:
@@ -1862,6 +1917,19 @@ def _safe_grid(units, width, height, scale):
     return output
 
 
+def _clamp_raw_image_frames(elements,width,height):
+    """Keep even transparent image frames inside the runner's raw bounds."""
+    for e in elements:
+        if e.get('type')!='image':
+            continue
+        factor=min(1.,width/max(.001,e['width']),height/max(.001,e['height']))
+        if factor<1.:
+            e['width']*=factor;e['height']*=factor
+        e['x']=min(max(0.,e['x']),max(0.,width-e['width']))
+        e['y']=min(max(0.,e['y']),max(0.,height-e['height']))
+    return elements
+
+
 def _layered(a, b):
     """Only source-evidenced artwork layering; text-bearing units stay clear."""
     if a['role'] == 'decoration' or b['role'] == 'decoration':
@@ -1886,6 +1954,61 @@ def _records(elements, units):
     return [(u, [by_id[e['id']] for e in u['items']]) for u in units]
 
 
+def _untangle_overlaps(elements, units, width, height):
+    """Deterministically move colliding units to the nearest legal open slot."""
+    output=deepcopy(elements)
+    by_id={e['id']:e for e in output}
+    gap=min(width,height)*.008
+    records=[(u,[by_id[e['id']] for e in u['items']]) for u in units]
+    records.sort(key=lambda row:(
+        _bounds(row[1])[1],_bounds(row[1])[0],
+        _bounds(row[1])[3]-_bounds(row[1])[1],
+        _bounds(row[1])[2]-_bounds(row[1])[0]))
+    placed=[]
+    for unit,items in records:
+        box=_bounds(items)
+        margin=0. if unit['role']=='decoration' else _unit_margin(box,width,height,unit)
+        raw_left=min(e['x'] for e in items);raw_top=min(e['y'] for e in items)
+        raw_right=max(e['x']+e['width'] for e in items)
+        raw_bottom=max(e['y']+e['height'] for e in items)
+        dx_min=max(margin-box[0],-raw_left)
+        dx_max=min(width-margin-box[2],width-raw_right)
+        dy_min=max(margin-box[1],-raw_top)
+        dy_max=min(height-margin-box[3],height-raw_bottom)
+        if dx_min>dx_max+1e-6 or dy_min>dy_max+1e-6:
+            return None
+        xs={min(dx_max,max(dx_min,0.))}
+        ys={min(dy_max,max(dy_min,0.))}
+        for other,other_box in placed:
+            if _layered(unit,other):
+                continue
+            xs.add(min(dx_max,max(dx_min,other_box[0]-gap-box[2])))
+            xs.add(min(dx_max,max(dx_min,other_box[2]+gap-box[0])))
+            ys.add(min(dy_max,max(dy_min,other_box[1]-gap-box[3])))
+            ys.add(min(dy_max,max(dy_min,other_box[3]+gap-box[1])))
+        candidates=[]
+        for dx in xs:
+            for dy in ys:
+                moved=(box[0]+dx,box[1]+dy,box[2]+dx,box[3]+dy)
+                if any(not _layered(unit,other) and
+                       not (moved[2]+gap<=other_box[0]+1e-6 or
+                            other_box[2]+gap<=moved[0]+1e-6 or
+                            moved[3]+gap<=other_box[1]+1e-6 or
+                            other_box[3]+gap<=moved[1]+1e-6)
+                       for other,other_box in placed):
+                    continue
+                score=(dx/width)**2+(dy/height)**2
+                candidates.append((score,abs(dy),abs(dx),dy,dx,moved))
+        if not candidates:
+            return None
+        _,_,_,dy,dx,moved=min(candidates,key=lambda candidate:candidate[:5])
+        for item in items:
+            item['x']+=dx;item['y']+=dy
+        placed.append((unit,moved))
+    _sync_backing_panels(output,units,width,height)
+    return output if _feasible(output,units,width,height) else None
+
+
 def _unit_margin(box, width, height, unit=None):
     # Give the primary reading flow a little breathing room when the canvas
     # permits it. Corner/footer content keeps the tighter legacy safe area.
@@ -1898,8 +2021,8 @@ def _unit_margin(box, width, height, unit=None):
 
 def _feasible(elements, units, width, height):
     if any(not all(isfinite(v) for v in (e.get('x',0),e.get('y',0),e.get('width',0),e.get('height',0)))
-           or (e.get('type')!='image' and (e['x'] < -1e-5 or e['y'] < -1e-5
-           or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5))
+           or e['x'] < -1e-5 or e['y'] < -1e-5
+           or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5
            for e in elements):
         return False
     records = [(u,_bounds(items)) for u,items in _records(elements,units)]
@@ -2059,8 +2182,6 @@ def _constrain(elements, units, width, height, topology='nearest'):
             solver.addConstraint(xs[i]+w<=width-margin)
             solver.addConstraint(ys[i]+h<=height-margin)
             for item in records[i][1]:
-                if item.get('type')=='image':
-                    continue
                 dx=item['x']-x;dy=item['y']-y
                 solver.addConstraint(xs[i]+dx>=0)
                 solver.addConstraint(ys[i]+dy>=0)
@@ -2087,9 +2208,12 @@ def _constrain(elements, units, width, height, topology='nearest'):
                     if topology=='alternate' and _overlap(a,b)>0:
                         horizontal=not horizontal
                     choice=(1 if dx>=0 else 0) if horizontal else (3 if dy>=0 else 2)
-                    solver.addConstraint(choices[choice][1])
+                    separation=choices[choice][1]
                 else:
-                    solver.addConstraint(min(choices,key=lambda p:p[0])[1])
+                    separation=min(choices,key=lambda p:p[0])[1]
+                if len(records)>10:
+                    separation=separation | kiwi.strength.strong
+                solver.addConstraint(separation)
                 if abs(a[0]-b[0])<width*.015:
                     solver.addConstraint((xs[i]==xs[j]) | kiwi.strength.weak)
                 elif abs((a[0]+a[2])-(b[0]+b[2]))<width*.025:
@@ -2101,7 +2225,11 @@ def _constrain(elements, units, width, height, topology='nearest'):
     for i,(_,items) in enumerate(records):
         output.extend(_move(deepcopy(items),xs[i].value(),ys[i].value()))
     _sync_backing_panels(output,units,width,height)
-    return output if _feasible(output,units,width,height) else None
+    if _feasible(output,units,width,height):
+        return output
+    if len(records)>10:
+        return _untangle_overlaps(output,units,width,height)
+    return None
 
 
 def _perceptual_context(source, backgrounds, units, width, height):
@@ -3249,6 +3377,7 @@ def _adapt_with_diagnostics(source,target_canvas):
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
+    _clamp_raw_image_frames(winner['elements'],width,height)
     output=_assemble(winner['elements'],backgrounds,source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
