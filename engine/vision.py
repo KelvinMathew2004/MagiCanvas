@@ -2,7 +2,7 @@
 
 The engine generates several geometry-valid candidate layouts, renders the top
 few to PNG, and picks a winner. This module adds a *learned* image/text judge
-(``google/siglip-base-patch16-224``) to that final tie-break, as a closer proxy
+(``google/siglip2-base-patch16-224``) to that final tie-break, as a closer proxy
 for the AI evaluator that scores the rendered PNG than the deterministic
 contrast/busyness heuristics alone.
 

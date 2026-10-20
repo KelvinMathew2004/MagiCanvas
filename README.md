@@ -243,7 +243,7 @@ engine needs must be installed at **build** time (add it to
 hosted model, bake its weights into the image during the build step.
 
 The `docker build` step above also bakes in the optional SigLIP perceptual
-re-ranker weights (`scripts/fetch_siglip.py`, ~813 MB), so it needs internet;
+re-ranker weights (`scripts/fetch_siglip.py`, about 1.5 GB), so it needs internet;
 the `docker run` step then loads them offline under `--network none`. If the
 weights or their dependencies are absent, the engine falls back to its
 deterministic ranking — see [IMPLEMENTATION.md](IMPLEMENTATION.md),

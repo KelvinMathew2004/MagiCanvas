@@ -1556,7 +1556,7 @@ def _repair_banner_logo_column_balance(elements, units, width, height):
 
 
 def _repair_banner_cta_copy_proximity(elements, units, width, height):
-    """Keep a landscape CTA attached to its copy column when a gap is wasteful."""
+    """Keep banner CTAs visibly distinct while attached to their copy group."""
     if width/max(1.,height)<1.35:
         return
     by_id={e['id']:e for e in elements}
@@ -1566,7 +1566,8 @@ def _repair_banner_cta_copy_proximity(elements, units, width, height):
     if not copies or not actions:
         return
     copy_box=_bounds([by_id[e['id']] for e in copies])
-    gap=min(width,height)*.06
+    copy_font=max((e.get('font_size',0) for e in copies if e.get('type')=='text'),default=0)
+    canvas_gap=min(width,height)*.12
     heroes=[_bounds([by_id[e['id']] for e in u['items'] if e['id'] in by_id])
             for u in units if u['semantic'] in ('hero','art')]
     for unit in actions:
@@ -1575,10 +1576,13 @@ def _repair_banner_cta_copy_proximity(elements, units, width, height):
             continue
         box=_bounds(items)
         # The CTA already belongs to the copy column when it sits under or
-        # inside that column. Only close an oversized horizontal gap.
+        # inside that column. For inline CTAs, enforce a restrained minimum gap
+        # so the action reads clearly without splitting the copy group apart.
         if box[0]<copy_box[2]:
             continue
         width_cta=box[2]-box[0]
+        action_font=max((e.get('font_size',0) for e in items if e.get('type')=='text'),default=0)
+        gap=max(canvas_gap,(copy_font+action_font)*.25)
         target=copy_box[2]+gap
         right_limit=width-min(width,height)*.045
         for hero in heroes:
@@ -1588,7 +1592,7 @@ def _repair_banner_cta_copy_proximity(elements, units, width, height):
         if target+width_cta>right_limit+1e-5:
             continue
         dx=target-box[0]
-        if dx>=-1e-4:
+        if abs(dx)<1e-4:
             continue
         old_x=[e['x'] for e in items]
         for e in items:
@@ -1915,11 +1919,11 @@ def _feasible(elements, units, width, height):
 
 
 def _repair_sparse_vertical_stack(elements, units, width, height):
-    """Tighten a visibly disconnected tall-layout stack and center the block.
+    """Give tall-layout content groups a consistent, readable vertical rhythm.
 
-    Only sparse portrait/tall formats qualify. Atomic units keep their internal
-    geometry, source order is retained, and legal/footer units remain anchored.
-    This avoids treating every available pixel as a reason to stretch gaps.
+    Atomic units keep their internal geometry, source order is retained, and
+    legal/footer units remain anchored. Text roles are grouped together so
+    related headline and supporting copy retain their close relationship.
     """
     if height/max(1.,width)<=1.35:
         return False
@@ -1940,19 +1944,16 @@ def _repair_sparse_vertical_stack(elements, units, width, height):
     groups.sort(key=lambda g:g['box'][1])
     if len(groups)<3:
         return False
-    gaps=[max(0.,b['box'][1]-a['box'][3]) for a,b in zip(groups,groups[1:])]
     short=min(width,height)
-    if sum(gaps)/len(gaps)<height*.12:
-        return False
-    # Gap rhythm follows hierarchy: same-kind text remains close; a product,
-    # badge band, or CTA gets a little more separation from adjacent content.
+    # Use the same base rhythm between content sections. Product art and badge
+    # bands receive a little more room; related copy remains one atomic group.
     targets=[]
     for a,b in zip(groups,groups[1:]):
-        factor=.065
+        factor=.14
         if 'hero' in (a['name'],b['name']):
-            factor=.105
+            factor=.18
         elif (a['name'],b['name']) in (('copy','tags'),('tags','action')):
-            factor=.085
+            factor=.12
         targets.append(short*factor)
     first_top=groups[0]['box'][1]
     total_height=sum(g['box'][3]-g['box'][1] for g in groups)+sum(targets)
@@ -1964,9 +1965,9 @@ def _repair_sparse_vertical_stack(elements, units, width, height):
     available=max(0.,bottom_limit-top_limit)
     if total_height>available:
         return False
-    # Keep the compact stack centered in the safe area above any footer/legal
-    # content, so tightening the gaps does not strand all content at the top.
+    # Center the content sequence in the safe area above footer/legal content.
     cursor=top_limit+(available-total_height)*.5
+    original_y={e['id']:e['y'] for e in elements}
     for i,group in enumerate(groups):
         dy=cursor-group['box'][1]
         for unit in group['members']:
@@ -1976,6 +1977,10 @@ def _repair_sparse_vertical_stack(elements, units, width, height):
         cursor+=group['box'][3]-group['box'][1]
         if i<len(targets):
             cursor+=targets[i]
+    if not _feasible(elements,units,width,height):
+        for e in elements:
+            e['y']=original_y[e['id']]
+        return False
     return True
 
 

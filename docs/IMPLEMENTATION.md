@@ -96,8 +96,8 @@ Dense small banners can retain all content yet remain hard to read.
 
 Both the output JSON and the rendered PNG are scored, and the PNG is judged by an
 AI evaluator. To better approximate that judgment than the deterministic
-contrast/busyness heuristics alone, a lightweight vision model
-(`google/siglip-base-patch16-224`) ranks the final, already-valid candidate
+contrast/busyness heuristics alone, the 86M-parameter SigLIP 2 Base model
+(`google/siglip2-base-patch16-224`) ranks the final, already-valid candidate
 renders. The target bucket and estimated content density condition format-aware
 image/text prompts; additional cues cover inferred logo, copy, CTA, artwork,
 grouped-piece, badge-row, and corner-callout relationships. A

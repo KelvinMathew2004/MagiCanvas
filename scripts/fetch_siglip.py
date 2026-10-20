@@ -1,4 +1,4 @@
-"""Download SigLIP weights into ``models/siglip`` for offline use.
+"""Download SigLIP 2 weights into ``models/siglip`` for offline use.
 
 Runs at Docker build time (see the Dockerfile) so the weights are baked into
 the image and the engine can load them under ``--network none`` at runtime.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-MODEL_ID = "google/siglip-base-patch16-224"
+MODEL_ID = "google/siglip2-base-patch16-224"
 TARGET = Path(__file__).resolve().parents[1] / "models" / "siglip"
 
 
