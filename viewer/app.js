@@ -3,6 +3,7 @@ import { ChameleonLoader } from '/chameleon-loader.mjs';
 
 const $ = (id) => document.getElementById(id);
 let task, result, samples = [], requestId = 0;
+let assetMode = 'demo', sampleId = null;
 let backgroundSeed = null;
 const appearance = matchMedia('(prefers-color-scheme: dark)');
 
@@ -36,10 +37,11 @@ function setStatus(message, state = '') {
   $('status').textContent = message;
   $('status').dataset.state = state;
 }
-function setTask(value) {
+function setTask(value, selectedSampleId = null) {
   const next = value.source ? value : {source: value, target_canvas: value.canvas};
   if (!next.source?.canvas || !Array.isArray(next.source.elements)) throw new Error('Load a v0.9 challenge task or design with canvas and elements.');
   task = structuredClone(next);
+  sampleId = selectedSampleId;
   const immediateSeed = seedFromDesign(task.source);
   if (immediateSeed) applyTheme(immediateSeed);
   $('width').value = task.target_canvas?.width ?? task.source.canvas.width;
@@ -124,7 +126,7 @@ async function adapt() {
   }
 
   try {
-    const response = await fetch('/api/adapt-stream', {method:'POST', headers:{'Content-Type':'application/json','Accept':'text/event-stream'}, body:JSON.stringify({source:task.source, target_canvas:{width,height}})});
+    const response = await fetch('/api/adapt-stream', {method:'POST', headers:{'Content-Type':'application/json','Accept':'text/event-stream'}, body:JSON.stringify({source:task.source, target_canvas:{width,height}, asset_mode:assetMode, sample_id:sampleId})});
     if (!response.ok) {
       const error=await response.json().catch(()=>({}));
       throw new Error(error.error || 'Adaptation failed.');
@@ -184,7 +186,7 @@ function openImageViewer(kind) {
   fetch('/api/lightbox', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({design})
+    body: JSON.stringify({design, asset_mode:assetMode, sample_id:sampleId})
   }).then(async response => {
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
@@ -244,11 +246,50 @@ $('image-viewer-zoom').addEventListener('click', () => {
   $('image-viewer-zoom').setAttribute('aria-pressed', 'true');
 });
 $('adapt').addEventListener('click', adapt);
-$('sample').addEventListener('change', () => {const sample=samples[Number($('sample').value)];if(!sample)return;setTask(sample.task);adapt();});
+$('sample').addEventListener('change', () => {const sample=samples[Number($('sample').value)];if(!sample)return;setTask(sample.task,sample.id);adapt();});
 $('upload').addEventListener('change', async (event) => {try {const file=event.target.files[0];if(!file)return;setTask(JSON.parse(await file.text()));$('sample').querySelector('[data-import]')?.remove();const option=document.createElement('option');option.dataset.import='true';option.value='imported';option.textContent=file.name;$('sample').append(option);$('sample').value='imported';await adapt();}catch(error){setStatus(error.message, 'error');}});
+$('upload').addEventListener('click', event => {event.target.value='';});
 $('format').addEventListener('change', () => {if($('format').value==='custom')return;const [w,h]=$('format').value.split(',');$('width').value=w;$('height').value=h;adapt();});
 ['width','height'].forEach(id => {$(id).addEventListener('keydown', e=>{if(e.key==='Enter'){e.preventDefault();$(id).blur();}});$(id).addEventListener('change',()=>{$('format').value='custom';adapt();});});
 $('json').onclick=()=>{if(result)download(JSON.stringify(result.design,null,2),'adapted-design.json','application/json');};
 $('png').onclick=()=>{if(!result)return;const link=document.createElement('a');link.href=result.output_png;link.download='adapted-design.png';link.click();};
 $('bundle').onclick=()=>{if(result)download(JSON.stringify({viewerVersion:1,...result}),'magicanvas-viewer-bundle.json','application/json');};
-(async()=>{try{const response=await fetch('/api/samples');if(!response.ok)throw new Error('Could not load samples.');samples=await response.json();for(const [i,sample]of samples.entries()){const option=document.createElement('option');option.value=i;option.textContent=sample.name.replace('chameleon_sample_','').replaceAll('_',' ');$('sample').append(option);}if(samples.length){setTask(samples[0].task);await adapt();}else{setStatus('Import a design to begin.');}}catch(error){setStatus(error.message, 'error');}})();
+
+async function loadCollection(mode) {
+  assetMode = mode;
+  sampleId = null;
+  for (const button of document.querySelectorAll('[data-mode]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+  }
+  $('sample').replaceChildren();
+  setStatus(mode === 'test' ? 'Loading test designs…' : 'Loading demo designs…');
+  try {
+    const response = await fetch(`/api/samples?mode=${encodeURIComponent(mode)}`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Could not load designs.');
+    samples = payload;
+    for (const [index, sample] of samples.entries()) {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = sample.name.replace('chameleon_sample_', '').replaceAll('_', ' ');
+      $('sample').append(option);
+    }
+    if (!samples.length) {
+      setStatus(mode === 'test' ? 'No test JSON files found under data/.' : 'No demo designs found.');
+      return;
+    }
+    $('sample').value = '0';
+    setTask(samples[0].task, samples[0].id);
+    await adapt();
+  } catch (error) {
+    setStatus(error.message, 'error');
+  }
+}
+
+for (const button of document.querySelectorAll('[data-mode]')) {
+  button.addEventListener('click', () => {
+    if (button.dataset.mode !== assetMode) void loadCollection(button.dataset.mode);
+  });
+}
+
+(async()=>{await loadCollection('demo');})();

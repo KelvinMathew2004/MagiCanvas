@@ -25,6 +25,10 @@ preserved verbatim for reference. Official rules remain in [RULES.md](RULES.md),
 [FAQ.md](FAQ.md), and the design schema; team implementation notes do not replace
 those requirements.
 
+## Crello dataset attribution
+
+The local data tools use the [CyberAgent Crello dataset](https://huggingface.co/datasets/cyberagent/crello), based on the Crello/VistaCreate design corpus. Credit CyberAgent and the dataset authors when discussing this work. The dataset card lists CDLA-Permissive-2.0 and also requires users to follow VistaCreate's terms; original design assets may carry third-party rights. We keep downloaded and converted dataset files local and do not include them in this repository. See [docs/CRELLO_DATA_AND_TRAINING.md](docs/CRELLO_DATA_AND_TRAINING.md) before sharing data or training artifacts.
+
 See [REQUIREMENTS_AUDIT.md](REQUIREMENTS_AUDIT.md) for implemented requirements,
 remaining quality gaps, viewer/finale work, and organizer confirmations.
 

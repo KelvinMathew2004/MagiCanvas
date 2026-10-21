@@ -19,9 +19,7 @@ MUTABLE={'x','y','width','height','font_size','letter_spacing','corner_radius','
 
 
 def verify(source,target,result,report):
-    image_ids={e['id'] for e in result['elements'] if e['type']=='image'}
-    problems=[problem for problem in self_check(source,result)
-              if not any(f"element '{image_id}' is off-canvas" in problem for image_id in image_ids)]
+    problems=self_check(source,result)
     if result['canvas']!=target:problems.append('Target canvas differs')
     if [e['id'] for e in source['elements']]!=[e['id'] for e in result['elements']]:problems.append('Element IDs/order differ')
     if not report['hard_constraints_passed']:problems.append('Hard placement constraints failed')

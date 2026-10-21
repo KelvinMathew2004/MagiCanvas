@@ -12,10 +12,11 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from time import perf_counter
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = ROOT / 'data'
 sys.path.insert(0, str(ROOT))
 LIGHTBOX_SHORT_SIDE = 1080
 LIGHTBOX_MAX_PIXELS = 40_000_000
@@ -59,18 +60,99 @@ def validate_task(task):
     return source, target
 
 
-def render_preview_data(design):
-    from renderer.converter.convert import render_design_to_png
+def _asset_directory(mode, sample_id=None):
+    if mode == 'demo':
+        return ROOT / 'brand_kit' / 'assets'
+    if mode != 'test':
+        raise ValueError("Asset mode must be 'demo' or 'test'.")
+    if sample_id:
+        sample_path = (DATA_ROOT / sample_id).resolve()
+        if not sample_path.is_relative_to(DATA_ROOT.resolve()) or not sample_path.is_file():
+            raise ValueError('Unknown test design.')
+        if sample_path.parent.name == 'designs' and (sample_path.parent.parent / 'assets').is_dir():
+            return sample_path.parent.parent
+    return DATA_ROOT / 'crello_sample'
 
+
+def _render_function(mode):
+    if mode == 'test' and (DATA_ROOT / 'crello_fonts.pickle').is_file():
+        from scripts.dataset_renderer import render_design_to_png
+        return render_design_to_png, DATA_ROOT / 'crello_fonts.pickle'
+    from renderer.converter.convert import render_design_to_png
+    return render_design_to_png, ROOT / 'brand_kit' / 'fonts'
+
+
+def _with_resolved_assets(design, assets_dir):
+    """Turn relative asset ids into absolute paths for the local renderer."""
+    resolved = deepcopy(design)
+    for element in resolved.get('elements', []):
+        asset_id = element.get('asset_id')
+        if element.get('type') != 'image' or not isinstance(asset_id, str):
+            continue
+        path = Path(asset_id)
+        candidate = path if path.is_absolute() else assets_dir / path
+        if candidate.is_file():
+            element['asset_id'] = str(candidate.resolve())
+    return resolved
+
+
+def _restore_asset_ids(design, original):
+    """Keep downloaded/output JSON portable after local rendering."""
+    original_ids = {e.get('id'): e.get('asset_id') for e in original.get('elements', [])}
+    for element in design.get('elements', []):
+        eid = element.get('id')
+        if eid in original_ids and original_ids[eid] is not None:
+            element['asset_id'] = original_ids[eid]
+    return design
+
+
+def _sample_records(mode):
+    if mode == 'demo':
+        files = sorted((ROOT / 'input').glob('*.json'))
+        root = ROOT / 'input'
+    elif mode == 'test':
+        files = sorted(DATA_ROOT.rglob('*.json')) if DATA_ROOT.is_dir() else []
+        root = DATA_ROOT
+    else:
+        raise ValueError("Mode must be 'demo' or 'test'.")
+
+    records = []
+    for path in files:
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+            if isinstance(value.get('source'), dict) and isinstance(value.get('target_canvas'), dict):
+                task = {'source': value['source'], 'target_canvas': value['target_canvas']}
+            elif isinstance(value.get('canvas'), dict) and isinstance(value.get('elements'), list):
+                task = {'source': value, 'target_canvas': value['canvas']}
+            else:
+                continue
+            relative = path.relative_to(root).as_posix()
+            records.append({'name': path.stem,
+                            'id': relative if mode == 'test' else None,
+                            'task': task})
+        except (OSError, ValueError, TypeError):
+            continue
+    return records
+
+
+def render_preview_data(design, assets_dir=None, asset_mode='demo'):
+    render_design_to_png, fonts = _render_function(asset_mode)
+    assets_dir = assets_dir or (ROOT / 'brand_kit' / 'assets')
     with TemporaryDirectory(prefix='magicanvas-preview-') as directory:
         path = Path(directory) / 'preview.png'
-        warnings = render_design_to_png(design, ROOT/'brand_kit'/'assets', path,
-                         max_size=max(design['canvas']['width'], design['canvas']['height']))
+        if asset_mode == 'test' and fonts.suffix == '.pickle':
+            warnings = render_design_to_png(
+                design, assets_dir, path, fonts_file=fonts,
+                max_size=max(design['canvas']['width'], design['canvas']['height']))
+        else:
+            warnings = render_design_to_png(
+                design, assets_dir, path, fonts_dir=fonts,
+                max_size=max(design['canvas']['width'], design['canvas']['height']))
         png_data = 'data:image/png;base64,' + base64.b64encode(path.read_bytes()).decode()
     return png_data, warnings
 
 
-def adapt_preview(task, source_png=None, validated=None):
+def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', sample_id=None):
     import importlib
     import renderer.converter.assets
     import engine.resize
@@ -83,11 +165,14 @@ def adapt_preview(task, source_png=None, validated=None):
     current_self_check = engine.main.self_check
 
     source, target = validated or validate_task(task)
+    original_source = deepcopy(source)
+    assets_dir = _asset_directory(asset_mode, sample_id)
+    source = _with_resolved_assets(source, assets_dir)
     started = perf_counter()
     # Render the original before starting the expensive search. The streaming
     # endpoint sends this preview to the browser immediately, then continues.
     if source_png is None:
-        source_png, source_warnings = render_preview_data(source)
+        source_png, source_warnings = render_preview_data(source, assets_dir, asset_mode)
     else:
         source_warnings = []
     output, diagnostics = current_adapt(source, target)
@@ -108,9 +193,10 @@ def adapt_preview(task, source_png=None, validated=None):
                 warnings.append(f"{e['id']}: text may not fit at this resolution.")
             if e['font_size'] < 8:
                 warnings.append(f"{e['id']}: {e['font_size']:.1f}px text is very small. Copy cannot be removed or rewritten under stage-one rules.")
-    output_png, output_warnings = render_preview_data(output)
+    output_png, output_warnings = render_preview_data(output, assets_dir, asset_mode)
     warnings.extend(output_warnings)
-    return dict(design=output, source=source, source_png=source_png, output_png=output_png,
+    _restore_asset_ids(output, original_source)
+    return dict(design=output, source=original_source, source_png=source_png, output_png=output_png,
                 warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3))
 
 
@@ -119,10 +205,9 @@ def _sse_message(event, data):
     return f'event: {event}\ndata: {payload}\n\n'.encode()
 
 
-def render_lightbox(design):
+def render_lightbox(design, assets_dir=None, asset_mode='demo'):
     """Render a detail-view copy with a 1080px minimum short side when safe."""
-    from renderer.converter.convert import render_design_to_png
-
+    render_design_to_png, fonts = _render_function(asset_mode)
     lightbox_design = deepcopy(design)
     width = design['canvas']['width']
     height = design['canvas']['height']
@@ -146,7 +231,12 @@ def render_lightbox(design):
     max_size = max(lightbox_design['canvas']['width'], lightbox_design['canvas']['height'])
     with TemporaryDirectory(prefix='magicanvas-lightbox-') as directory:
         path = Path(directory) / 'detail.png'
-        render_design_to_png(lightbox_design, ROOT/'brand_kit'/'assets', path, max_size=max_size)
+        if asset_mode == 'test' and fonts.suffix == '.pickle':
+            render_design_to_png(lightbox_design, assets_dir or ROOT/'brand_kit'/'assets', path,
+                                 fonts_file=fonts, max_size=max_size)
+        else:
+            render_design_to_png(lightbox_design, assets_dir or ROOT/'brand_kit'/'assets', path,
+                                 fonts_dir=fonts, max_size=max_size)
         return path.read_bytes(), lightbox_design['canvas']
 
 
@@ -164,10 +254,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == '/api/samples':
-            samples = [dict(name=p.stem, task=json.loads(p.read_text())) for p in sorted((ROOT/'input').glob('*.json'))]
-            return self.reply(200, samples)
+            mode = parse_qs(parsed.query).get('mode', ['demo'])[0]
+            try:
+                return self.reply(200, _sample_records(mode))
+            except ValueError as exc:
+                return self.reply(400, dict(error=str(exc)))
         files = {
             '/': ('index.html', 'text/html; charset=utf-8'),
             '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
@@ -199,14 +293,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(design, dict):
                     raise ValueError('Expected a design to render for the lightbox.')
                 source, _ = validate_task({'source': design, 'target_canvas': design.get('canvas', {})})
-                png, canvas = render_lightbox(source)
+                asset_mode = task.get('asset_mode', 'demo')
+                assets_dir = _asset_directory(asset_mode, task.get('sample_id'))
+                source = _with_resolved_assets(source, assets_dir)
+                png, canvas = render_lightbox(source, assets_dir, asset_mode)
                 return self.reply(200, png, 'image/png', {
                     'X-Image-Width': canvas['width'],
                     'X-Image-Height': canvas['height'],
                 })
             if path == '/api/adapt-stream':
                 source, target = validate_task(task)
-                source_png, source_warnings = render_preview_data(source)
+                asset_mode = task.get('asset_mode', 'demo')
+                sample_id = task.get('sample_id')
+                assets_dir = _asset_directory(asset_mode, sample_id)
+                resolved_source = _with_resolved_assets(source, assets_dir)
+                source_png, source_warnings = render_preview_data(resolved_source, assets_dir, asset_mode)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
                 self.send_header('Cache-Control', 'no-store')
@@ -218,7 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 try:
                     result = adapt_preview(task, source_png=source_png,
-                                           validated=(source,target))
+                                           validated=(source,target), asset_mode=asset_mode,
+                                           sample_id=sample_id)
                     result['warnings']=list(dict.fromkeys(source_warnings+result['warnings']))
                     self.wfile.write(_sse_message('adapted', result))
                     self.wfile.flush()
@@ -227,7 +329,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.close_connection=True
                 return
-            result = adapt_preview(task)
+            result = adapt_preview(task, asset_mode=task.get('asset_mode', 'demo'),
+                                   sample_id=task.get('sample_id'))
         except (ValueError, TypeError, KeyError) as exc:
             return self.reply(400, dict(error=str(exc)))
         except ImportError as exc:

@@ -27,6 +27,24 @@ from renderer.converter.assets import visible_content_bounds
 
 
 _ASSETS_DIR=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
+_CRELLO_FONTS_PICKLE=Path(__file__).resolve().parents[1]/'data'/'crello_fonts.pickle'
+
+
+@lru_cache(maxsize=1)
+def _crello_font_manager():
+    """Load the pinned Crello font resource for local dataset previews."""
+    if not _CRELLO_FONTS_PICKLE.is_file():
+        return None
+    try:
+        from cr_renderer.fonts import FontManager, normalize_family
+        manager = FontManager(str(_CRELLO_FONTS_PICKLE))
+        for alias, stored in (("Brusher", "Brusher Free Font"),
+                              ("Exo 2", "Exo\\ 2")):
+            if stored in manager._fonts:
+                manager._fonts[normalize_family(alias)] = manager._fonts[stored]
+        return manager
+    except (ImportError, OSError, ValueError):
+        return None
 
 
 def _bounds(items):
@@ -62,11 +80,85 @@ def _contains(a, b, tolerance=1):
             and b['y']+b['height'] <= a['y']+a['height']+tolerance)
 
 
+@lru_cache(maxsize=256)
+def _flat_image_asset_stats(path):
+    """Return conservative pixel evidence for a raster shape/backplate."""
+    try:
+        from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
+        image=Image.open(path).convert('RGBA')
+        alpha=image.getchannel('A').point(lambda value:255 if value>=8 else 0)
+        bbox=alpha.getbbox()
+        if not bbox:return None
+        crop=alpha.crop(bbox)
+        mask_pixels=crop.histogram()[255]
+        fill=mask_pixels/max(1,crop.width*crop.height)
+        symmetry=[]
+        for mirrored in (ImageOps.mirror(crop),ImageOps.flip(crop)):
+            diff=ImageChops.difference(crop,mirrored)
+            symmetry.append(1-sum(diff.histogram()[1:])/max(1,crop.width*crop.height))
+        rgb=image.convert('RGB')
+        std=ImageStat.Stat(rgb,mask=alpha).stddev
+        rgb_std=sum(std[:3])/3
+        edge=rgb.convert('L').filter(ImageFilter.FIND_EDGES).point(lambda value:255 if value>20 else 0)
+        edge=ImageChops.multiply(edge,alpha)
+        ehist=edge.histogram()
+        edge_density=ehist[255]/max(1,edge.width*edge.height)
+        return (rgb_std,fill,min(symmetry),edge_density,image.size,bbox)
+    except (ImportError,OSError,ValueError):
+        return None
+
+
+def _flat_image_backplate(image, text):
+    """Require uniform opaque pixels both globally and behind the text."""
+    try:
+        from PIL import Image, ImageStat
+        path=(_ASSETS_DIR/image.get('asset_id','')).resolve()
+        metrics=_flat_image_asset_stats(str(path))
+        if metrics is None:return False
+        rgb_std,fill,symmetry,edge_density,(iw,ih),alpha_bbox = metrics
+        if rgb_std>12 or fill<.82 or symmetry<.90 or edge_density>.08:
+            return False
+        x,y,w,h=(float(image[k]) for k in ('x','y','width','height'))
+        if w<=0 or h<=0:return False
+        if image.get('fit','contain')!='contain':return False
+        scale=min(w/iw,h/ih)
+        rw,rh=iw*scale,ih*scale
+        ox,oy=x+(w-rw)/2,y+(h-rh)/2
+        if abs(float(image.get('rotation',0)))>.1 or abs(float(text.get('rotation',0)))>.1:return False
+        text_h,_,_,line_widths,_=_text_info(text)
+        align=text.get('text_align','left')
+        line_lefts=[float(text['x'])+(float(text['width'])-line)/2 if align=='center'
+                    else float(text['x'])+float(text['width'])-line if align=='right'
+                    else float(text['x']) for line in line_widths]
+        tx0=max(x,min(line_lefts,default=float(text['x'])))
+        ty0=max(y,float(text['y']))
+        tx1=min(x+w,max((left+line for left,line in zip(line_lefts,line_widths)),default=float(text['x'])+float(text['width'])))
+        ty1=min(y+h,float(text['y'])+min(float(text['height']),text_h))
+        if tx1<=tx0 or ty1<=ty0:return False
+        vx0,vy0=ox+alpha_bbox[0]*scale,oy+alpha_bbox[1]*scale
+        vx1,vy1=ox+alpha_bbox[2]*scale,oy+alpha_bbox[3]*scale
+        text_w,text_h=tx1-tx0,ty1-ty0
+        pad=max(1.,min(text_h*.12,min(vx1-vx0,vy1-vy0)*.02))
+        if (vx1-vx0<text_w*1.02 or vy1-vy0<text_h*1.06
+                or tx0<vx0+pad or ty0<vy0+pad or tx1>vx1-pad or ty1>vy1-pad):return False
+        px0=max(0,min(iw-1,int((tx0-ox)/rw*iw)));py0=max(0,min(ih-1,int((ty0-oy)/rh*ih)))
+        px1=max(px0+1,min(iw,int((tx1-ox)/rw*iw)));py1=max(py0+1,min(ih,int((ty1-oy)/rh*ih)))
+        with Image.open(path) as source:
+            patch=source.convert('RGBA').crop((px0,py0,px1,py1))
+        pmask=patch.getchannel('A').point(lambda value:255 if value>=8 else 0)
+        opaque=pmask.histogram()[255]/max(1,pmask.width*pmask.height)
+        patch_std=sum(ImageStat.Stat(patch.convert('RGB'),mask=pmask).stddev[:3])/3 if opaque else 999
+        return opaque>=.85 and patch_std<=12
+    except (ImportError,OSError,ValueError,ZeroDivisionError):
+        return False
+
+
 @lru_cache(maxsize=128)
 def _font(family, bold, italic):
     """Load actual supplied fonts locally; unknown fonts use an estimate."""
     try:
         from PIL import ImageFont
+        from io import BytesIO
         key = re.sub('[^a-z0-9]', '', family.lower())
         directory = Path(__file__).resolve().parents[1]/'brand_kit'/'fonts'
         matches = []
@@ -77,6 +169,11 @@ def _font(family, bold, italic):
                 matches.append((penalty, str(p)))
         if matches:
             return ImageFont.truetype(min(matches)[1], 1000)
+        manager = _crello_font_manager()
+        if manager is not None:
+            weight = 'bold' if bold else 'regular'
+            style = 'bolditalic' if bold and italic else 'italic' if italic else 'bold' if bold else 'regular'
+            return ImageFont.truetype(BytesIO(manager.lookup(family, weight, style)), 1000)
     except (ImportError, OSError, ValueError):
         pass
     return None
@@ -276,8 +373,15 @@ def _analyze(source):
     for i, text in enumerate(rest):
         if text['type'] != 'text' or text.get('group_id'):
             continue
-        backs = [(j, s) for j, s in enumerate(rest) if s['type']=='shape' and s.get('shape_type')=='rectangle'
-                 and not s.get('group_id') and _contains(s, text) and _area(s) < sw*sh*.16
+        def is_backplate(s):
+            if s['type']=='shape' and s.get('shape_type')=='rectangle':return True
+            if (s['type']!='image' or s.get('z_index',0)>=text.get('z_index',0)
+                    or not _flat_image_backplate(s,text)):return False
+            text_box=_text_visible_bounds(text);image_box=_bounds([s])
+            text_area=max(1e-9,(text_box[2]-text_box[0])*(text_box[3]-text_box[1]))
+            return _overlap(image_box,text_box)/text_area>=.85
+        backs = [(j, s) for j, s in enumerate(rest) if is_backplate(s)
+                 and not s.get('group_id') and _area(s) < sw*sh*.16
                  and s['height'] < text['font_size']*6 and s.get('z_index', 0) <= text.get('z_index', 0)
                  and abs(s.get('rotation', 0)-text.get('rotation', 0)) < .1
                  and not any(other is not text and other is not s and _contains(s, other)
@@ -296,7 +400,11 @@ def _analyze(source):
     for items in groups:
         if len(items)!=1:continue
         panel=items[0]
-        if (panel['type']!='shape' or panel.get('shape_type')!='rectangle'
+        shape_panel=panel['type']=='shape' and panel.get('shape_type')=='rectangle'
+        image_panel=panel['type']=='image' and any(
+            e['type']=='text' and _flat_image_backplate(panel,e) for e in elements
+            if panel.get('z_index',0)<e.get('z_index',0))
+        if (not (shape_panel or image_panel)
                 or not sw*sh*.06<=_area(panel)<=sw*sh*.80):continue
         panel_box=_bounds([panel]);backed=[]
         for child in groups:
@@ -322,8 +430,14 @@ def _analyze(source):
         texts = [e for e in items if e['type']=='text']
         shapes = [e for e in items if e['type']=='shape']
         images = [e for e in items if e['type']=='image']
-        label = (len(shapes)==1 and len(texts)==1 and len(items)==2
-                 and all(_contains(shapes[0], t, 3) for t in texts))
+        label_back=shapes[0] if len(shapes)==1 else next((e for e in images if len(images)==1
+                   and len(items)==2 and len(texts)==1 and _flat_image_backplate(e,texts[0])),None)
+        if label_back is not None and label_back['type']=='image' and texts:
+            lb,tb=_bounds([label_back]),_text_visible_bounds(texts[0])
+            contained=_overlap(lb,tb)/max(1e-9,(tb[2]-tb[0])*(tb[3]-tb[1]))>=.85
+        else:
+            contained=label_back is not None and all(_contains(label_back,t,3) for t in texts)
+        label = (label_back is not None and len(texts)==1 and len(items)==2 and contained)
         if label:
             role = 'action' if y/sh > .6 else 'tag'
         elif len(texts)==len(items):
@@ -368,11 +482,11 @@ def _unit(u, width, height, scale, fill=False):
         e['x'], e['y'] = 0, 0
         return _contain([e], width, height)
     if u['label'] and not u.get('corner_callout'):
-        shape = next(e for e in items if e['type']=='shape')
+        shape = next(e for e in items if e['type'] in ('shape','image'))
         texts = sorted((e for e in items if e['type']=='text'), key=lambda e:(e['y'],e['x']))
         label_w = min(width, max((r-x)*scale, max(_text(e, 1e9, _target_font(e,u,scale))[1]+_target_font(e,u,scale)*1.6 for e in texts)))
         result = deepcopy(items)
-        back = next(e for e in result if e['type']=='shape')
+        back = next(e for e in result if e['type'] in ('shape','image'))
         labels = sorted((e for e in result if e['type']=='text'), key=lambda e:(e['y'],e['x']))
         pad = min(label_w*.10, max(_target_font(e,u,scale) for e in texts)*.8)
         total_h = 0
@@ -387,6 +501,7 @@ def _unit(u, width, height, scale, fill=False):
             total_h += e['height']
         label_h = min(height, max(shape['height']*scale, total_h*1.5))
         back.update(x=0, y=0, width=label_w, height=label_h)
+        if back['type']=='image':back['fit']='fill'
         if 'corner_radius' in back:
             back['corner_radius'] = min(label_h/2, shape['corner_radius']*scale)
         if 'stroke_width' in back:
@@ -817,6 +932,18 @@ def _decoration_obstacle(element):
     return left,element['y'],left+ink_w,element['y']+min(element['height'],text_h)
 
 
+def _text_visible_bounds(element):
+    """Approximate ink bounds using the same measured line widths as layout."""
+    height,_,_,line_widths,_=_text_info(element)
+    align=element.get('text_align','left')
+    lefts=[element['x']+(element['width']-line)/2 if align=='center'
+           else element['x']+element['width']-line if align=='right' else element['x']
+           for line in line_widths]
+    return (min(lefts,default=element['x']),element['y'],
+            max((left+line for left,line in zip(lefts,line_widths)),default=element['x']+element['width']),
+            element['y']+min(element['height'],height))
+
+
 def _sync_backing_panels(elements,units,width,height):
     """Resize inferred card backgrounds to follow their adapted children."""
     by_id={e['id']:e for e in elements}
@@ -837,6 +964,7 @@ def _sync_backing_panels(elements,units,width,height):
         source_w=max(1.,unit.get('backing_source_width',panel['width']))
         source_h=max(1.,unit.get('backing_source_height',panel['height']))
         panel.update(x=x,y=y,width=max(1.,r-x),height=max(1.,b-y))
+        if panel['type']=='image':panel['fit']='fill'
         if 'corner_radius' in panel:
             panel['corner_radius']=min(panel['width']/2,panel['height']/2,
                                        unit.get('backing_source_radius',panel['corner_radius'])
@@ -1898,8 +2026,8 @@ def _unit_margin(box, width, height, unit=None):
 
 def _feasible(elements, units, width, height):
     if any(not all(isfinite(v) for v in (e.get('x',0),e.get('y',0),e.get('width',0),e.get('height',0)))
-           or (e.get('type')!='image' and (e['x'] < -1e-5 or e['y'] < -1e-5
-           or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5))
+           or e['x'] < -1e-5 or e['y'] < -1e-5
+           or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5
            for e in elements):
         return False
     records = [(u,_bounds(items)) for u,items in _records(elements,units)]
@@ -2059,8 +2187,6 @@ def _constrain(elements, units, width, height, topology='nearest'):
             solver.addConstraint(xs[i]+w<=width-margin)
             solver.addConstraint(ys[i]+h<=height-margin)
             for item in records[i][1]:
-                if item.get('type')=='image':
-                    continue
                 dx=item['x']-x;dy=item['y']-y
                 solver.addConstraint(xs[i]+dx>=0)
                 solver.addConstraint(ys[i]+dy>=0)
@@ -2709,8 +2835,6 @@ def _constraint_violation(elements, units, width, height):
     value=0.;gap=min(width,height)*.008
     for i,((u,items),(_,b)) in enumerate(zip(element_records,records)):
         for e in items:
-            if e.get('type')=='image':
-                continue
             value+=(max(0,-e['x'])+max(0,e['x']+e['width']-width))/width
             value+=(max(0,-e['y'])+max(0,e['y']+e['height']-height))/height
         margin=-min(width,height)*.20 if _can_bleed(u) else 0 if u['role']=='decoration' else _unit_margin(b,width,height,u)

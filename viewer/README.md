@@ -14,8 +14,11 @@ From the MagiCanvas root, with the engine requirements installed:
 
 Open http://127.0.0.1:5050. Use `--port 5051` if 5050 is already occupied.
 
-- Load any provided sample or import a v0.9 task `{source, target_canvas}` or a
-  standalone v0.9 design `{canvas, elements}`.
+- Use **Demo** for the supplied challenge fixtures and brand-kit assets. Use
+  **Test** to browse every compatible design JSON under `data/`; dataset asset
+  folders are resolved alongside those designs. The selector lists each JSON
+  by filename. You can still import a standalone v0.9 task
+  `{source, target_canvas}` or design `{canvas, elements}`.
 - Choose a format or enter width/height. Changes apply on Enter or field blur.
 - Click either preview for a lightbox with fit-to-window and actual-pixel views.
   The viewer prepares a separate detail render on demand, aiming for a 1080px
@@ -29,8 +32,13 @@ Open http://127.0.0.1:5050. Use `--port 5051` if 5050 is already occupied.
   the submission runner and converter remain unchanged. A 728 x 90 target still
   exports at 728 x 90, not an artificial upscale.
 - The lightbox's detail render is temporary and separate from exported files.
-- Assets/fonts resolve from the existing `brand_kit`. An imported task's missing
-  assets are reported. The intentional missing holiday badge is not fabricated.
+- Demo assets resolve from `brand_kit/assets`. Test assets resolve from the
+  matching dataset folder under `data/` (for example,
+  `data/crello_sample/assets`). Asset paths in downloaded JSON remain relative
+  and portable. Test mode uses `data/crello_fonts.pickle` when present; this is
+  the pinned Crello v5.1 font resource and is ignored by Git with the rest of
+  `data/`. Otherwise the viewer falls back to the brand-kit fonts. The viewer
+  does not fetch fonts from the network.
 
 The local server listens only on loopback, writes previews in temporary folders,
 and doesn't change the source, sample inputs, brand kit, or output fixtures. It
