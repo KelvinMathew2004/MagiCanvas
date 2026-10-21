@@ -23,6 +23,11 @@ def norm(value):
     return " ".join(re.sub(r"[^\w]+", " ", (value or "").casefold()).split())
 
 
+def norm_text_with_lines(value):
+    """Normalize newline encoding only; wording, spaces, and line breaks matter."""
+    return str(value or "").replace("\r\n","\n").replace("\r","\n")
+
+
 def image_vector(image):
     if image is None:
         return None
@@ -115,7 +120,8 @@ def compact_row(row, features, split, index):
         if "text" in kind.casefold():
             content = str(_scalar(texts[i], ""))
             font = str(_scalar(fonts[i], "")) if i < len(fonts) else ""
-            e.update(text=content, text_norm=norm(content), font=norm(font),
+            e.update(text=content, text_norm=norm(content),
+                     text_match=norm_text_with_lines(content), font=norm(font),
                      vector=None)
         else:
             e.update(vector=None)
@@ -132,11 +138,11 @@ def matched_text(a, b):
     left = defaultdict(list)
     right = defaultdict(list)
     for e in a:
-        if "text_norm" in e:
-            left[(e["text_norm"], e["font"])].append(e)
+        if "text_match" in e:
+            left[(e["text_match"], e["font"])].append(e)
     for e in b:
-        if "text_norm" in e:
-            right[(e["text_norm"], e["font"])].append(e)
+        if "text_match" in e:
+            right[(e["text_match"], e["font"])].append(e)
     result = []
     for key in left.keys() & right.keys():
         for x, y in zip(left[key], right[key]):

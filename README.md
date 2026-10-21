@@ -32,12 +32,19 @@ The local data tools use the [CyberAgent Crello dataset](https://huggingface.co/
 See [REQUIREMENTS_AUDIT.md](REQUIREMENTS_AUDIT.md) for implemented requirements,
 remaining quality gaps, viewer/finale work, and organizer confirmations.
 
+For Crello dataset provenance, pair criteria, and model-data guidance, see
+[docs/CRELLO_DATA_AND_TRAINING.md](docs/CRELLO_DATA_AND_TRAINING.md). The
+exact-pair Qwen training export and first-time Colab instructions are in
+[docs/QWEN_LORA_COLAB.md](docs/QWEN_LORA_COLAB.md).
+
 Start with [IMPLEMENTATION.md](IMPLEMENTATION.md) for the engine approach,
 prototype-to-Python mapping, preserved starter comments, validation results,
 and limitations. Read [viewer/README.md](viewer/README.md) for both viewer flows.
 
-The current engine is deterministic and offline. An optional local SigLIP model
-can rank rendered layout candidates; no hosted provider or API key is used.
+The current engine is deterministic and offline by default. Optional local
+SigLIP reranking and an opt-in Qwen layout-proposal candidate use model weights
+downloaded during Docker build; Qwen is enabled with
+`MAGICANVAS_QWEN_ENABLED=1`. Both run without a hosted provider or API key.
 The earlier prototype remains in its separate repository; this repository runs
 independently.
 

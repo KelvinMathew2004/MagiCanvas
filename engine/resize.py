@@ -7,9 +7,10 @@ the Dockerfile) is plumbing so you can focus on exactly one function:
 
 Implementation: offline v0.9 reflow adapted from Project Chameleon's
 analysis -> candidate generation -> ranking pipeline. No editor/model runtime.
-Explicit groups travel together. Simple text/backplate groups can widen as a
-unit; artwork groups receive one proportional transform. Inferred roles stay
-internal and do not become output schema fields.
+Explicit groups and source-evidenced overlapping layer clusters travel
+together. Simple text/backplate groups can widen as a unit; artwork groups
+receive one proportional transform. Inferred roles stay internal and do not
+become output schema fields.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from random import Random
 from tempfile import TemporaryDirectory
 from time import perf_counter
 from pathlib import Path
+import os
 import re
 from typing import Any
 
@@ -27,7 +29,24 @@ from renderer.converter.assets import visible_content_bounds
 
 
 _ASSETS_DIR=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
+_DATASET_SPLIT_DIRS=tuple(Path(__file__).resolve().parents[1]/'data'/name for name in
+                          ('crello_train','crello_validation','crello_test','crello_sample'))
 _CRELLO_FONTS_PICKLE=Path(__file__).resolve().parents[1]/'data'/'crello_fonts.pickle'
+
+
+def _asset_root(element):
+    """Find the root against which an element's asset_id is stored."""
+    asset_id=str(element.get('asset_id',''))
+    if not asset_id:
+        return _ASSETS_DIR
+    if (_ASSETS_DIR/asset_id).is_file():
+        return _ASSETS_DIR
+    configured=os.environ.get('MAGICANVAS_DATASET_ASSETS_DIR')
+    roots=([Path(configured)] if configured else [])+list(_DATASET_SPLIT_DIRS)
+    for root_dir in roots:
+        if (root_dir/asset_id).is_file():
+            return root_dir
+    return _ASSETS_DIR
 
 
 @lru_cache(maxsize=1)
@@ -51,7 +70,7 @@ def _bounds(items):
     boxes = []
     for e in items:
         if e.get('type')=='image':
-            boxes.append(visible_content_bounds(e,_ASSETS_DIR))
+            boxes.append(visible_content_bounds(e,_asset_root(e)))
             continue
         w, h, a = e['width'], e['height'], radians(e.get('rotation', 0))
         rw, rh = abs(w*cos(a))+abs(h*sin(a)), abs(w*sin(a))+abs(h*cos(a))
@@ -65,6 +84,30 @@ def _bounds(items):
 
 def _overlap(a, b):
     return max(0, min(a[2], b[2])-max(a[0], b[0]))*max(0, min(a[3], b[3])-max(a[1], b[1]))
+
+
+def _intentional_stack_pair(a, b, a_box=None, b_box=None):
+    """Recognize substantial source overlap with an explicit paint order.
+
+    A collision is only treated as intentional when the source gives us both
+    a clear front/back order and meaningful visible-area overlap. This avoids
+    turning ordinary proximity or alignment into a semantic group.
+    """
+    if a.get('z_index', 0) == b.get('z_index', 0):
+        return False
+    back, front = (a, b) if a.get('z_index', 0) < b.get('z_index', 0) else (b, a)
+    if back['type'] not in ('image', 'shape', 'text') or front['type'] not in ('image', 'shape', 'text'):
+        return False
+    def visible_box(item, box):
+        if box is not None:return box
+        return _text_visible_bounds(item) if item['type'] == 'text' else _bounds([item])
+    back_box = visible_box(back, a_box if back is a else b_box)
+    front_box = visible_box(front, b_box if front is b else a_box)
+    back_area = max(1e-9, (back_box[2]-back_box[0])*(back_box[3]-back_box[1]))
+    front_area = max(1e-9, (front_box[2]-front_box[0])*(front_box[3]-front_box[1]))
+    fraction = _overlap(back_box, front_box) / min(back_area, front_area)
+    threshold = .18 if 'text' in (a['type'], b['type']) else .12
+    return fraction >= threshold
 
 
 def _area(e):
@@ -112,7 +155,7 @@ def _flat_image_backplate(image, text):
     """Require uniform opaque pixels both globally and behind the text."""
     try:
         from PIL import Image, ImageStat
-        path=(_ASSETS_DIR/image.get('asset_id','')).resolve()
+        path=(_asset_root(image)/image.get('asset_id','')).resolve()
         metrics=_flat_image_asset_stats(str(path))
         if metrics is None:return False
         rgb_std,fill,symmetry,edge_density,(iw,ih),alpha_bbox = metrics
@@ -368,26 +411,60 @@ def _analyze(source):
         for j, b in enumerate(rest[:i]):
             if a.get('group_id') and a.get('group_id') == b.get('group_id'):
                 join(i, j)
-    # Infer only one-to-one text/backplate containment; never group a whole page
-    # merely because its elements are close or aligned.
-    for i, text in enumerate(rest):
-        if text['type'] != 'text' or text.get('group_id'):
-            continue
-        def is_backplate(s):
-            if s['type']=='shape' and s.get('shape_type')=='rectangle':return True
-            if (s['type']!='image' or s.get('z_index',0)>=text.get('z_index',0)
-                    or not _flat_image_backplate(s,text)):return False
-            text_box=_text_visible_bounds(text);image_box=_bounds([s])
-            text_area=max(1e-9,(text_box[2]-text_box[0])*(text_box[3]-text_box[1]))
-            return _overlap(image_box,text_box)/text_area>=.85
-        backs = [(j, s) for j, s in enumerate(rest) if is_backplate(s)
-                 and not s.get('group_id') and _area(s) < sw*sh*.16
-                 and s['height'] < text['font_size']*6 and s.get('z_index', 0) <= text.get('z_index', 0)
-                 and abs(s.get('rotation', 0)-text.get('rotation', 0)) < .1
-                 and not any(other is not text and other is not s and _contains(s, other)
-                             for other in rest)]
-        if backs:
-            join(i, min(backs, key=lambda p: _area(p[1]))[0])
+    # Treat text-contained source layers as its parent, regardless of whether
+    # the parent is a flat shape, ribbon image, or photo card. The small and
+    # medium panel thresholds are intentionally conservative about containment.
+    stack_boxes={e['id']:(_text_visible_bounds(e) if e['type']=='text' else _bounds([e]))
+                 for e in rest}
+    stack_links=[]
+    source_parent_for_text={}
+    for text_index,text in enumerate(rest):
+        if text['type']!='text':continue
+        text_box=stack_boxes[text['id']]
+        text_area=max(1e-9,(text_box[2]-text_box[0])*(text_box[3]-text_box[1]))
+        candidates=[]
+        for parent_index,back in enumerate(rest):
+            if (back['type'] not in ('image','shape')
+                    or back.get('z_index',0)>=text.get('z_index',0)
+                    or root(parent_index)==root(text_index)):
+                continue
+            area_share=_area(back)/(sw*sh)
+            containment=_overlap(stack_boxes[back['id']],text_box)/text_area
+            if area_share<.12:
+                minimum_containment=.85
+            elif area_share<=.85:
+                minimum_containment=.85 if area_share<.30 else .80
+            else:
+                continue
+            if containment>=minimum_containment:
+                candidates.append((area_share,parent_index,back))
+        if candidates:
+            _,parent_index,back=min(candidates,key=lambda row:row[0])
+            source_parent_for_text[text['id']]=back['id']
+            area_share=_area(back)/(sw*sh)
+            text_h=max(1.,text_box[3]-text_box[1])
+            font_size=max(1.,float(text.get('font_size',text_h)))
+            # Only compact badges/ribbons are atomic. Larger panels stay as
+            # independent containers so their children can reflow inside.
+            if area_share<.16 and text_h<font_size*6:
+                join(text_index,parent_index)
+                stack_links.append((text_index,parent_index))
+
+    # Source z-order plus substantial visible overlap is evidence of a collage
+    # or layered illustration. Make connected layers one atomic layout unit.
+    for i,a in enumerate(rest):
+        for j,b in enumerate(rest[:i]):
+            area_a=_area(a)/(sw*sh);area_b=_area(b)/(sw*sh)
+            container_pair=(.12<=area_a<=.85 and _contains(a,b,2)) or (
+                            .12<=area_b<=.85 and _contains(b,a,2))
+            parent_pair=(source_parent_for_text.get(a['id'])==b['id']
+                         or source_parent_for_text.get(b['id'])==a['id'])
+            if (root(i)!=root(j) and not container_pair and not parent_pair
+                    and _intentional_stack_pair(a,b,stack_boxes[a['id']],stack_boxes[b['id']])):
+                join(i,j)
+                stack_links.append((i,j))
+    stacked_roots={root(index) for pair in stack_links for index in pair}
+    stacked_ids={e['id'] for i,e in enumerate(rest) if root(i) in stacked_roots}
     grouped = {}
     for i, e in enumerate(rest):
         grouped.setdefault(root(i), []).append(e)
@@ -400,23 +477,28 @@ def _analyze(source):
     for items in groups:
         if len(items)!=1:continue
         panel=items[0]
-        shape_panel=panel['type']=='shape' and panel.get('shape_type')=='rectangle'
-        image_panel=panel['type']=='image' and any(
-            e['type']=='text' and _flat_image_backplate(panel,e) for e in elements
-            if panel.get('z_index',0)<e.get('z_index',0))
+        shape_panel=panel['type']=='shape'
+        image_panel=panel['type']=='image'
         if (not (shape_panel or image_panel)
-                or not sw*sh*.06<=_area(panel)<=sw*sh*.80):continue
+                or not sw*sh*.12<=_area(panel)<=sw*sh*.85):continue
         panel_box=_bounds([panel]);backed=[]
+        contained_text_groups=0
         for child in groups:
-            if child is items or not any(e['type']=='text' for e in child):continue
-            if not all(panel.get('z_index',0)<e.get('z_index',0) for e in child):continue
-            child_box=_bounds(child);child_area=max(1e-9,(child_box[2]-child_box[0])*(child_box[3]-child_box[1]))
-            if _overlap(panel_box,child_box)/child_area>=.85:
-                backed.extend(e['id'] for e in child)
-        text_groups=sum(any(e['type']=='text' for e in child) and
-                        any(e['id'] in backed for e in child) for child in groups)
+            if child is items:continue
+            child_backed=[]
+            for element in child:
+                if panel.get('z_index',0)>=element.get('z_index',0):continue
+                child_box=stack_boxes[element['id']]
+                child_area=max(1e-9,(child_box[2]-child_box[0])*(child_box[3]-child_box[1]))
+                if _overlap(panel_box,child_box)/child_area>=.80:
+                    child_backed.append(element['id'])
+            if child_backed:
+                backed.extend(child_backed)
+                if any(e['type']=='text' and e['id'] in child_backed for e in child):
+                    contained_text_groups+=1
+        text_groups=contained_text_groups
         panel_area=_area(panel)
-        if text_groups>=2 or (text_groups==1 and sw*sh*.16<=panel_area<sw*sh*.75):
+        if text_groups>=1:
             panel_candidates.append((panel_area,panel,tuple(sorted(set(backed)))) )
     assigned=set()
     for _,panel,backed in sorted(panel_candidates,key=lambda candidate:candidate[0]):
@@ -425,6 +507,10 @@ def _analyze(source):
         panel_children[panel['id']]=children
         assigned.update(children)
     units = []
+    # Rebuild components after adding inferred stack relationships.
+    grouped={}
+    for i,e in enumerate(rest):
+        grouped.setdefault(root(i),[]).append(e)
     for items in grouped.values():
         x, y, r, b = _bounds(items)
         texts = [e for e in items if e['type']=='text']
@@ -452,11 +538,19 @@ def _analyze(source):
             role = 'decoration'
         else:
             role = 'visual'
-        unit=dict(items=items,bounds=(x,y,r,b),role=role,label=label)
+        preserve_layer_stack=any(e['id'] in stacked_ids for e in items)
+        unit=dict(items=items,bounds=(x,y,r,b),role=role,label=label,
+                  preserve_layer_stack=preserve_layer_stack)
+        source_parents=tuple(sorted({source_parent_for_text[e['id']] for e in items
+                                     if e['id'] in source_parent_for_text}))
+        if source_parents:
+            unit['source_parent_ids']=source_parents
         if len(items)==1 and items[0]['id'] in panel_children:
             panel=items[0]
             unit.update(backing_panel=True,backed_ids=panel_children[panel['id']],
                         backing_source_width=panel['width'],backing_source_height=panel['height'],
+                        backing_source_x=panel['x'],backing_source_y=panel['y'],
+                        backing_source_canvas_width=sw,backing_source_canvas_height=sh,
                         backing_source_radius=panel.get('corner_radius',0.))
         units.append(unit)
     units=_enrich_units(source, units)
@@ -900,7 +994,8 @@ def _visuals(units,width,height,scale,gap):
                             and any(e['type']=='image' for e in u['items']))
             # Hero art fits the space left by the layout, but cannot grow
             # beyond its source-relative target scale just to fill a slot.
-            vertical_hero=(u['semantic']=='hero' and u.get('target_aspect_ratio',1.)<.68)
+            vertical_hero=(u['semantic']=='hero' and u.get('target_aspect_ratio',1.)<.68
+                           and not u.get('preserve_layer_stack'))
             if vertical_hero:
                 block=_unit(u,cw,ch,scale)
                 full_slot=_unit(u,cw,ch,scale,fill=True)
@@ -910,7 +1005,8 @@ def _visuals(units,width,height,scale,gap):
                 growth=min(1.30,maximum_w/current_w,maximum_h/current_h)
                 if growth>1.001:block=_scale(block,growth)
             else:
-                block = _unit(u,cw,ch,scale,fill=not (u['semantic']=='hero' or anchored_media))
+                block = _unit(u,cw,ch,scale,fill=not (u['semantic']=='hero' or anchored_media
+                                                       or u.get('preserve_layer_stack')))
             _,_,w,h = _bounds(block)
             items.extend(_move(block,(i%cols)*(cw+gap)+(cw-w)/2,(i//cols)*(ch+gap)+(ch-h)/2))
             occupied += w*h
@@ -956,13 +1052,23 @@ def _sync_backing_panels(elements,units,width,height):
             continue
         left,top,right,bottom=_bounds(children)
         pad_x,pad_y=short*.028,short*.022
-        x=max(0.,left-pad_x);y=max(0.,top-pad_y)
-        r=min(float(width),right+pad_x);b=min(float(height),bottom+pad_y)
+        source_w=max(1.,unit.get('backing_source_width',1.))
+        source_h=max(1.,unit.get('backing_source_height',1.))
+        source_cw=max(1.,unit.get('backing_source_canvas_width',width))
+        source_ch=max(1.,unit.get('backing_source_canvas_height',height))
+        source_x=float(unit.get('backing_source_x',0.))
+        source_y=float(unit.get('backing_source_y',0.))
+        # Keep large panels anchored to their source-relative canvas footprint;
+        # only expand when reflowed children need more room. Fitting tightly to
+        # copy bounds turns a full content card into a thin strip.
+        mapped=(source_x/source_cw*width,source_y/source_ch*height,
+                (source_x+source_w)/source_cw*width,
+                (source_y+source_h)/source_ch*height)
+        x=max(0.,min(mapped[0],left-pad_x));y=max(0.,min(mapped[1],top-pad_y))
+        r=min(float(width),max(mapped[2],right+pad_x));b=min(float(height),max(mapped[3],bottom+pad_y))
         panel=by_id.get(unit['items'][0]['id'])
         if panel is None:
             panel=deepcopy(unit['items'][0]);elements.append(panel);by_id[panel['id']]=panel
-        source_w=max(1.,unit.get('backing_source_width',panel['width']))
-        source_h=max(1.,unit.get('backing_source_height',panel['height']))
         panel.update(x=x,y=y,width=max(1.,r-x),height=max(1.,b-y))
         if panel['type']=='image':panel['fit']='fill'
         if 'corner_radius' in panel:
@@ -1984,14 +2090,22 @@ def _safe_grid(units, width, height, scale):
     cw, ch = (width-2*margin)/cols, (height-2*margin)/rows
     output = []
     for i, u in enumerate(sorted(units,key=_semantic_order)):
-        block = _unit(u, cw*.92, ch*.92, scale, fill=u['role']=='visual')
+        block = _unit(u, cw*.92, ch*.92, scale,
+                      fill=u['role']=='visual' and not u.get('preserve_layer_stack'))
         _,_,w,h = _bounds(block)
         output.extend(_move(block,margin+(i%cols)*cw+(cw-w)/2,margin+(i//cols)*ch+(ch-h)/2))
     return output
 
 
 def _layered(a, b):
-    """Only source-evidenced artwork layering; text-bearing units stay clear."""
+    """Allow source-backed containment and visually meaningful layer overlap."""
+    a_ids={e['id'] for e in a['items']}
+    b_ids={e['id'] for e in b['items']}
+    if (set(a.get('backed_ids',())) & b_ids
+            or set(b.get('backed_ids',())) & a_ids
+            or set(a.get('source_parent_ids',())) & b_ids
+            or set(b.get('source_parent_ids',())) & a_ids):
+        return True
     if a['role'] == 'decoration' or b['role'] == 'decoration':
         # A text-bearing corner callout gets separation from main content.
         if (a.get('corner_callout') and b['role']!='decoration') or (b.get('corner_callout') and a['role']!='decoration'):
@@ -2001,7 +2115,7 @@ def _layered(a, b):
         return False
     ar, br = a['bounds'], b['bounds']
     fraction = _overlap(ar,br)/max(1e-9,min((ar[2]-ar[0])*(ar[3]-ar[1]),(br[2]-br[0])*(br[3]-br[1])))
-    return fraction > .30
+    return fraction > .12
 
 
 def _can_bleed(u):
@@ -3050,6 +3164,19 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         from PIL import Image, ImageChops
     except ImportError as exc:
         return candidates[0],dict(used=False,reason=f'Renderer unavailable: {exc}')
+    diagnostic_assets=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
+    render_diagnostic=render_design_to_png
+    if (os.environ.get('MAGICANVAS_DATASET_RENDERING','').strip().lower() in ('1','true','yes','on')
+            and _CRELLO_FONTS_PICKLE.is_file()):
+        try:
+            from scripts.dataset_renderer import render_design_to_png as render_crello_dataset
+            dataset_root=Path(__file__).resolve().parents[1]/'data'/'crello_train'
+            if dataset_root.is_dir():
+                render_diagnostic=lambda doc,assets,path,max_size=640: render_crello_dataset(
+                    doc,dataset_root,path,_CRELLO_FONTS_PICKLE,max_size=max_size)
+                diagnostic_assets=dataset_root
+        except ImportError:
+            pass
     entries=[]
     state=_aspect_state(source,width,height)
     ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
@@ -3070,7 +3197,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         reference_image=None
         try:
             reference_path=Path(directory)/'source.png'
-            render_design_to_png(source,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',reference_path,max_size=640)
+            render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
             with Image.open(reference_path) as image:
                 reference_image=image.convert('RGB')
         except Exception:
@@ -3082,9 +3209,9 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             full_path=Path(directory)/f'{index}.png'
             backing_path=Path(directory)/f'{index}-backing.png'
             try:
-                warnings=render_design_to_png(doc,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',full_path,max_size=640)
+                warnings=render_diagnostic(doc,diagnostic_assets,full_path,max_size=640)
                 backing=dict(canvas=doc['canvas'],elements=[e for e in doc['elements'] if e['type']!='text'])
-                render_design_to_png(backing,Path(__file__).resolve().parents[1]/'brand_kit'/'assets',backing_path,max_size=640)
+                render_diagnostic(backing,diagnostic_assets,backing_path,max_size=640)
                 with Image.open(full_path) as image:
                     full=image.convert('RGB')
                 with Image.open(backing_path) as image:
@@ -3224,6 +3351,44 @@ def _assemble(elements,backgrounds,source,width,height):
     return dict(canvas=dict(width=int(width),height=int(height)),elements=[by_id[e['id']] for e in source['elements']])
 
 
+def _preserve_layered_proposals(proposal, units):
+    """Project model proposals for source stacks onto one shared transform.
+
+    A layout model may choose where and how large a composite should be, but
+    its independent per-element boxes cannot tear apart known source layers.
+    """
+    result=deepcopy(proposal)
+    proposed_by_id={e['id']:e for e in result}
+    geometry_keys=('x','y','width','height','font_size','letter_spacing',
+                   'corner_radius','stroke_width')
+    for unit in units:
+        if not unit.get('preserve_layer_stack') or len(unit['items'])<2:
+            continue
+        source_box=unit['bounds']
+        source_w=max(1e-6,source_box[2]-source_box[0])
+        source_h=max(1e-6,source_box[3]-source_box[1])
+        suggested=[proposed_by_id[e['id']] for e in unit['items'] if e['id'] in proposed_by_id]
+        if len(suggested)!=len(unit['items']):
+            continue
+        suggested_box=_bounds(suggested)
+        suggested_w=max(1e-6,suggested_box[2]-suggested_box[0])
+        suggested_h=max(1e-6,suggested_box[3]-suggested_box[1])
+        factor=max(.35,min(1.8,suggested_w/source_w,suggested_h/source_h))
+        # Fit the shared source transform inside the model's proposed envelope.
+        factor=min(factor,suggested_w/source_w,suggested_h/source_h)
+        block=_scale(unit['items'],factor)
+        box=_bounds(block)
+        target_x=(suggested_box[0]+suggested_box[2]-box[2]+box[0])/2
+        target_y=(suggested_box[1]+suggested_box[3]-box[3]+box[1])/2
+        _move(block,target_x,target_y)
+        for item in block:
+            target=proposed_by_id[item['id']]
+            for key in geometry_keys:
+                if key in item:
+                    target[key]=item[key]
+    return result
+
+
 def _adapt_with_diagnostics(source,target_canvas):
     start=perf_counter()
     sw,sh=source['canvas']['width'],source['canvas']['height']
@@ -3251,6 +3416,16 @@ def _adapt_with_diagnostics(source,target_canvas):
         u['perceptual']=context
         u['font_gamma']=min(1.,.65+.7*desired)
     seeds=[dict(name='proportional',elements=_proportional(units,width,height,sw,sh))]
+    qwen_status = 'disabled (set MAGICANVAS_QWEN_ENABLED=1 to enable)'
+    if os.environ.get('MAGICANVAS_QWEN_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        try:
+            from engine.qwen_seed import generate_seed
+            proposal, qwen_status = generate_seed(source, target_canvas, seeds[0]['elements'])
+            if proposal is not None:
+                proposal=_preserve_layered_proposals(proposal,units)
+                seeds.append(dict(name='qwen-proposal', elements=proposal))
+        except Exception as exc:
+            qwen_status = f'Qwen proposal unavailable: {type(exc).__name__}: {exc}'
     for mode in ('split','copy-first','visual-first'):
         for share in (.30,.45,.60):
             family=f'editorial-{mode}' if width/height>=2.4 else mode
@@ -3378,7 +3553,8 @@ def _adapt_with_diagnostics(source,target_canvas):
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
                 energy_terms=_energy_terms(winner['elements'],units,source,width,height,desired),
                 candidates=[{k:v for k,v in c.items() if k!='elements'} for c in optimized],
-                visual=visual,hard_constraints_passed=_feasible(winner['elements'],units,width,height),
+                visual=visual,qwen=qwen_status,
+                hard_constraints_passed=_feasible(winner['elements'],units,width,height),
                 seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),total=round(perf_counter()-start,4)))
     return output,report
 

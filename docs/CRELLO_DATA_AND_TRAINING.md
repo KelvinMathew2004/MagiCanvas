@@ -21,22 +21,22 @@ The local conversion currently contains 19,479 train, 1,852 validation, and 1,97
 
 Run `scripts/mine_verified_crello_pairs.py` over the converted split folders to make `data/crello_verified_pairs.json`. The scan groups possible counterparts using normalized titles and/or non-empty normalized text sets, then cheaply filters candidates by canvas dimensions/aspect ratio, element-count difference, and text overlap. Candidate pairs are then checked more closely:
 
-- **Exact:** every element in both designs has a one-to-one match; text is matched using normalized text and font family; visual elements use downsampled 16×16 RGBA similarity (cosine threshold `0.95`); and relative stacking order is checked for elements whose bounds overlap in either design. The current code creates correspondence IDs for the pair; these are inferred matches, not upstream shared element IDs.
+- **Exact:** every element in both designs has a one-to-one match; text is matched using normalized text and font family while preserving authored line breaks; visual elements use downsampled 16×16 RGBA similarity (cosine threshold `0.95`); and relative stacking order is checked for elements whose bounds overlap in either design. The current code creates correspondence IDs for the pair; these are inferred matches, not upstream shared element IDs. The local manifest was additionally revalidated against converted text content, demoting pairs where text changed.
 - **Core:** every text element and primary visual is matched, at least 80% of elements match, at most two small decorative elements remain unmatched, and the applicable overlap ordering check passes.
 - **Rejected:** a candidate did not satisfy the exact or core criteria. Rejected means “not accepted by these rules”; it does not prove the designs are unrelated.
 
-The scan found 6,348 exact, 1,851 core, and 33,827 rejected candidate pairs (42,026 total). These are heuristic scan outcomes, not a human-verified ground truth. In particular, a 16×16 similarity representation can miss meaningful visual differences, and title/text grouping can produce unrelated candidates. Inspect the actual supplied previews and the matched element report before treating any pair as a trusted label.
+The scan initially found 6,348 exact, 1,851 core, and 33,827 rejected candidates. Revalidating matched text against the converted designs demoted 2,883 exact and 796 core pairs whose text content or line breaks changed. The current local manifest contains 3,465 exact, 1,055 core, and 37,506 rejected pairs (42,026 total). These remain heuristic outcomes, not human-verified ground truth. A 16×16 similarity representation can miss visual differences, and title/text grouping can produce unrelated candidates. Inspect the supplied previews and match report before treating pairs as trusted labels.
 
 Pair locations by split are important for avoiding leakage:
 
 | Pair scope | Exact | Core | Rejected |
 | --- | ---: | ---: | ---: |
-| train ↔ train | 4,437 | 1,326 | 23,778 |
-| validation ↔ validation | 35 | 11 | 231 |
-| test ↔ test | 45 | 11 | 224 |
-| cross-split, combined | 1,831 | 503 | 9,594 |
+| train ↔ train | 2,352 | 735 | 26,454 |
+| validation ↔ validation | 25 | 6 | 246 |
+| test ↔ test | 28 | 7 | 245 |
+| cross-split, combined | 1,060 | 307 | 10,561 |
 
-For a first training experiment, use only audited exact train-to-train pairs. Consider core pairs only after preview review, and give them a lower weight if included. Exclude rejected pairs. Do not use validation/test examples or any cross-split pair as training data; the cross-split matches show why split boundaries must be enforced even when the upstream dataset has separate split files. Keep validation and test designs for evaluation only.
+For Qwen, `scripts/prepare_qwen_training.py` builds connected components over exact pairs before assigning whole families to a stable 80/10/10 model split. That means upstream cross-split exact pairs can be used without leaking a family across train/validation/test. The exporter also skips changed text content and non-background `contain` images whose aspect ratios differ by more than 5%, projects boxes on canvas, refits text size, and caps each family at six train or twelve evaluation directions. Core pairs remain review-only; rejected pairs are not used.
 
 ## Backplate scan
 
@@ -44,8 +44,29 @@ For a first training experiment, use only audited exact train-to-train pairs. Co
 
 ## Model considerations
 
-The current lightweight text-model starting point is Qwen3-0.6B, which is small enough for local experimentation. A successful model load or a short sample response only verifies inference; it does not establish that the model can emit valid layout JSON or improve resizing. Evaluate JSON validity, preserved IDs/content, on-canvas bounds, renderer success, and visual quality on held-out designs. Keep the engine's deterministic constraints and validation as the authority over generated seeds.
+The local Qwen3-0.6B weights are an **opt-in** proposal candidate (`MAGICANVAS_QWEN_ENABLED=1`). Docker downloads the base weights during image build; Qwen remains off unless enabled. Training and inference share one system/user prompt builder, proposals return `font_size` for text, clamp to target canvas bounds, preserve non-background image aspect ratios, and pass text through `_fit_text`. The constraint solver and ranking still validate every proposal. No LoRA adapter has been trained or published. Docker supports fetching a reviewed public adapter with `--build-arg QWEN_ADAPTER_REPO=...` and an optional pinned revision. See [QWEN_LORA_COLAB.md](QWEN_LORA_COLAB.md) for the training workflow.
 
-Treat text-layout prediction and image-quality judging as separate tasks. Structured JSON pairs can train a text model to propose target layouts. Dataset preview images could support a separate vision scorer or evaluation set, but they are not automatically paired supervision for “good design”: a preview alone does not label which layout decisions are good, and training on in-sample previews can reward copying dataset aesthetics instead of correct adaptation. Start with a baseline using only verified train pairs and the existing SigLIP-based ranking path; compare against the baseline on held-out data before deciding whether a vision fine-tune is useful.
+The current Qwen export contains 1,170 train, 276 validation, and 180 test directions, plus 1,055 core review records. It skipped 1,432 directions with invalid non-background image aspect changes and capped large families. Text-changed pairs have already been demoted by the pair manifest. Exact and core matches both connect families for split assignment, while only exact pairs become supervised examples. These are projected geometry targets, not byte-for-byte copies of Crello target coordinates. Inspect held-out proposals for valid JSON, preserved IDs/content, bounds, image proportions, renderer success, and visual quality before relying on a LoRA.
+
+Treat text-layout prediction and image-quality judging as separate tasks. `scripts/index_siglip_previews.py` indexes original `preview` files by their existing split for inspection without copying or re-encoding them. The previews are positive candidates, not proof that every design is an ideal resize or universally high quality. They are used as fidelity evidence, not paired directly against local engine renders for preference training; that would let the model detect renderer differences. Previews alone also cannot teach a good-versus-bad boundary.
+
+For resize-quality preference learning, `scripts/prepare_siglip_pairs.py` compares a converted target JSON render with its original dataset preview as a fidelity gate. It now records local grid and text-region SSIM alongside global SSIM, and rejects targets below the global 0.90 or text-region thresholds or with renderer warnings. The diagnostic renderer uses the dataset font bundle for this experiment; the production starter renderer remains unchanged. Original preview images are evidence only. The direct positive and negative training views are both local renders resized to the same pixel dimensions, so SigLIP cannot win by detecting which renderer produced the image. Keep preview images local.
+
+The SigLIP preparation script labels an engine adaptation only when it finds a
+concrete defect: text overflow, severe font shrink, contrast loss measured on a
+text-free render, lost source-backed text containment, or a new unlayered
+overlap. Element displacement is recorded for analysis but is not a defect by
+itself. `scripts/train_siglip_ranker.py` freezes the SigLIP2 image encoder and
+fits a small Bradley–Terry linear ranking head from accepted pairs; it splits
+connected design families before training. A pair must pass scripted defect
+checks or a human-reviewed alternative is explicitly accepted, and appears in
+`data/siglip_pairs/approvals.jsonl` as
+`{"pair_id":"...","decision":"accept"}` after human review. It refuses to
+run until at least 20 reviewed same-domain pairs exist. Training was not started because the current
+existing `data/siglip_pairs/` manifest is from the earlier preview-versus-engine
+experiment and is not eligible for training. Regenerate pairs with the current
+script and manually review engine candidates first. No SigLIP training has
+started. The review page is for human inspection; rerendering does not relabel
+a pair.
 
 Before publishing any adapter, confirm the event rules for model and data use, the model base license, and whether training weights derived from this corpus may be redistributed. Avoid including raw previews or assets in the model repository. Keep a record of the exact source revision, pair-manifest version, filters, and train/validation/test IDs for reproducibility.

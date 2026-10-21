@@ -67,7 +67,13 @@ def _render_one(task: tuple[str, dict[str, Any], str, str | None]) -> dict[str, 
             result["status"] = "rendered_no_preview"
         else:
             with Image.open(preview_path) as reference:
-                result["metrics"] = compare_images(rendered_copy, reference.copy())
+                sx=reference.width/design["canvas"]["width"]
+                sy=reference.height/design["canvas"]["height"]
+                text_regions=[(int(e["x"]*sx),int(e["y"]*sy),
+                               int((e["x"]+e["width"])*sx),
+                               int((e["y"]+e["height"])*sy))
+                              for e in design["elements"] if e.get("type")=="text"]
+                result["metrics"] = compare_images(rendered_copy, reference.copy(),text_regions)
             result["status"] = "compared"
         if save_dir_raw:
             out_png = Path(save_dir_raw) / split / f"{row.get('template_id', row['row_index'])}.png"
@@ -87,34 +93,46 @@ def _rgb(image: Image.Image, size: tuple[int, int]) -> np.ndarray:
     return np.asarray(image.resize(size, Image.Resampling.LANCZOS), dtype=np.float32)
 
 
-def compare_images(rendered: Image.Image, reference: Image.Image) -> dict[str, float]:
-    """Compare at reference dimensions; scores are diagnostic, not a gate."""
-    rw, rh = rendered.size
-    pw, ph = reference.size
-    a, b = _rgb(rendered, (pw, ph)), _rgb(reference, (pw, ph))
-    delta = a - b
-    mae = float(np.abs(delta).mean() / 255.0)
-    mse = float(np.square(delta).mean())
-    # Global, channel-wise SSIM. This provides a stable coarse ranking without
-    # requiring an extra imaging dependency such as scikit-image.
-    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
-    mu_a, mu_b = a.mean(axis=(0, 1)), b.mean(axis=(0, 1))
-    centered_a, centered_b = a - mu_a, b - mu_b
-    var_a = np.square(centered_a).mean(axis=(0, 1))
-    var_b = np.square(centered_b).mean(axis=(0, 1))
-    covariance = (centered_a * centered_b).mean(axis=(0, 1))
-    ssim = ((2 * mu_a * mu_b + c1) * (2 * covariance + c2) /
-            ((mu_a**2 + mu_b**2 + c1) * (var_a + var_b + c2)))
-    return {
-        "mae": mae,
-        "psnr_db": float(10 * math.log10(255**2 / max(mse, 1e-12))),
-        "global_ssim": float(np.mean(ssim)),
-        "render_width": rw,
-        "render_height": rh,
-        "preview_width": pw,
-        "preview_height": ph,
-        "aspect_ratio_delta": abs(rw / rh - pw / ph),
+def _ssim(a: np.ndarray, b: np.ndarray) -> float:
+    c1,c2=(0.01*255)**2,(0.03*255)**2
+    mu_a,mu_b=a.mean(axis=(0,1)),b.mean(axis=(0,1))
+    centered_a,centered_b=a-mu_a,b-mu_b
+    var_a,var_b=np.square(centered_a).mean(axis=(0,1)),np.square(centered_b).mean(axis=(0,1))
+    covariance=(centered_a*centered_b).mean(axis=(0,1))
+    value=((2*mu_a*mu_b+c1)*(2*covariance+c2)/
+           ((mu_a**2+mu_b**2+c1)*(var_a+var_b+c2)))
+    return float(np.mean(value))
+
+
+def compare_images(rendered: Image.Image, reference: Image.Image,
+                   text_regions: list[tuple[int,int,int,int]] | None = None) -> dict[str, float]:
+    """Compare global similarity plus local tiles and optional text regions."""
+    rw,rh=rendered.size;pw,ph=reference.size
+    a,b=_rgb(rendered,(pw,ph)),_rgb(reference,(pw,ph))
+    delta=a-b;mae=float(np.abs(delta).mean()/255.);mse=float(np.square(delta).mean())
+    tile_scores=[]
+    for row in range(4):
+        for col in range(4):
+            x0,x1=round(col*pw/4),round((col+1)*pw/4)
+            y0,y1=round(row*ph/4),round((row+1)*ph/4)
+            if x1>x0 and y1>y0:tile_scores.append(_ssim(a[y0:y1,x0:x1],b[y0:y1,x0:x1]))
+    metrics={
+        "mae":mae,"psnr_db":float(10*math.log10(255**2/max(mse,1e-12))),
+        "global_ssim":_ssim(a,b),
+        "grid_ssim_mean":float(np.mean(tile_scores)) if tile_scores else 1.,
+        "grid_ssim_p10":float(np.percentile(tile_scores,10)) if tile_scores else 1.,
+        "render_width":rw,"render_height":rh,"preview_width":pw,"preview_height":ph,
+        "aspect_ratio_delta":abs(rw/rh-pw/ph),
     }
+    region_scores=[]
+    for x0,y0,x1,y1 in text_regions or ():
+        x0=max(0,min(pw,int(x0)));x1=max(x0+1,min(pw,int(x1)))
+        y0=max(0,min(ph,int(y0)));y1=max(y0+1,min(ph,int(y1)))
+        if x1-x0>=2 and y1-y0>=2:region_scores.append(_ssim(a[y0:y1,x0:x1],b[y0:y1,x0:x1]))
+    if region_scores:
+        metrics["text_region_ssim_mean"]=float(np.mean(region_scores))
+        metrics["text_region_ssim_p10"]=float(np.percentile(region_scores,10))
+    return metrics
 
 
 def main() -> int:
@@ -152,7 +170,7 @@ def main() -> int:
         report_path = args.report_dir / f"{split}.jsonl"
         summary = {"manifest_rows": 0, "exported": 0, "rendered": 0,
                    "compared": 0, "missing_preview": 0, "render_errors": 0,
-                   "warnings": 0, "scores": []}
+                   "warnings": 0, "scores": [],"grid_scores": [],"text_scores": []}
         started = time.monotonic()
         tasks: list[tuple[str, dict[str, Any], str, str | None]] = []
         skipped_rows: list[dict[str, Any]] = []
@@ -184,14 +202,21 @@ def main() -> int:
                 summary["render_errors"] += result["status"] == "error"
                 if result.get("metrics"):
                     summary["scores"].append(result["metrics"]["global_ssim"])
+                    summary["grid_scores"].append(result["metrics"]["grid_ssim_p10"])
+                    if result["metrics"].get("text_region_ssim_mean") is not None:
+                        summary["text_scores"].append(result["metrics"]["text_region_ssim_mean"])
                 report.write(json.dumps(result, ensure_ascii=False) + "\n")
                 if summary["rendered"] and summary["rendered"] % 100 == 0:
                     print(f"{split}: rendered {summary['rendered']}/{summary['exported']}; "
                           f"errors {summary['render_errors']}", flush=True)
         scores = summary.pop("scores")
+        grid_scores=summary.pop("grid_scores")
+        text_scores=summary.pop("text_scores")
         summary["global_ssim_mean"] = statistics.fmean(scores) if scores else None
         summary["global_ssim_median"] = statistics.median(scores) if scores else None
         summary["global_ssim_min"] = min(scores) if scores else None
+        summary["grid_ssim_p10_mean"] = statistics.fmean(grid_scores) if grid_scores else None
+        summary["text_region_ssim_mean"] = statistics.fmean(text_scores) if text_scores else None
         summary["elapsed_seconds"] = round(time.monotonic() - started, 2)
         summary["record_report"] = str(report_path)
         overall["splits"][split] = summary

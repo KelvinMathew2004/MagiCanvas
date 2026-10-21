@@ -21,8 +21,8 @@ venv/
 output/*
 !output/.gitkeep
 
-# SigLIP perceptual re-ranker weights are baked into the Docker image at build
-# time (scripts/fetch_siglip.py); never commit the large weight files.
+# Large local model weights are downloaded during Docker builds; never commit
+# them to the project repository.
 models/
 
 # Local Crello downloads/exports contain dataset previews, embedded artwork, and
@@ -35,3 +35,8 @@ models/
 /data/crello_fonts.pickle
 /data/crello_verified_pairs.json
 /data/crello_pair_viewer.html
+/data/qwen_lora/
+/data/siglip_pairs/
+/data/siglip_previews/
+/data/siglip_negative_pairs/
+/data/gemini_siglip_audit_tmp/

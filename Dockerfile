@@ -20,11 +20,30 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
     && pip install --no-cache-dir -r requirements.txt
 
 # Bake the SigLIP perceptual re-ranker weights into the image at BUILD time, so
-# engine/vision.py can load them offline. This is the ONLY step that needs the
-# network, and it runs at build time only -- stage-one scoring runs with
-# --network none, where these baked weights are read with local_files_only.
+# engine/vision.py can load them offline. Model download steps need network only
+# during the image build; stage-one scoring runs with --network none, where
+# these baked weights are read with local_files_only.
 COPY scripts/fetch_siglip.py ./scripts/fetch_siglip.py
 RUN python scripts/fetch_siglip.py
+
+# Qwen is an opt-in proposal source (MAGICANVAS_QWEN_ENABLED=1). Its local
+# weights are included so a judging container can run entirely offline.
+COPY scripts/fetch_qwen.py ./scripts/fetch_qwen.py
+RUN python scripts/fetch_qwen.py
+
+# A trained adapter is fetched only when a reviewed public repository is
+# supplied at build time. No adapter exists yet, so the default image stays on
+# the base-model proposal path (which remains disabled unless opted in).
+ARG QWEN_ADAPTER_REPO=""
+ARG QWEN_ADAPTER_REVISION=""
+COPY scripts/fetch_qwen_lora.py ./scripts/fetch_qwen_lora.py
+RUN if [ -n "$QWEN_ADAPTER_REPO" ]; then \
+      if [ -n "$QWEN_ADAPTER_REVISION" ]; then \
+        python scripts/fetch_qwen_lora.py --repo "$QWEN_ADAPTER_REPO" --revision "$QWEN_ADAPTER_REVISION"; \
+      else \
+        python scripts/fetch_qwen_lora.py --repo "$QWEN_ADAPTER_REPO"; \
+      fi; \
+    fi
 
 # If you add dependencies for your own resize() approach, add them to
 # requirements.txt above — everything needed must install at BUILD time.
