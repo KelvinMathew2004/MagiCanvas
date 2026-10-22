@@ -85,6 +85,7 @@ def _candidate_defects(source, target_design, output, pair, source_meta, target_
     text_deltas=[]
     defects=[]
     shrink_ratios=[]
+    matched_visuals=[]
     target_elements=target_design["elements"]
     for source_index,target_index in source_to_target.items():
         original=source["elements"][source_index]
@@ -113,6 +114,43 @@ def _candidate_defects(source, target_design, output, pair, source_meta, target_
                     and target_contrast>=2.0
                     and candidate_contrast<max(1.35,target_contrast*.60)):
                 defects.append(f"contrast_drop:{original['id']}:{target_contrast:.2f}->{candidate_contrast:.2f}")
+        elif original["type"] in ("image", "shape") and target["type"] in ("image", "shape"):
+            matched_visuals.append((original, target, adapted))
+
+    def canvas_background(element, design):
+        cw,ch=design["canvas"]["width"],design["canvas"]["height"]
+        full=(element["x"]<=cw*.02 and element["y"]<=ch*.02
+              and element["x"]+element["width"]>=cw*.98
+              and element["y"]+element["height"]>=ch*.98)
+        behind=all(element.get("z_index",0)<=text.get("z_index",0)
+                   for text in design["elements"] if text["type"]=="text")
+        return full and behind and not element.get("group_id")
+
+    def visual_area(element):
+        if element["type"]=="image":
+            box=visible_content_bounds(element,_asset_root(element))
+        else:
+            box=(element["x"],element["y"],element["x"]+element["width"],
+                 element["y"]+element["height"])
+        return max(1.,(box[2]-box[0])*(box[3]-box[1]))
+
+    measured_visuals=[]
+    for original,target,adapted in matched_visuals:
+        if (canvas_background(original,source) or canvas_background(target,target_design)
+                or adapted is None):
+            continue
+        target_area=visual_area(target)
+        adapted_area=visual_area(adapted)
+        area_ratio=adapted_area/target_area
+        measured_visuals.append((original["id"],target_area,adapted_area))
+        if area_ratio < .30 or area_ratio > 2.2:
+            defects.append(f"visual_scale_distortion:{original['id']}:{area_ratio:.2f}")
+    for i,(id_a,target_a,adapted_a) in enumerate(measured_visuals):
+        for id_b,target_b,adapted_b in measured_visuals[i+1:]:
+            if target_a >= 1.5*target_b and adapted_a < adapted_b:
+                defects.append(f"visual_hierarchy_inversion:{id_a}:{id_b}")
+            elif target_b >= 1.5*target_a and adapted_b < adapted_a:
+                defects.append(f"visual_hierarchy_inversion:{id_b}:{id_a}")
 
     mean_displacement=sum(center_deltas)/max(1,len(center_deltas))
     max_text_displacement=max(text_deltas,default=0.)

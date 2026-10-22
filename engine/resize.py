@@ -242,12 +242,14 @@ def _advances(content, family, bold, italic, runs):
 def _text_info(e, width=None, size=None):
     """Cached actual-font word wrapping; preserve explicit newlines/style runs."""
     width = e['width'] if width is None else width
-    size = e['font_size'] if size is None else size
+    base_size = max(1.0, float(e.get('font_size', 1.0)))
+    size = float(e['font_size'] if size is None else size)
+    spacing = float(e.get('letter_spacing', 0)) * (size / base_size)
     runs = tuple((r['start'], r['end'], None if 'font_weight' not in r else r['font_weight']=='bold',
                   None if 'font_style' not in r else r['font_style']=='italic') for r in (e.get('style_runs') or []))
     return _text_cached(e.get('content',''),e.get('font_family',''),e.get('font_weight')=='bold',
                         e.get('font_style')=='italic',e.get('line_height',1.2),
-                        e.get('letter_spacing',0),runs,width,size)
+                        spacing,runs,width,size)
 
 
 def _text(e, width=None, size=None):
@@ -532,7 +534,7 @@ def _analyze(source):
             role = 'header'
         elif images and not texts and y/sh>.88 and (r-x)*(b-y)<sw*sh*.05:
             role = 'footer'
-        elif len(items)==1 and shapes and shapes[0]['id'] in panel_children:
+        elif len(items)==1 and items[0]['id'] in panel_children:
             role = 'decoration'
         elif len(items)==1 and shapes and (shapes[0].get('opacity', 1)<.4 or shapes[0].get('shape_type') in ('ellipse', 'line')):
             role = 'decoration'
@@ -564,6 +566,12 @@ def _analyze(source):
 def _unit(u, width, height, scale, fill=False):
     width, height = max(.0001, width), max(.0001, height)
     items, (x,y,r,b) = u['items'], u['bounds']
+    small_visual=(u.get('role')=='visual' and u.get('source_area_share',1.)<.12)
+    if small_visual:
+        # Small source artwork is an icon/ornament, not a slot-filling hero.
+        # Keep it at the canvas-proportional scale even when a seed asks to
+        # enlarge visuals by 1.15x or fill its available cell.
+        fill=False
     if len(items)==1 and items[0]['type']=='text':
         e = deepcopy(items[0])
         desired=_target_font(e,u,scale)
@@ -613,6 +621,8 @@ def _unit(u, width, height, scale, fill=False):
         anchored_footer_image=(u['role']=='footer' and u.get('source_footer_anchor',u.get('footer_anchor')) in ('left','right')
                                and any(e['type']=='image' for e in items))
         scale_cap=min(scale*1.35,1.) if anchored_footer_image else scale
+        if small_visual:
+            scale_cap=min(scale_cap,u.get('canvas_scale',scale)*.95)
         if u.get('inflow_footer_asset'):
             # Moving a small footer badge into the CTA area should free its
             # corner without turning it into a dominant product image.
@@ -995,7 +1005,8 @@ def _visuals(units,width,height,scale,gap):
             # Hero art fits the space left by the layout, but cannot grow
             # beyond its source-relative target scale just to fill a slot.
             vertical_hero=(u['semantic']=='hero' and u.get('target_aspect_ratio',1.)<.68
-                           and not u.get('preserve_layer_stack'))
+                           and not u.get('preserve_layer_stack')
+                           and u.get('source_area_share',0.)>=.10)
             if vertical_hero:
                 block=_unit(u,cw,ch,scale)
                 full_slot=_unit(u,cw,ch,scale,fill=True)
@@ -1005,7 +1016,7 @@ def _visuals(units,width,height,scale,gap):
                 growth=min(1.30,maximum_w/current_w,maximum_h/current_h)
                 if growth>1.001:block=_scale(block,growth)
             else:
-                block = _unit(u,cw,ch,scale,fill=not (u['semantic']=='hero' or anchored_media
+                block = _unit(u,cw,ch,scale,fill=not (u['semantic'] in ('hero','art') or anchored_media
                                                        or u.get('preserve_layer_stack')))
             _,_,w,h = _bounds(block)
             items.extend(_move(block,(i%cols)*(cw+gap)+(cw-w)/2,(i//cols)*(ch+gap)+(ch-h)/2))
@@ -1069,8 +1080,19 @@ def _sync_backing_panels(elements,units,width,height):
         panel=by_id.get(unit['items'][0]['id'])
         if panel is None:
             panel=deepcopy(unit['items'][0]);elements.append(panel);by_id[panel['id']]=panel
-        panel.update(x=x,y=y,width=max(1.,r-x),height=max(1.,b-y))
-        if panel['type']=='image':panel['fit']='fill'
+        panel_w=max(1.,r-x);panel_h=max(1.,b-y)
+        if panel['type']=='image':
+            # An inferred image backplate may follow its children, but stretching
+            # the raster to the new card bounds distorts the supplied artwork.
+            # Expand a source-proportional frame to the child region where room
+            # permits, then keep the original pixels in contain mode.
+            scale=min(max(panel_w/source_w,panel_h/source_h),width/source_w,height/source_h)
+            panel_w=max(1.,source_w*scale);panel_h=max(1.,source_h*scale)
+            center_x=(x+r)/2;center_y=(y+b)/2
+            x=min(max(0.,center_x-panel_w/2),max(0.,width-panel_w))
+            y=min(max(0.,center_y-panel_h/2),max(0.,height-panel_h))
+            panel['fit']='contain'
+        panel.update(x=x,y=y,width=panel_w,height=panel_h)
         if 'corner_radius' in panel:
             panel['corner_radius']=min(panel['width']/2,panel['height']/2,
                                        unit.get('backing_source_radius',panel['corner_radius'])
@@ -1919,6 +1941,7 @@ def _enrich_units(source, units):
         hero.update(semantic='hero', confidence=.80)
     for u in units:
         x,y,r,b=u['bounds']
+        u['source_area_share']=max(0.,(r-x)*(b-y))/(sw*sh)
         u['source_upper']=y<sh*.45
         u['source_centered']=u['semantic'] in ('logo','hero','headline','subheading','body','cta') and abs((x+r)/2/sw-.5)<.06
         if u['role']=='footer' and any(e['type']=='image' for e in u['items']) and (r-x)*(b-y)<sw*sh*.05:
@@ -2090,8 +2113,7 @@ def _safe_grid(units, width, height, scale):
     cw, ch = (width-2*margin)/cols, (height-2*margin)/rows
     output = []
     for i, u in enumerate(sorted(units,key=_semantic_order)):
-        block = _unit(u, cw*.92, ch*.92, scale,
-                      fill=u['role']=='visual' and not u.get('preserve_layer_stack'))
+        block = _unit(u, cw*.92, ch*.92, scale, fill=False)
         _,_,w,h = _bounds(block)
         output.extend(_move(block,margin+(i%cols)*cw+(cw-w)/2,margin+(i//cols)*ch+(ch-h)/2))
     return output
@@ -2138,22 +2160,36 @@ def _unit_margin(box, width, height, unit=None):
                (width-box[2]+box[0])/2, (height-box[3]+box[1])/2))
 
 
-def _feasible(elements, units, width, height):
+def _qwen_layered(a, b):
+    """Permit Qwen to place text on visual regions while keeping peer units apart."""
+    if _layered(a,b):
+        return True
+    a_text=any(item.get('type')=='text' for item in a.get('items',[]))
+    b_text=any(item.get('type')=='text' for item in b.get('items',[]))
+    a_visual=any(item.get('type') in ('image','shape') for item in a.get('items',[]))
+    b_visual=any(item.get('type') in ('image','shape') for item in b.get('items',[]))
+    return (a_text and b_visual) or (b_text and a_visual)
+
+
+def _feasible(elements, units, width, height, strict_margins=True, gap_factor=.008,
+              allow_text_visual_overlap=False):
     if any(not all(isfinite(v) for v in (e.get('x',0),e.get('y',0),e.get('width',0),e.get('height',0)))
            or e['x'] < -1e-5 or e['y'] < -1e-5
            or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5
            for e in elements):
         return False
     records = [(u,_bounds(items)) for u,items in _records(elements,units)]
-    gap = min(width,height)*.008
+    gap = min(width,height)*gap_factor
     for i,(u,b) in enumerate(records):
         if not all(isfinite(v) for v in b):
             return False
-        margin = -min(width,height)*.20 if _can_bleed(u) else 0 if u['role']=='decoration' else _unit_margin(b,width,height,u)
+        margin = (-min(width,height)*.20 if _can_bleed(u) else
+                  0 if not strict_margins or u['role']=='decoration' else
+                  _unit_margin(b,width,height,u))
         if b[0]<margin-1e-5 or b[1]<margin-1e-5 or b[2]>width-margin+1e-5 or b[3]>height-margin+1e-5:
             return False
         for v,c in records[:i]:
-            if _layered(u,v):
+            if (_qwen_layered(u,v) if allow_text_visual_overlap else _layered(u,v)):
                 continue
             if not (b[2]+gap<=c[0]+1e-5 or c[2]+gap<=b[0]+1e-5 or b[3]+gap<=c[1]+1e-5 or c[3]+gap<=b[1]+1e-5):
                 return False
@@ -2243,7 +2279,8 @@ def _peer_row_groups(indexes,boxes):
     return groups
 
 
-def _constrain(elements, units, width, height, topology='nearest'):
+def _constrain(elements, units, width, height, topology='nearest', strict_margins=True,
+               allow_text_visual_overlap=False):
     """Cassowary placement with required bounds/separation and soft preferences.
 
     Non-overlap is disjunctive, not one linear equation. Each candidate chooses
@@ -2259,7 +2296,10 @@ def _constrain(elements, units, width, height, topology='nearest'):
     solver = kiwi.Solver()
     xs = [kiwi.Variable(f'x{i}') for i in range(len(records))]
     ys = [kiwi.Variable(f'y{i}') for i in range(len(records))]
-    gap = min(width,height)*.008
+    # Qwen uses a smaller separation allowance, but units must still have a
+    # positive gap and every element remains strictly on-canvas.
+    gap_factor=.008 if strict_margins else .004
+    gap = min(width,height)*gap_factor
     try:
         # Preserve repeated icon/caption relationships through Cassowary
         # projection. These are soft directional preferences: hard bounds and
@@ -2295,7 +2335,9 @@ def _constrain(elements, units, width, height, topology='nearest'):
         for i, ((u,_),box) in enumerate(zip(records,boxes)):
             x,y,r,b = box
             w,h = r-x,b-y
-            margin = -min(width,height)*.20 if _can_bleed(u) else 0 if u['role']=='decoration' else _unit_margin(box,width,height,u)
+            margin = (-min(width,height)*.20 if _can_bleed(u) else
+                      0 if not strict_margins or u['role']=='decoration' else
+                      _unit_margin(box,width,height,u))
             solver.addConstraint(xs[i]>=margin)
             solver.addConstraint(ys[i]>=margin)
             solver.addConstraint(xs[i]+w<=width-margin)
@@ -2311,7 +2353,7 @@ def _constrain(elements, units, width, height, topology='nearest'):
         for i,(u,_) in enumerate(records):
             a=boxes[i]; aw,ah=a[2]-a[0],a[3]-a[1]
             for j,(v,_) in enumerate(records[:i]):
-                if _layered(u,v):
+                if (_qwen_layered(u,v) if allow_text_visual_overlap else _layered(u,v)):
                     continue
                 b=boxes[j]; bw,bh=b[2]-b[0],b[3]-b[1]
                 # Prefer the closest separating direction, in normalized units.
@@ -2341,7 +2383,8 @@ def _constrain(elements, units, width, height, topology='nearest'):
     for i,(_,items) in enumerate(records):
         output.extend(_move(deepcopy(items),xs[i].value(),ys[i].value()))
     _sync_backing_panels(output,units,width,height)
-    return output if _feasible(output,units,width,height) else None
+    return output if _feasible(output,units,width,height,strict_margins,gap_factor,
+                               allow_text_visual_overlap) else None
 
 
 def _perceptual_context(source, backgrounds, units, width, height):
@@ -2659,11 +2702,12 @@ def _banner_centerline(records,width,height):
     return (margin+max(margin,bottom))/2
 
 
-def _energy_terms(elements, units, source, width, height, desired):
+def _energy_terms(elements, units, source, width, height, desired,
+                  allow_text_visual_overlap=False):
     records = _records(elements,units)
     boxes = [_bounds(items) for _,items in records]
     state=_aspect_state(source,width,height)
-    terms = dict(overlap=0.,boundary=0.,text_fit=0.,readability=0.,balance=0.,
+    terms = dict(overlap=0.,boundary=0.,edge_margin=0.,text_fit=0.,readability=0.,balance=0.,
                  hierarchy=0.,alignment=0.,spacing=0.,canvas_use=0.,source_fidelity=0.)
     terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,cta_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.,banner_action_stack=0.,banner_gap_evenness=0.,banner_centering=0.,stack_balance=0.,badge_alignment=0.,brand_media_spacing=0.,footer_visibility=0.,primary_clearance=0.,callout_migration=0.,source_order=0.,decoration_composition=0.)
     # Keep decorative elements in the broad source regions that gave them
@@ -2700,10 +2744,14 @@ def _energy_terms(elements, units, source, width, height, desired):
             return {**terms,'boundary':1e9}
         if not _can_bleed(u):
             terms['boundary'] += 1-_overlap(box,(0,0,width,height))/area
+            preferred=min(width,height)*(.055 if u['role'] in ('header','copy','tag','action','visual') else .045)
+            clearances=(x,y,width-r,height-b)
+            terms['edge_margin']+=sum((max(0.,preferred-clearance)/max(1.,preferred))**2
+                                      for clearance in clearances)
         if u.get('inflow_callout'):
             terms['callout_migration']+=1.
         for (v,_),other in zip(records[:i],boxes[:i]):
-            if not _layered(u,v):
+            if not (_qwen_layered(u,v) if allow_text_visual_overlap else _layered(u,v)):
                 other_area=max(1e-9,(other[2]-other[0])*(other[3]-other[1]))
                 terms['overlap'] += _overlap(box,other)/min(area,other_area)
         if u['role']!='decoration':
@@ -2741,7 +2789,9 @@ def _energy_terms(elements, units, source, width, height, desired):
             if state['flow'] in ('square','portrait','story','landscape'):
                 source_height=(source_box[3]-source_box[1])/source['canvas']['height']
                 target_height=(b-y)/height
-                minimum=max(source_height*.72,{'square':.32,'portrait':.27,'story':.25,'landscape':.28}[state['flow']])
+                flow_floor={'square':.32,'portrait':.27,'story':.25,'landscape':.28}[state['flow']]
+                minimum=(max(source_height*.72,flow_floor) if source_share>=.12
+                         else min(source_height*.85,flow_floor))
                 shortfall=max(0,(minimum-target_height)/max(.01,minimum))
                 terms['hero_prominence']+=shortfall if state['flow']=='square' else shortfall**2
         if u['semantic']=='cta' and u['role']=='action':
@@ -2932,7 +2982,7 @@ def _energy_terms(elements, units, source, width, height, desired):
     return terms
 
 
-_ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
+_ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,edge_margin=8.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
                      canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=70.,footer_anchor=100.,hero_prominence=210.,cta_prominence=85.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=12.,banner_centering=80.,stack_balance=300.,badge_alignment=80.,brand_media_spacing=55.,footer_visibility=240.,primary_clearance=65.,callout_migration=8.,source_order=65.,decoration_composition=48.)
 
@@ -2940,6 +2990,21 @@ _ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,text_fit=500.,readability=13.,
 def _energy(elements,units,source,width,height,desired):
     return sum(value*_ENERGY_WEIGHTS[name] for name,value in
                _energy_terms(elements,units,source,width,height,desired).items())
+
+
+def _objective_layout_cost(elements,units,source,width,height,desired,
+                           allow_text_visual_overlap=False):
+    """Score geometry and text defects without template or style preferences."""
+    terms=_energy_terms(elements,units,source,width,height,desired,
+                        allow_text_visual_overlap=allow_text_visual_overlap)
+    defect_terms=('overlap','boundary','text_fit')
+    cost=sum(terms.get(name,0.)*_ENERGY_WEIGHTS.get(name,1.) for name in defect_terms)
+    minimum_font=min(8.,min(width,height)*.065)
+    for _,items in _records(elements,units):
+        for element in items:
+            if element['type']=='text':
+                cost+=max(0.,minimum_font-element['font_size'])*2.
+    return cost
 
 
 def _constraint_violation(elements, units, width, height):
@@ -3094,6 +3159,14 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
             proposal=_move(proposal,left,y)
         else:
             factor=rng.choice((.95,1.05))
+            if u['role']=='visual':
+                source_width=max(1.,u['bounds'][2]-u['bounds'][0])
+                source_height=max(1.,u['bounds'][3]-u['bounds'][1])
+                current_width=max(1.,r-x);current_height=max(1.,b-y)
+                visual_scale_limit=(.95 if u.get('source_area_share',1.)<.12 else 1.20)
+                maximum_factor=min(source_width*desired*visual_scale_limit/current_width,
+                                   source_height*desired*visual_scale_limit/current_height)
+                factor=min(factor,maximum_factor)
             if u['semantic']=='logo' and factor<1:
                 source_height=u['bounds'][3]-u['bounds'][1]
                 minimum=min(height*.28,source_height*desired*.85)
@@ -3170,8 +3243,16 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             and _CRELLO_FONTS_PICKLE.is_file()):
         try:
             from scripts.dataset_renderer import render_design_to_png as render_crello_dataset
-            dataset_root=Path(__file__).resolve().parents[1]/'data'/'crello_train'
-            if dataset_root.is_dir():
+            data_root=Path(__file__).resolve().parents[1]/'data'
+            dataset_roots=[data_root/f'crello_{split}'
+                           for split in ('train','validation','test')]
+            asset_ids=[str(e.get('asset_id','')) for e in source.get('elements',[])
+                       if e.get('type')=='image' and e.get('asset_id')]
+            existing_roots=[root for root in dataset_roots if root.is_dir()]
+            dataset_root=max(existing_roots,
+                             key=lambda root:sum((root/asset_id).is_file() for asset_id in asset_ids),
+                             default=None)
+            if dataset_root is not None:
                 render_diagnostic=lambda doc,assets,path,max_size=640: render_crello_dataset(
                     doc,dataset_root,path,_CRELLO_FONTS_PICKLE,max_size=max_size)
                 diagnostic_assets=dataset_root
@@ -3192,6 +3273,12 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         families.add(family);shortlist.append(candidate)
         if len(shortlist)>=8:
             break
+    qwen_candidate=next((candidate for candidate in candidates
+                         if candidate['name']=='qwen-proposal'),None)
+    if qwen_candidate is not None and qwen_candidate not in shortlist:
+        if len(shortlist)>=8:
+            shortlist.pop()
+        shortlist.append(qwen_candidate)
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
         reference_image=None
@@ -3259,12 +3346,38 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
     heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
-    perceptual=_siglip_rerank(valid,heuristic_cost,reference_image,relationship_context)
+    objective_cost=lambda e:(_objective_layout_cost(e['candidate']['elements'],units,source,
+                                                    width,height,desired,
+                                                    allow_text_visual_overlap=e['candidate']['name']=='qwen-proposal')+e['cost'])
+    qwen_feasible=(qwen_candidate is not None and _feasible(
+        qwen_candidate['elements'],units,width,height,strict_margins=False,gap_factor=.004,
+        allow_text_visual_overlap=True))
+    state=_aspect_state(source,width,height)
+    qwen_primary=abs(log(state['delta']))>=.12
+    perceptual=_siglip_rerank(valid,objective_cost,reference_image,relationship_context,
+                              qwen_feasible=qwen_feasible,qwen_primary=qwen_primary)
     index=perceptual.get('selected_index')
-    selected=valid[index] if index is not None else min(valid,key=heuristic_cost)
+    if index is not None:
+        selected=valid[index]
+    elif qwen_primary and qwen_feasible:
+        qwen_entry=next((entry for entry in valid
+                         if entry['candidate']['name']=='qwen-proposal'),None)
+        heuristic_entries=[entry for entry in valid
+                           if entry['candidate']['name']!='qwen-proposal']
+        best_entry=min(heuristic_entries,key=heuristic_cost) if heuristic_entries else None
+        best_objective=min((objective_cost(entry) for entry in valid),default=float('inf'))
+        qwen_objective=objective_cost(qwen_entry) if qwen_entry is not None else float('inf')
+        defect_tolerance=max(6.,abs(best_objective)*.20)
+        safe=(qwen_entry is not None and not qwen_entry.get('invisible_text')
+              and qwen_objective<=best_objective+defect_tolerance
+              and (best_entry is None or
+                   len(qwen_entry.get('low_contrast',[]))<=len(best_entry.get('low_contrast',[]))))
+        selected=qwen_entry if safe else (best_entry or min(valid,key=heuristic_cost))
+    else:
+        selected=min(valid,key=heuristic_cost)
     report=dict(used=True,
                 method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
-                perceptual=perceptual,
+                perceptual=perceptual,qwen_primary=qwen_primary,
                 candidates=[{k:v for k,v in e.items() if k not in ('candidate','image')}|{'name':e['candidate']['name']} for e in entries])
     return selected['candidate'],report
 
@@ -3295,7 +3408,8 @@ def _visual_relationship_context(units,source,width,height):
                 callout_quadrants=sorted(set(quadrants)))
 
 
-def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=None):
+def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=None,
+                   qwen_feasible=False, qwen_primary=False):
     """Optional learned SigLIP tie-break among already-valid candidate renders.
 
     Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
@@ -3319,26 +3433,53 @@ def _siglip_rerank(valid, heuristic_cost, reference_image=None, layout_context=N
     scores,note=result
     if scores is None:
         return dict(used=False,selected_index=None,reason=note)
-    costs=[heuristic_cost(e) for e in valid]
+    costs=[objective_cost(e) for e in valid]
     best_cost=min(costs)
-    # Near-tie band: candidates within this tolerance of the best heuristic cost
-    # are considered interchangeable on the heuristics, so the learned judge
-    # decides among them. Anything worse than the band is never chosen here.
-    tolerance=max(8.0,abs(best_cost)*.15)
-    # The advertised band bounds how far the scorer can look; the effective
-    # near-tie band is also relative to the winner so small absolute deltas do
-    # not let a clearly costlier layout win on a low-cost canvas.
-    effective_tolerance=min(tolerance,max(.20,abs(best_cost)*.15))
-    band=[i for i,c in enumerate(costs) if c<=best_cost+effective_tolerance]
-    # Let visual quality break close ties while retaining a small preference
-    # for the lower-cost geometry inside the explicit hard band.
-    chosen=max(band,key=lambda i:scores[i]-.10*(costs[i]-best_cost)/max(effective_tolerance,1e-9))
+    tolerance=max(6.0,abs(best_cost)*.20)
+    qwen_indices=[i for i,e in enumerate(valid)
+                  if e['candidate']['name']=='qwen-proposal']
+    heuristic_indices=[i for i,e in enumerate(valid)
+                       if e['candidate']['name']!='qwen-proposal']
+    best_heuristic=min(heuristic_indices,key=lambda i:costs[i]) if heuristic_indices else None
+    band=[i for i,c in enumerate(costs)
+          if c<=best_cost+tolerance and i not in qwen_indices]
+    qwen_eligible=False
+    if qwen_indices and best_heuristic is not None and qwen_feasible:
+        qwen_index=qwen_indices[0]
+        qwen_entry=valid[qwen_index]
+        best_entry=valid[best_heuristic]
+        safety_ok=(not qwen_entry.get('invisible_text')
+                   and len(qwen_entry.get('low_contrast',[]))
+                       <=len(best_entry.get('low_contrast',[])))
+        defect_ok=costs[qwen_index]<=best_cost+tolerance
+        qwen_eligible=(safety_ok and defect_ok and
+                       (qwen_primary or scores[qwen_index]>scores[best_heuristic]+.03))
+        if qwen_eligible:
+            band.append(qwen_index)
+    if not band:
+        band=[best_heuristic] if best_heuristic is not None else [min(range(len(costs)),key=costs.__getitem__)]
+    # On real reflows, default to a safe Qwen layout. Let a heuristic take over
+    # only when SigLIP sees a clear quality advantage (>0.15).
+    if qwen_eligible and qwen_primary:
+        qwen_index=qwen_indices[0]
+        chosen=(best_heuristic if scores[best_heuristic]>scores[qwen_index]+.15
+                else qwen_index)
+    else:
+        chosen=max(band,key=lambda i:scores[i]-.10*(costs[i]-best_cost)/max(tolerance,1e-9))
     return dict(used=True,note=note,selected_index=chosen,
                 scores=[round(s,4) for s in scores],
-                heuristic_costs=[round(c,4) for c in costs],
+                objective_costs=[round(c,4) for c in costs],
                 tie_band=band,tolerance=round(tolerance,4),
-                effective_tolerance=round(effective_tolerance,4),
-                overrode_heuristic=costs[chosen]>best_cost+1e-9)
+                qwen_eligible=qwen_eligible,
+                qwen_safety_checks=dict(feasible=qwen_feasible,
+                                        no_invisible_text=(not qwen_indices or not valid[qwen_indices[0]].get('invisible_text')),
+                                        contrast_not_worse=(not qwen_indices or best_heuristic is None or
+                                            len(valid[qwen_indices[0]].get('low_contrast',[]))<=len(valid[best_heuristic].get('low_contrast',[]))),
+                                        qwen_primary=qwen_primary,
+                                        objective_within_band=(not qwen_indices or costs[qwen_indices[0]]<=best_cost+tolerance),
+                                        siglip_margin=(not qwen_indices or best_heuristic is None or
+                                            scores[qwen_indices[0]]>scores[best_heuristic]+.03)),
+                overrode_heuristic=chosen!=best_heuristic)
 
 
 def _assemble(elements,backgrounds,source,width,height):
@@ -3400,15 +3541,16 @@ def _adapt_with_diagnostics(source,target_canvas):
     if len({e['id'] for e in source['elements']})!=len(source['elements']):
         raise ValueError('Source element IDs must be unique.')
     backgrounds,units=_analyze(source)
+    desired=sqrt(width*height/(sw*sh))
     for unit in units:
         unit['target_aspect_ratio']=width/height
+        unit['canvas_scale']=desired
         unit['target_short_side']=min(width,height)
         if width/height<.68 and unit['role']=='footer' and unit.get('footer_anchor') in ('left','right'):
             # A corner watermark becomes a centered footer companion on tall
             # layouts; preserve its source anchor for migration decisions.
             unit['source_footer_anchor']=unit['footer_anchor']
             unit['footer_anchor']='center'
-    desired=sqrt(width*height/(sw*sh))
     state=_aspect_state(source,width,height)
     context=_perceptual_context(source,backgrounds,units,width,height)
     context['typography_gamma']=min(1.,.65+.7*desired)
@@ -3417,15 +3559,19 @@ def _adapt_with_diagnostics(source,target_canvas):
         u['font_gamma']=min(1.,.65+.7*desired)
     seeds=[dict(name='proportional',elements=_proportional(units,width,height,sw,sh))]
     qwen_status = 'disabled (set MAGICANVAS_QWEN_ENABLED=1 to enable)'
+    qwen_diagnostics = dict(status=qwen_status, proposal_received=False,
+                            constraint_feasible=False, optimized=False)
     if os.environ.get('MAGICANVAS_QWEN_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         try:
             from engine.qwen_seed import generate_seed
             proposal, qwen_status = generate_seed(source, target_canvas, seeds[0]['elements'])
+            qwen_diagnostics['status'] = qwen_status
             if proposal is not None:
-                proposal=_preserve_layered_proposals(proposal,units)
+                qwen_diagnostics['proposal_received'] = True
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
         except Exception as exc:
             qwen_status = f'Qwen proposal unavailable: {type(exc).__name__}: {exc}'
+            qwen_diagnostics['status'] = qwen_status
     for mode in ('split','copy-first','visual-first'):
         for share in (.30,.45,.60):
             family=f'editorial-{mode}' if width/height>=2.4 else mode
@@ -3491,19 +3637,41 @@ def _adapt_with_diagnostics(source,target_canvas):
     for seed in seeds:
         _sync_backing_panels(seed['elements'],units,width,height)
         projected=None
-        for topology in ('nearest','centers','alternate'):
-            projected=_constrain(seed['elements'],units,width,height,topology)
-            if projected is not None:
-                if seed['name']=='dense-short-banner':
-                    _equalize_control_geometry(projected,units)
-                break
-        if projected is None and _feasible(seed['elements'],units,width,height):
+        qwen_seed=seed['name']=='qwen-proposal'
+        if qwen_seed and _feasible(seed['elements'],units,width,height,
+                                   strict_margins=False,gap_factor=.004,
+                                   allow_text_visual_overlap=True):
+            # Retain a valid model layout intact. Only project it when it
+            # violates on-canvas bounds or separation constraints.
             projected=seed['elements']
+        else:
+            for topology in ('nearest','centers','alternate'):
+                projected=_constrain(seed['elements'],units,width,height,topology,
+                                     strict_margins=not qwen_seed,
+                                     allow_text_visual_overlap=qwen_seed)
+                if projected is not None:
+                    if seed['name']=='dense-short-banner':
+                        _equalize_control_geometry(projected,units)
+                    break
+            if projected is None and _feasible(
+                    seed['elements'],units,width,height,
+                    strict_margins=not qwen_seed,
+                    gap_factor=.004 if qwen_seed else .008,
+                    allow_text_visual_overlap=qwen_seed):
+                projected=seed['elements']
         if projected is None:
             rejected.append(seed)
+            if seed['name'] == 'qwen-proposal':
+                qwen_diagnostics['constraint_reason'] = 'rejected by layout constraints'
         else:
-            feasible.append(dict(name=seed['name'],elements=projected,energy=_energy(projected,units,source,width,height,desired)))
+            energy=_energy(projected,units,source,width,height,desired)
+            feasible.append(dict(name=seed['name'],elements=projected,energy=energy))
+            if seed['name'] == 'qwen-proposal':
+                qwen_diagnostics.update(constraint_feasible=True,
+                                        constrained_elements=deepcopy(projected),
+                                        constrained_energy=energy)
     # Spend a bounded repair budget on the most promising rejected seeds.
+    rejected=[seed for seed in rejected if seed['name']!='qwen-proposal']
     rejected.sort(key=lambda c:_constraint_violation(c['elements'],units,width,height))
     recovered=0
     for i,seed in enumerate(rejected[:3]):
@@ -3519,8 +3687,19 @@ def _adapt_with_diagnostics(source,target_canvas):
         feasible=[dict(name='bounded-grid-fallback',elements=fallback,energy=_energy(fallback,units,source,width,height,desired))]
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
-    for i,candidate in enumerate(feasible[:10]):
-        if candidate['name']=='dense-short-banner' and _feasible(candidate['elements'],units,width,height):
+    optimize_candidates=feasible[:10]
+    qwen_candidate=next((candidate for candidate in feasible
+                         if candidate['name']=='qwen-proposal'),None)
+    if qwen_candidate is not None and qwen_candidate not in optimize_candidates:
+        optimize_candidates=optimize_candidates+[qwen_candidate]
+    for i,candidate in enumerate(optimize_candidates):
+        is_qwen=candidate['name']=='qwen-proposal'
+        if is_qwen:
+            # Keep Qwen's feasible geometry as its own candidate. A separate
+            # heuristic seed supplies the polished alternative if useful.
+            elements=deepcopy(candidate['elements'])
+            optimization=dict(before=candidate['energy'],after=candidate['energy'],accepted=0,iterations=0)
+        elif candidate['name']=='dense-short-banner' and _feasible(candidate['elements'],units,width,height):
             # This role-based seed already has a measured one-row control band
             # and a shared media column. Independent local moves can undo
             # those relationships on very short canvases.
@@ -3531,7 +3710,7 @@ def _adapt_with_diagnostics(source,target_canvas):
             _repair_copy_hierarchy(elements,units,width,height)
         else:
             elements=candidate['elements'];optimization=dict(before=candidate['energy'],after=candidate['energy'],accepted=0,iterations=0)
-        if candidate['name']!='dense-short-banner':
+        if candidate['name']!='dense-short-banner' and not is_qwen:
             _repair_footer_bottom_anchor(elements,units,width,height)
             _repair_primary_action_shape(elements,units,width,height)
             _repair_vertical_hero_spacing(elements,units,width,height)
@@ -3540,21 +3719,34 @@ def _adapt_with_diagnostics(source,target_canvas):
         # family, including the compact dense-leaderboard seed. Transparent
         # PNG padding must not make a nominally left-aligned logo look flush
         # with one side of its brand column.
-        _repair_banner_logo_column_balance(elements,units,width,height)
-        _repair_banner_cta_copy_proximity(elements,units,width,height)
-        _repair_sparse_vertical_stack(elements,units,width,height)
-        _align_peer_rows(elements,units)
+        if not is_qwen:
+            _repair_banner_logo_column_balance(elements,units,width,height)
+            _repair_banner_cta_copy_proximity(elements,units,width,height)
+            _repair_sparse_vertical_stack(elements,units,width,height)
+            _align_peer_rows(elements,units)
         optimized.append(dict(name=candidate['name'],elements=elements,energy=_energy(elements,units,source,width,height,desired),optimization=optimization))
+        if candidate['name'] == 'qwen-proposal':
+            qwen_diagnostics.update(optimized=True,
+                                    optimized_elements=deepcopy(elements),
+                                    optimized_energy=_energy(elements,units,source,width,height,desired),
+                                    optimization=optimization)
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
+    qwen_diagnostics['winner'] = winner['name']
+    if qwen_diagnostics['constraint_feasible'] and not qwen_diagnostics['optimized']:
+        qwen_diagnostics['pruned_before_optimization'] = True
     output=_assemble(winner['elements'],backgrounds,source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
                 energy_terms=_energy_terms(winner['elements'],units,source,width,height,desired),
                 candidates=[{k:v for k,v in c.items() if k!='elements'} for c in optimized],
-                visual=visual,qwen=qwen_status,
-                hard_constraints_passed=_feasible(winner['elements'],units,width,height),
+                visual=visual,qwen=qwen_status,qwen_diagnostics=qwen_diagnostics,
+                hard_constraints_passed=_feasible(
+                    winner['elements'],units,width,height,
+                    strict_margins=winner['name']!='qwen-proposal',
+                    gap_factor=.004 if winner['name']=='qwen-proposal' else .008,
+                    allow_text_visual_overlap=winner['name']=='qwen-proposal'),
                 seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),total=round(perf_counter()-start,4)))
     return output,report
 

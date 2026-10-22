@@ -1,6 +1,6 @@
 # Qwen layout LoRA: first Colab run
 
-This is a starter workflow for the exact-pair JSONL prepared by
+This workflow trains the v2 exact-pair JSONL prepared by
 `scripts/prepare_qwen_training.py`. It does not upload the Crello files to
 Hugging Face. Training may still be subject to Crello/VistaCreate terms; check
 `CRELLO_DATA_AND_TRAINING.md` and the event's model rules before publishing an
@@ -22,8 +22,10 @@ mismatches, projects target coordinates onto the engine's canvas and image
 aspect constraints, and fits target text sizes to the source text. It assigns
 whole connected template families (connected by exact and core matches) to one stable 80/10/10 split, preventing
 variants from leaking across training and evaluation even when upstream Crello
-splits disagree. Training families are capped at six directed examples; the
-validation and test cap is twelve per family. Core pairs stay review-only
+splits disagree. Training keeps every eligible exact direction by default;
+use `--train-family-cap 24` only to make a smaller training run. V2 uses
+0..1000 normalized coordinates, short element aliases, and source overlap and
+alignment relations. The validation and test cap is twelve per family. Core pairs stay review-only
 because unmatched decorations make target mapping noisy. Check
 `data/qwen_lora/summary.json` for current counts and filtering totals. Keep the
 test file untouched until model selection is finished.
@@ -61,7 +63,7 @@ from unsloth import FastLanguageModel
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="Qwen/Qwen3-0.6B",
-    max_seq_length=2048,
+    max_seq_length=4096,
     load_in_4bit=True,
 )
 model = FastLanguageModel.get_peft_model(
@@ -90,7 +92,7 @@ def format_chat(row):
     return {"text": prompt + answer + tokenizer.eos_token}
 
 data = raw.map(format_chat)
-max_length = 2048
+max_length = 4096
 before = {split: len(data[split]) for split in data}
 data = data.filter(lambda row: len(tokenizer(
     row["text"], add_special_tokens=False)["input_ids"]
@@ -110,10 +112,10 @@ from trl import SFTConfig, SFTTrainer
 args = SFTConfig(
     output_dir="qwen-layout-checkpoints",
     dataset_text_field="text",
-    max_length=2048,
-    per_device_train_batch_size=2,
-    per_device_eval_batch_size=2,
-    gradient_accumulation_steps=8,
+    max_length=4096,
+    per_device_train_batch_size=1,
+    per_device_eval_batch_size=1,
+    gradient_accumulation_steps=16,
     learning_rate=1e-4,
     num_train_epochs=3,
     warmup_ratio=0.03,
@@ -190,11 +192,13 @@ trainer.train()
 Save the adapter files, then download them as one archive:
 
 ```python
-model.save_pretrained("qwen3-layout-lora")
-tokenizer.save_pretrained("qwen3-layout-lora")
-!zip -qr qwen3-layout-lora.zip qwen3-layout-lora
+model.save_pretrained("qwen3-layout-lora-v2")
+tokenizer.save_pretrained("qwen3-layout-lora-v2")
+with open("qwen3-layout-lora-v2/magicanvas_prompt_version.txt", "w") as f:
+    f.write("2\n")
+!zip -qr qwen3-layout-lora-v2.zip qwen3-layout-lora-v2
 from google.colab import files
-files.download("qwen3-layout-lora.zip")
+files.download("qwen3-layout-lora-v2.zip")
 ```
 
 ## 3. Evaluate before wiring/publishing
@@ -207,9 +211,11 @@ non-Qwen baseline. Inspect several examples, including dense and unusual target
 ratios. A malformed/incomplete response is rejected by the runtime wrapper; the
 deterministic candidate path remains available.
 
-The engine can load a local adapter from `models/qwen3-layout-lora/` (or from
+The engine can load a v2 local adapter from `models/qwen3-layout-lora-v2/` (or from
 `MAGICANVAS_QWEN_ADAPTER_DIR`) after it is copied there. Run the project with
 `MAGICANVAS_QWEN_ENABLED=1` to enable the Qwen candidate. The Dockerfile currently
 downloads only the public base model; it will need a build-time adapter fetch
-step after a reviewed, approved adapter has a public repository. The model
-weights are not uploaded by these Colab cells.
+step after a reviewed, approved adapter has a public repository. The prompt
+version marker keeps an installed v1 adapter on its original prompt until a v2
+adapter is trained and installed. The model weights are not uploaded by these
+Colab cells.

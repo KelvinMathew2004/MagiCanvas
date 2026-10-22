@@ -54,7 +54,7 @@ def main():
                 if candidate.size!=size:
                     candidate.resize(size,Image.Resampling.LANCZOS).save(png)
             row["preview_pixel_size"]=list(size)
-            row["engine_revision"]="source_stack_containment_v2"
+            row["engine_revision"]="source_stack_containment_small_visual_scale_v3"
             row["engine_render_warnings"]=warnings
             row.pop("rerender_error",None)
             updated+=1
@@ -68,7 +68,7 @@ def main():
         for row in records:
             manifest.write(json.dumps(row,ensure_ascii=False)+"\n")
     summary={"requested":args.limit,"selected":len(selected),"updated":updated,
-             "failures":failures,"engine_revision":"source_stack_containment_v2",
+             "failures":failures,"engine_revision":"source_stack_containment_small_visual_scale_v3",
              "manifest":str(manifest_path.resolve())}
     (args.folder/"rerender_summary.json").write_text(json.dumps(summary,indent=2)+"\n")
     print(json.dumps(summary,indent=2))

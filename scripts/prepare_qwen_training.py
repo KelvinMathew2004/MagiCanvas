@@ -24,7 +24,7 @@ SPLIT_DIRS = {
     "validation": ROOT / "data" / "crello_validation",
     "test": ROOT / "data" / "crello_test",
 }
-MAX_TRAIN_DIRECTIONS_PER_FAMILY = 6
+DEFAULT_TRAIN_DIRECTION_CAP = 0  # Use every eligible exact direction by default.
 
 
 def manifest_index(root):
@@ -67,6 +67,10 @@ def _project_geometry(source_element, target_element, source, target):
     if source_element["type"]=="text":
         text=dict(source_element)
         desired=max(1.,float(target_element.get("font_size") or source_element.get("font_size") or 1))
+        source_font=max(1.,float(source_element.get("font_size") or 1))
+        text["letter_spacing"]=(float(source_element.get("letter_spacing",0))
+                                * desired/source_font)
+        text["font_size"]=desired
         result["font_size"]=_fit_text(text,width,height,desired)
     return result
 
@@ -94,8 +98,7 @@ def build_example(pair, a_design, b_design, reverse=False):
         answers.append({"id":source_element["id"],**{k:round(v,2) for k,v in geom.items()}})
     completion = json.dumps({"elements": answers}, ensure_ascii=False, separators=(",", ":"))
     return {
-        "messages": messages_for(source,target["canvas"],completion)[0:2]+
-                    [{"role":"assistant","content":completion}],
+        "messages": messages_for(source,target["canvas"],completion,version=2),
         "pair_id": f"{source_info['id']}__to__{target_info['id']}",
         "source_split": source_info["split"], "target_split": target_info["split"],
         "target_canvas": target["canvas"],
@@ -108,8 +111,14 @@ def pair_filter_reason(pair,a_design,b_design):
         b=b_design["elements"][match["b_index"]]
         if a["type"]=="text" and a.get("content","")!=b.get("content",""):
             return "text_content_changed"
-        if a["type"]=="image" and a.get("fit","contain")=="contain" and not _is_background(
-                a,a_design["elements"],a_design["canvas"]):
+        if a["type"]=="image" and b["type"]=="image":
+            is_bg_a=_is_background(a,a_design["elements"],a_design["canvas"])
+            is_bg_b=_is_background(b,b_design["elements"],b_design["canvas"])
+            if is_bg_a!=is_bg_b:
+                return "background_role_changed"
+        else:
+            is_bg_a=is_bg_b=False
+        if a["type"]=="image" and b["type"]=="image" and a.get("fit","contain")=="contain" and not is_bg_a:
             aspect_a=float(a["width"])/max(1e-6,float(a["height"]))
             aspect_b=float(b["width"])/max(1e-6,float(b["height"]))
             if abs(aspect_a-aspect_b)/max(1e-6,aspect_a)>.05:
@@ -128,7 +137,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=Path, default=PAIR_FILE)
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "qwen_lora")
+    parser.add_argument("--train-family-cap", type=int, default=DEFAULT_TRAIN_DIRECTION_CAP,
+                        help="Maximum directed training examples per connected family; 0 keeps all eligible directions")
     args = parser.parse_args()
+    if args.train_family_cap < 0:
+        parser.error("--train-family-cap must be zero (unlimited) or positive")
     pair_doc = json.loads(args.pairs.read_text())
     indexes = {split: manifest_index(root) for split, root in SPLIT_DIRS.items()}
     designs = {}
@@ -154,9 +167,14 @@ def main():
         return parent[value]
     def union(a,b):parent[find(a)]=find(b)
     for pair in family_edges:union(pair["a"]["id"],pair["b"]["id"])
+    members_by_root=defaultdict(list)
+    for member in parent:
+        members_by_root[find(member)].append(member)
+    canonical_by_member={member:min(members) for members in members_by_root.values() for member in members}
     family_splits=defaultdict(set)
     for pair in family_edges:
-        family_splits[find(pair["a"]["id"])].update((pair["a"]["split"],pair["b"]["split"]))
+        family=canonical_by_member[pair["a"]["id"]]
+        family_splits[family].update((pair["a"]["split"],pair["b"]["split"]))
     # Split connected template families as units, so no variant from a family
     # can leak into both training and evaluation. A stable hash avoids moving
     # most mixed-source families into test merely because one member came from
@@ -175,7 +193,7 @@ def main():
     for pair in pair_doc["pairs"]:
         category = pair["classification"]
         a, b = pair["a"], pair["b"]
-        family=find(a["id"])
+        family=canonical_by_member.get(a["id"],a["id"])
         if category not in ("exact", "core"):
             continue
         ad, bd = load_design(a["split"], a["id"]), load_design(b["split"], b["id"])
@@ -209,17 +227,20 @@ def main():
             record["model_split"]=assigned_split
             records_by_family[family][assigned_split].append(record)
 
-    capped=0
+    capped_train=0
+    capped_eval=0
     for family,split_records in records_by_family.items():
         for split,records in split_records.items():
-            cap=MAX_TRAIN_DIRECTIONS_PER_FAMILY if split=="train" else 12
-            if len(records)>cap:
+            cap=args.train_family_cap if split=="train" else 12
+            if cap and len(records)>cap:
                 # Deterministic spread across canvas aspect ratios prevents a
                 # large template pack from dominating the training epoch.
                 records.sort(key=lambda r:(r["target_canvas"]["width"]/r["target_canvas"]["height"],r["pair_id"]))
                 n=cap
                 picks=sorted({round(i*(len(records)-1)/max(1,n-1)) for i in range(n)})
-                capped+=len(records)-len(picks)
+                removed=len(records)-len(picks)
+                if split=="train":capped_train+=removed
+                else:capped_eval+=removed
                 records=[records[i] for i in picks]
             exact_by_split[split].extend(records)
 
@@ -228,6 +249,8 @@ def main():
     write_jsonl(args.output / "test.jsonl", exact_by_split["test"])
     write_jsonl(args.output / "core_review.jsonl", core_review)
     summary = {"dataset": pair_doc.get("dataset"), "revision": pair_doc.get("revision"),
+               "training_prompt_version": 2,
+               "coordinate_encoding": "normalized 0..1000 canvas fractions; font scale relative to short side",
                "source_pair_manifest": str(args.pairs),
                "exact_examples": {key: len(value) for key, value in exact_by_split.items()},
                "core_review_examples_not_for_training": len(core_review),
@@ -236,8 +259,9 @@ def main():
                "cross_split_families_reassigned": len(reassigned_cross_split_families),
                "family_split_policy":"stable hash of exact+core connected component (80/10/10)",
                "family_graph_edges":"exact and core matches; core remains review-only",
-               "train_family_direction_cap": MAX_TRAIN_DIRECTIONS_PER_FAMILY,
-               "train_directions_removed_by_cap": capped}
+               "train_family_direction_cap": args.train_family_cap or None,
+               "train_directions_removed_by_cap": capped_train,
+               "validation_test_directions_removed_by_cap": capped_eval}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
 

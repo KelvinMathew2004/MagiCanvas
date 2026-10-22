@@ -56,6 +56,40 @@ def boxes_overlap(x, y):
             and max(x["y"], y["y"]) < min(x["y"] + x["height"], y["y"] + y["height"]))
 
 
+def _box_overlap_area(a, b):
+    return max(0., min(a["x"]+a["width"], b["x"]+b["width"])-max(a["x"],b["x"])) * max(
+        0., min(a["y"]+a["height"], b["y"]+b["height"])-max(a["y"],b["y"]))
+
+
+def _visual_text_affinity(visual, text, design):
+    """Measure overlap/proximity between a visual and a matched text block."""
+    text_area=max(1.,text["width"]*text["height"])
+    overlap=_box_overlap_area(visual,text)/text_area
+    vx=(visual["x"]+visual["width"]/2)/max(1.,design["width"])
+    vy=(visual["y"]+visual["height"]/2)/max(1.,design["height"])
+    tx=(text["x"]+text["width"]/2)/max(1.,design["width"])
+    ty=(text["y"]+text["height"]/2)/max(1.,design["height"])
+    distance=min(1.4142,((vx-tx)**2+(vy-ty)**2)**.5)
+    proximity=max(0.,1.-distance/.45)
+    return max(min(1.,overlap),proximity*.6)
+
+
+def _visual_match_tiebreak(x, y, a, b, text_matches):
+    """Small spatial/text-backing tie-breaker for repeated similar visuals."""
+    ax=(x["x"]+x["width"]/2)/max(1.,a["width"])
+    ay=(x["y"]+x["height"]/2)/max(1.,a["height"])
+    bx=(y["x"]+y["width"]/2)/max(1.,b["width"])
+    by=(y["y"]+y["height"]/2)/max(1.,b["height"])
+    center_distance=min(1.4142,((ax-bx)**2+(ay-by)**2)**.5)
+    if not text_matches:
+        return -.02*center_distance
+    affinity_a=[_visual_text_affinity(x,ta,a) for ta,_,_ in text_matches]
+    affinity_b=[_visual_text_affinity(y,tb,b) for _,tb,_ in text_matches]
+    agreement=1.-sum(abs(v1-v2) for v1,v2 in zip(affinity_a,affinity_b))/len(text_matches)
+    strength=max(max(affinity_a,default=0.),max(affinity_b,default=0.))
+    return .05*max(0.,agreement)*strength-.02*center_distance
+
+
 def candidate_pairs_for_group(indexes, rows):
     """Apply cheap structure/text/aspect filters before materializing pairs."""
     by_count = defaultdict(list)
@@ -173,7 +207,8 @@ def validate(a, b):
                                                      and min(relative_area_x/ max(1e-9,relative_area_y),
                                                              relative_area_y/max(1e-9,relative_area_x)) >= .5)
                 if aspect_ok and role_match:
-                    candidates.append((sim * ar_similarity, sim, ar_similarity, x, y))
+                    score=sim*ar_similarity+_visual_match_tiebreak(x,y,a,b,texts)
+                    candidates.append((score, sim, ar_similarity, x, y))
     candidates.sort(key=lambda c: c[0], reverse=True)
     visuals = []
     for _, sim, ar_sim, x, y in candidates:

@@ -75,7 +75,7 @@ def main():
     import torch
     from PIL import Image
     from transformers import AutoModel,AutoProcessor
-    from engine.vision import _letterbox_square
+    from engine.vision import _letterbox_square, _POSITIVE, _NEGATIVE
     torch.manual_seed(args.seed)
     model=AutoModel.from_pretrained(str(args.model),local_files_only=True).eval()
     processor=AutoProcessor.from_pretrained(str(args.model),local_files_only=True)
@@ -91,6 +91,26 @@ def main():
                 features=model.get_image_features(**inputs)
         return torch.nn.functional.normalize(features.float().reshape(-1),dim=0)
 
+    def zero_shot_pair(positive_path, negative_path):
+        # Match engine.vision's default no-context prompt scorer exactly; this
+        # gives the learned head a validation baseline from the same backbone.
+        with Image.open(positive_path) as image:
+            positive_image=_letterbox_square(image)
+        with Image.open(negative_path) as image:
+            negative_image=_letterbox_square(image)
+        positive_prompts=list(_POSITIVE)
+        negative_prompts=list(_NEGATIVE)
+        inputs=processor(text=positive_prompts+negative_prompts,
+                         images=[positive_image,negative_image],
+                         padding="max_length",return_tensors="pt")
+        with torch.inference_mode():
+            output=model(**inputs)
+            logits=output.logits_per_image
+            positive=logits[:,:len(positive_prompts)].mean(dim=1)
+            negative=logits[:,len(positive_prompts):].mean(dim=1)
+            quality=positive-negative
+        return float((quality[0]-quality[1]).item())
+
     # Cache embeddings so fitting is small and repeatable.
     prepared={}
     for split,items in groups.items():
@@ -99,38 +119,52 @@ def main():
             pkey,nkey=str(Path(pos).resolve()),str(Path(neg).resolve())
             if pkey not in prepared:prepared[pkey]=embed(pkey)
             if nkey not in prepared:prepared[nkey]=embed(nkey)
-            pairs.append((prepared[pkey],prepared[nkey]))
+            baseline=zero_shot_pair(pkey,nkey) if split=="validation" else None
+            pairs.append((prepared[pkey],prepared[nkey],baseline))
         groups[split]=pairs
     dimension=groups["train"][0][0].numel()
-    head=torch.nn.Linear(dimension,1,bias=True)
-    optimizer=torch.optim.AdamW(head.parameters(),lr=args.learning_rate,
-                                weight_decay=args.weight_decay)
-    train=torch.stack([torch.stack(pair) for pair in groups["train"]])
-    validation=torch.stack([torch.stack(pair) for pair in groups["validation"]])
+    head=torch.nn.Linear(dimension,1,bias=False)
+    optimizer=torch.optim.AdamW(head.parameters(),lr=args.learning_rate,weight_decay=0.)
+    train=torch.stack([torch.stack(pair[:2]) for pair in groups["train"]])
+    validation=torch.stack([torch.stack(pair[:2]) for pair in groups["validation"]])
+    zero_shot=torch.tensor([pair[2] for pair in groups["validation"]],dtype=torch.float32)
+    score_scale=.25
     best=None
     for epoch in range(args.epochs):
         head.train();optimizer.zero_grad(set_to_none=True)
         pos=head(train[:,0]).squeeze(-1);neg=head(train[:,1]).squeeze(-1)
-        loss=torch.nn.functional.softplus(-(pos-neg)).mean()
+        loss=torch.nn.functional.softplus(-(pos-neg)).mean()+args.weight_decay*head.weight.square().sum()
         loss.backward();optimizer.step()
         head.eval()
         with torch.no_grad():
-            val_diff=(head(validation[:,0])-head(validation[:,1])).squeeze(-1)
+            val_head_diff=(head(validation[:,0])-head(validation[:,1])).squeeze(-1)
+            val_diff=zero_shot+score_scale*val_head_diff
             accuracy=float((val_diff>0).float().mean())
+            zero_shot_accuracy=float((zero_shot>0).float().mean())
             val_loss=float(torch.nn.functional.softplus(-val_diff).mean())
         if best is None or val_loss<best[0]:
-            best=(val_loss,accuracy,epoch+1,{k:v.detach().cpu().clone() for k,v in head.state_dict().items()})
-    head.load_state_dict(best[3])
+            best=(val_loss,accuracy,zero_shot_accuracy,epoch+1,
+                  {k:v.detach().cpu().clone() for k,v in head.state_dict().items()})
+    if best[1] <= .60 or best[1] <= best[2]:
+        print(json.dumps({"saved":False,"reason":"combined validation scorer did not exceed 0.60 accuracy and zero-shot accuracy",
+                          "train_pairs":len(groups["train"]),"validation_pairs":len(groups["validation"]),
+                          "best_epoch":best[3],"combined_validation_pair_accuracy":best[1],
+                          "zero_shot_validation_pair_accuracy":best[2],"validation_loss":best[0],
+                          "output_preserved":str(args.output)},indent=2))
+        return
+    head.load_state_dict(best[4])
     args.output.parent.mkdir(parents=True,exist_ok=True)
     torch.save({"state_dict":head.state_dict(),"dimension":dimension,
                 "model_id":"google/siglip2-base-patch16-224",
-                "feature_normalization":"l2","score_scale":0.25,
+                "feature_normalization":"l2","score_scale":score_scale,
                 "loss":"pairwise Bradley-Terry softplus","train_pairs":len(groups["train"]),
-                "validation_pairs":len(groups["validation"]),"best_epoch":best[2],
-                "validation_pair_accuracy":best[1],"validation_loss":best[0]},args.output)
+                "validation_pairs":len(groups["validation"]),"best_epoch":best[3],
+                "validation_pair_accuracy":best[1],"zero_shot_validation_pair_accuracy":best[2],
+                "validation_loss":best[0]},args.output)
     print(json.dumps({"output":str(args.output.resolve()),"train_pairs":len(groups["train"]),
-                      "validation_pairs":len(groups["validation"]),"best_epoch":best[2],
-                      "validation_pair_accuracy":best[1],"validation_loss":best[0]},indent=2))
+                      "validation_pairs":len(groups["validation"]),"best_epoch":best[3],
+                      "validation_pair_accuracy":best[1],"zero_shot_validation_pair_accuracy":best[2],
+                      "validation_loss":best[0]},indent=2))
 
 
 if __name__=="__main__":main()

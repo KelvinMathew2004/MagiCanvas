@@ -97,7 +97,8 @@ def _load_ranker():
         state=payload["state_dict"]
         dimension=int(payload["dimension"])
         weight=state["weight"].reshape(-1).float()
-        bias=state["bias"].reshape(()).float()
+        bias=state.get("bias")
+        bias=(bias.reshape(()).float() if bias is not None else weight.new_zeros(()))
         if weight.numel()!=dimension:return None
         return weight,bias,float(payload.get("score_scale",.25)),dimension
     except Exception:

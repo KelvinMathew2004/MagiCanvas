@@ -21,9 +21,11 @@ venv/
 output/*
 !output/.gitkeep
 
-# Large local model weights are downloaded during Docker builds; never commit
-# them to the project repository.
-models/
+# Downloaded base-model weights stay local; track the small trained Qwen adapter
+# so teammates can use the same fine-tuned proposal model.
+models/*
+!models/qwen3-layout-lora/
+!models/qwen3-layout-lora/**
 
 # Local Crello downloads/exports contain dataset previews, embedded artwork, and
 # fonts. Keep these generated local copies out of Git; other data/ files remain
