@@ -57,7 +57,7 @@ def image_ratio_violations(source,output):
 
 def run_one(row,indexes):
     from engine.main import self_check
-    from engine.qwen_prompt import decode_v2_completion
+    from engine.qwen_prompt import decode_v2_completion, record_prompt_version
     import engine.resize as resize
     import engine.qwen_seed as qwen_seed
     source_id,target_id=row['pair_id'].split('__to__',1)
@@ -67,7 +67,7 @@ def run_one(row,indexes):
     target=json.loads((SPLIT_DIRS[target_split]/target_row['design']).read_text())
     canvas=row['target_canvas']; gold=json.loads(row['messages'][-1]['content'])
     if gold.get('elements') and 'box' in gold['elements'][0]:
-        gold=decode_v2_completion(gold,source,canvas)
+        gold=decode_v2_completion(gold,source,canvas,record_prompt_version(row))
     expected=gold['elements']
     os.environ['MAGICANVAS_QWEN_ENABLED']='0'
     off,off_report=resize._adapt_with_diagnostics(source,canvas)
@@ -110,13 +110,15 @@ def main():
     rows=[json.loads(x) for x in a.input.read_text().splitlines() if x.strip()]
     if a.limit: rows=rows[:a.limit]
     if rows:
-        prompt_version=2 if 'box' in json.loads(rows[0]['messages'][-1]['content'])['elements'][0] else 1
-        if prompt_version==2:
+        from engine.qwen_prompt import record_prompt_version
+        if len({record_prompt_version(row) for row in rows})!=1:raise SystemExit("Mixed prompt versions in evaluation input")
+        prompt_version=record_prompt_version(rows[0])
+        if prompt_version in (2,3):
             import engine.qwen_seed as qwen_seed
             marker=qwen_seed.ADAPTER_DIR/'magicanvas_prompt_version.txt'
             adapter_version=int(marker.read_text().strip()) if marker.is_file() else 1
-            if adapter_version!=2:
-                raise SystemExit(f"Held-out JSONL requires prompt v2, but installed adapter is v{adapter_version}. Train/install the v2 adapter first.")
+            if adapter_version!=prompt_version:
+                raise SystemExit(f"Held-out JSONL requires prompt v{prompt_version}, but installed adapter is v{adapter_version}. Train/install the v2 adapter first.")
         os.environ['MAGICANVAS_QWEN_PROMPT_VERSION']=str(prompt_version)
     indexes={split:index_designs(folder) for split,folder in SPLIT_DIRS.items()}
     a.output.parent.mkdir(parents=True,exist_ok=True)

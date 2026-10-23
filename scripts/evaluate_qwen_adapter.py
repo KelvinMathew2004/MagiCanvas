@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+from collections import defaultdict
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -72,7 +73,7 @@ def measure(prediction,gold,canvas):
 def run_mode(records,source_for,adapter_dir):
     import torch
     import engine.qwen_seed as qwen_seed
-    from engine.qwen_prompt import decode_v2_completion
+    from engine.qwen_prompt import decode_v2_completion, record_prompt_version
     qwen_seed._load.cache_clear()
     qwen_seed.ADAPTER_DIR=adapter_dir
     results=[]
@@ -80,11 +81,27 @@ def run_mode(records,source_for,adapter_dir):
         started=perf_counter()
         source_id=row["pair_id"].split("__to__",1)[0]
         source=source_for(row["source_split"],source_id)
-        proposal,_=qwen_seed.generate_seed(source,row["target_canvas"],source["elements"])
+        diagnostics={}
+        # Omission fallback needs target-scaled geometry, not original pixels.
+        from engine.resize import _analyze, _proportional, _assemble
+        backgrounds,units=_analyze(source)
+        canvas=row['target_canvas']
+        base=_proportional(units,canvas['width'],canvas['height'],source['canvas']['width'],source['canvas']['height'])
+        proposal,note=qwen_seed.generate_seed(source,canvas,base,diagnostics=diagnostics)
         gold=json.loads(row["messages"][-1]["content"])
         if gold.get("elements") and "box" in gold["elements"][0]:
-            gold=decode_v2_completion(gold,source,row["target_canvas"])
-        results.append(measure(proposal,gold,row["target_canvas"]))
+            gold=decode_v2_completion(gold,source,canvas,record_prompt_version(row))
+        model_rows=[dict(id=eid,**values) for eid,values in diagnostics.get('model_elements',{}).items()]
+        result=measure(model_rows or None,gold,canvas)
+        if (not diagnostics.get('json_complete') or diagnostics.get('duplicate_ids')
+                or diagnostics.get('unknown_ids')):
+            result['valid']=False
+            if diagnostics.get('duplicate_ids') or diagnostics.get('unknown_ids'):result['exact_ids']=False
+        # Completeness is assessed before fallback, font fitting, and bounds clamping.
+        result.update(pair_id=row['pair_id'],family_id=row.get('family_id'),status=note,
+                      runtime=measure(_assemble(proposal,backgrounds,source,canvas["width"],canvas["height"])["elements"] if proposal is not None else None,gold,canvas),
+                      generation={k:v for k,v in diagnostics.items() if k!='model_elements'})
+        results.append(result)
         print(f"  {index}/{len(records)}: {'valid' if results[-1]['valid'] else 'invalid'} "
               f"({perf_counter()-started:.1f}s)",flush=True)
     qwen_seed._load.cache_clear()
@@ -99,6 +116,15 @@ def summarize(results):
     def average(key):
         values=[row[key] for row in valid if row[key] is not None]
         return sum(values)/len(values) if values else None
+    families=defaultdict(list)
+    for row in valid:
+        families[row.get('family_id') or row.get('pair_id','unknown')].append(row)
+    def family_average(key):
+        values=[]
+        for members in families.values():
+            scores=[row[key] for row in members if row[key] is not None]
+            if scores:values.append(sum(scores)/len(scores))
+        return sum(values)/len(values) if values else None
     return {
         "examples":len(results),"valid_json_and_complete_ids":len(valid),
         "valid_rate":len(valid)/max(1,len(results)),
@@ -106,6 +132,9 @@ def summarize(results):
         "mean_normalized_geometry_mae":average("geometry_mae"),
         "mean_relative_font_size_mae":average("font_mae"),
         "mean_out_of_canvas_elements":average("out_of_canvas"),
+        "families_with_valid_predictions":len(families),
+        "family_macro_geometry_mae":family_average('geometry_mae'),
+        "family_macro_font_relative_mae":family_average('font_mae'),
     }
 
 
@@ -120,9 +149,23 @@ def main():
     records=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if args.limit:records=records[:args.limit]
     if not records:raise SystemExit("No held-out examples found.")
-    prompt_version=2 if "box" in json.loads(records[0]["messages"][-1]["content"])["elements"][0] else 1
+    from engine.qwen_prompt import record_prompt_version
+    versions={record_prompt_version(row) for row in records}
+    if len(versions)!=1:raise SystemExit('Mixed prompt versions in evaluation file')
+    prompt_version=versions.pop()
+    # Legacy files lack family metadata: infer connected components from pair
+    # endpoints so repeated directions are not counted as independent families.
+    parent={}
+    def find(x):
+        parent.setdefault(x,x)
+        if parent[x]!=x:parent[x]=find(parent[x])
+        return parent[x]
+    for row in records:
+        a,b=row['pair_id'].split('__to__',1);parent[find(a)]=find(b)
+    for row in records:
+        row.setdefault('family_id',find(row['pair_id'].split('__to__',1)[0]))
     source_for=read_sources()
-    adapter_dir=ROOT/"models"/"qwen3-layout-lora-v2"
+    adapter_dir=ROOT/"models"/f"qwen3-layout-lora-v{prompt_version}"
     if not adapter_dir.is_dir():
         adapter_dir=ROOT/"models"/"qwen3-layout-lora"
     if not adapter_dir.is_dir():raise SystemExit(f"No adapter directory at {adapter_dir}")
@@ -143,6 +186,8 @@ def main():
     adapter_mae=adapter_summary["mean_normalized_geometry_mae"]
     report={"test_file":str(args.input.resolve()),"adapter_dir":str(adapter_dir.resolve()),
             "examples":len(records),"base":base_summary,"adapter":adapter_summary,
+            "metric_scope":"Raw decoded model JSON; runtime recovery is reported separately per case",
+            "results":{"base":base_results,"adapter":adapter_results},
             "adapter_beats_base_geometry":(adapter_mae<base_mae
                                              if adapter_mae is not None and base_mae is not None
                                              else None)}

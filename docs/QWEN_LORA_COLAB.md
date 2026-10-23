@@ -16,19 +16,39 @@ present:
 python3 scripts/prepare_qwen_training.py
 ```
 
-This creates `data/qwen_lora/train.jsonl`, `validation.jsonl`, `test.jsonl`,
-`core_review.jsonl`, and `summary.json`. The exporter filters exact-content
-mismatches, projects target coordinates onto the engine's canvas and image
-aspect constraints, and fits target text sizes to the source text. It assigns
-whole connected template families (connected by exact and core matches) to one stable 80/10/10 split, preventing
-variants from leaking across training and evaluation even when upstream Crello
-splits disagree. Training keeps every eligible exact direction by default;
-use `--train-family-cap 24` only to make a smaller training run. V2 uses
-0..1000 normalized coordinates, short element aliases, and source overlap and
-alignment relations. The validation and test cap is twelve per family. Core pairs stay review-only
-because unmatched decorations make target mapping noisy. Check
-`data/qwen_lora/summary.json` for current counts and filtering totals. Keep the
-test file untouched until model selection is finished.
+This creates exact-only chat JSONL with source/reference font sizes preserved.
+Text labels are never shrunk through the engine's font fitter. Connected exact
+and core template families stay together in a stable 80/10/10 split; core pairs
+remain review-only. Each row records its `family_id`, `source_template_id`, and
+`prompt_version`.
+
+The new defaults cap each *source template* at **2 outgoing directions** in each
+split. Connected components still define train/validation/test isolation, but a
+large component no longer loses nearly all its examples to one family-wide cap.
+This retains more resize variety while limiting repeated-source domination.
+`--train-source-cap 0 --eval-source-cap 0` disables caps. Evaluate the cap with
+the held-out split; it is a sampling choice, not evidence of higher model quality.
+
+To prepare the next experiment without replacing the installed adapter's data:
+
+```bash
+python3 scripts/prepare_qwen_training.py --output data/qwen_lora_source_capped_v2
+```
+
+This dataset uses the existing v2 contract (0..1000 boxes and font size relative
+to the short side). An optional v3 experiment changes only font normalization:
+
+```bash
+python3 scripts/prepare_qwen_training.py --prompt-version 3 --output data/qwen_lora_v3_source_capped
+```
+
+V3 uses `sqrt(width * height)` as the font reference. Both normalizations are
+reversible, and the old short-side encoding does **not** inherently amplify pixel
+quantization error on banners. V3 is an experiment requiring a new adapter,
+not a demonstrated correction to v2. Never use a v2 adapter to decode v3 tokens.
+Keep training/validation/test from one prepared directory together. Existing
+`data/qwen_lora/` and its 90-case review remain the historical baseline; do not
+claim that repeatedly inspected cases are a fresh blind test.
 
 Upload only `train.jsonl` and `validation.jsonl` in Colab for training. Keep
 `test.jsonl` for the final local evaluation. These files contain design text and
@@ -45,8 +65,15 @@ restart the runtime and follow the current install cell in the linked Qwen guide
 !pip -q install unsloth datasets trl
 ```
 
-Upload `train.jsonl` and `validation.jsonl` from the local `data/qwen_lora/`
-folder when prompted:
+If the response-mask helper reports a marker or masking error, upgrade the
+training packages and restart the Colab runtime before rerunning the notebook:
+
+```python
+!pip -q install --upgrade unsloth unsloth_zoo trl
+```
+
+Upload `train.jsonl` and `validation.jsonl` from
+`data/qwen_lora_source_capped_v2/` when prompted:
 
 ```python
 from google.colab import files
@@ -59,6 +86,7 @@ Load the model and format the messages with Qwen's own chat template:
 ```python
 import torch
 from datasets import load_dataset
+from math import ceil
 from unsloth import FastLanguageModel
 
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -82,6 +110,12 @@ raw = load_dataset("json", data_files={
     "train": "train.jsonl",
     "validation": "validation.jsonl",
 })
+
+PROMPT_VERSION = int(raw["train"][0].get("prompt_version", 2))
+assert PROMPT_VERSION in (2, 3)
+assert all(int(row.get("prompt_version", 2)) == PROMPT_VERSION
+           for split in raw.values() for row in split)
+ADAPTER_NAME = f"qwen3-layout-lora-v{PROMPT_VERSION}"
 
 def format_chat(row):
     prompt = tokenizer.apply_chat_template(
@@ -109,6 +143,7 @@ fixed training-time estimate.
 ```python
 from trl import SFTConfig, SFTTrainer
 
+EVAL_STEPS = max(1, min(100, ceil(len(data["train"]) / 16) // 2))
 args = SFTConfig(
     output_dir="qwen-layout-checkpoints",
     dataset_text_field="text",
@@ -121,8 +156,12 @@ args = SFTConfig(
     warmup_ratio=0.03,
     logging_steps=20,
     eval_strategy="steps",
-    eval_steps=100,
-    save_strategy="epoch",
+    eval_steps=EVAL_STEPS,
+    save_strategy="steps",
+    save_steps=EVAL_STEPS,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
     save_total_limit=2,
     fp16=not torch.cuda.is_bf16_supported(),
     bf16=torch.cuda.is_bf16_supported(),
@@ -145,7 +184,7 @@ containing the target layout JSON:
 from unsloth.chat_templates import train_on_responses_only
 
 response_prefix = tokenizer.apply_chat_template(
-    raw["train"][0]["messages"][:-1], tokenize=False,
+    data["train"][0]["messages"][:-1], tokenize=False,
     add_generation_prompt=True, enable_thinking=False,
 )
 assistant_start = response_prefix.rfind("<|im_start|>assistant")
@@ -159,29 +198,40 @@ trainer = train_on_responses_only(
 )
 ```
 
-Before training, inspect a masked example and confirm the decoded labels contain
-the assistant's JSON answer and coordinates, while the system/user prompt is
-masked. Training constructs the exact same generation prefix used at inference,
-then appends the assistant JSON and EOS token. The response marker is derived
-from the installed tokenizer's prefix, including any Qwen3 thinking-control
-tokens, so a Transformers template change cannot silently mask every answer.
-Install current `unsloth`, `unsloth_zoo`, and TRL versions if the helper reports
-a marker or masking error.
-See the [Unsloth fine-tuning notebooks](https://github.com/unslothai/notebooks)
-for the maintained response-only masking examples; the helper is applied after
-trainer construction in this workflow.
-
 ```python
-sample = trainer.train_dataset[0]
-visible_labels = [
-    token if label != -100 else tokenizer.pad_token_id
-    for token, label in zip(sample["input_ids"], sample["labels"])
-]
-print(tokenizer.decode(visible_labels, skip_special_tokens=False))
-assert raw["train"][0]["messages"][-1]["content"] in tokenizer.decode(
-    visible_labels, skip_special_tokens=False
-), "Assistant answer is missing from the unmasked labels"
+sample_index = 0
+sample = trainer.train_dataset[sample_index]
+input_ids = sample["input_ids"].tolist() if hasattr(sample["input_ids"], "tolist") else sample["input_ids"]
+labels = sample["labels"].tolist() if hasattr(sample["labels"], "tolist") else sample["labels"]
+
+# The exact generation prefix must match the start of the training sequence,
+# and every system/user/prefix token must have label -100 (masked from loss).
+prefix_ids = tokenizer(response_prefix, add_special_tokens=False)["input_ids"]
+assert input_ids[:len(prefix_ids)] == prefix_ids, "Training prefix differs from inference prefix"
+assert all(label == -100 for label in labels[:len(prefix_ids)]), \
+    "System/user/generation prefix is not fully masked"
+
+# Decode only unmasked labels. This avoids printing the tokenizer's pad marker
+# (for example, repeated <|vision_pad|> tokens) in place of every masked token.
+unmasked_label_ids = [int(token) for token, label in zip(input_ids, labels)
+                      if int(label) != -100]
+decoded_labels = tokenizer.decode(unmasked_label_ids, skip_special_tokens=False)
+assistant_json = data["train"][sample_index]["messages"][-1]["content"]
+system_prompt = data["train"][sample_index]["messages"][0]["content"]
+user_prompt = data["train"][sample_index]["messages"][1]["content"]
+assert assistant_json in decoded_labels, "Assistant JSON/coordinates are missing from unmasked labels"
+assert system_prompt not in decoded_labels and user_prompt not in decoded_labels, \
+    "System or user prompt text is present in unmasked labels"
+print(decoded_labels)
 ```
+
+Training constructs the same generation prefix used at inference, then appends
+the assistant JSON and EOS token. The response marker is derived from the
+installed tokenizer's generation prefix, including Qwen3 thinking-control
+tokens, so a template change cannot silently mask every answer. See the
+[Unsloth fine-tuning notebooks](https://github.com/unslothai/notebooks) for
+maintained response-only masking examples; this helper is applied after trainer
+construction in this workflow.
 
 Then start training:
 
@@ -192,13 +242,14 @@ trainer.train()
 Save the adapter files, then download them as one archive:
 
 ```python
-model.save_pretrained("qwen3-layout-lora-v2")
-tokenizer.save_pretrained("qwen3-layout-lora-v2")
-with open("qwen3-layout-lora-v2/magicanvas_prompt_version.txt", "w") as f:
-    f.write("2\n")
-!zip -qr qwen3-layout-lora-v2.zip qwen3-layout-lora-v2
+model.save_pretrained(ADAPTER_NAME)
+tokenizer.save_pretrained(ADAPTER_NAME)
+from pathlib import Path
+import shutil
+Path(ADAPTER_NAME, "magicanvas_prompt_version.txt").write_text(f"{PROMPT_VERSION}\n")
+archive = shutil.make_archive(ADAPTER_NAME, "zip", ".", ADAPTER_NAME)
 from google.colab import files
-files.download("qwen3-layout-lora-v2.zip")
+files.download(archive)
 ```
 
 ## 3. Evaluate before wiring/publishing
@@ -211,11 +262,19 @@ non-Qwen baseline. Inspect several examples, including dense and unusual target
 ratios. A malformed/incomplete response is rejected by the runtime wrapper; the
 deterministic candidate path remains available.
 
-The engine can load a v2 local adapter from `models/qwen3-layout-lora-v2/` (or from
-`MAGICANVAS_QWEN_ADAPTER_DIR`) after it is copied there. Run the project with
-`MAGICANVAS_QWEN_ENABLED=1` to enable the Qwen candidate. The Dockerfile currently
-downloads only the public base model; it will need a build-time adapter fetch
-step after a reviewed, approved adapter has a public repository. The prompt
-version marker keeps an installed v1 adapter on its original prompt until a v2
-adapter is trained and installed. The model weights are not uploaded by these
-Colab cells.
+The installed v2 adapter continues to load from `models/qwen3-layout-lora-v2/`.
+For a v3 experiment, install the new adapter into `models/qwen3-layout-lora-v3/`
+and set `MAGICANVAS_QWEN_ADAPTER_DIR` to that directory. The version marker must
+match the evaluation JSONL. Run with `MAGICANVAS_QWEN_ENABLED=1` to enable model
+candidates. The Dockerfile supports build-time public adapter fetching through
+`QWEN_ADAPTER_REPO` and `QWEN_ADAPTER_REVISION`; the training cells do not upload
+anything publicly.
+
+Runtime now compares the decoder-checked proposal with source-lockup/column,
+measured-font, bounded local-search, and contrast-repair alternatives. Font
+calibration is a runtime candidate, not a change to human target labels. Raw
+model completeness is reported separately from recovered runtime layouts, so
+fallbacks no longer inflate the model's JSON/ID validity score. Current limits
+are 4096 input tokens, up to 4096 generated tokens, and an 8192-token combined
+ceiling (or the model's smaller context limit). Output budget is estimated from
+the tokenized answer schema, with omitted IDs and token exhaustion logged.

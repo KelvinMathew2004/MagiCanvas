@@ -46,22 +46,31 @@ def _render_candidate(source,target_canvas,enabled):
     import engine.resize as resize_module
     os.environ["MAGICANVAS_QWEN_ENABLED"]="1" if enabled else "0"
     captured=[]
+    captured_micro=[]
     if enabled:
         import engine.qwen_seed as qwen_seed
         original_generate=qwen_seed.generate_seed
+        original_snap=resize_module._micro_snap_qwen_proposal
         def capture_seed(*args,**kwargs):
             result=original_generate(*args,**kwargs)
             if result[0] is not None:
                 captured.append(result[0])
             return result
+        def capture_micro(elements,*args,**kwargs):
+            result=original_snap(elements,*args,**kwargs)
+            captured_micro.append(result[0])
+            return result
         qwen_seed.generate_seed=capture_seed
+        resize_module._micro_snap_qwen_proposal=capture_micro
         try:
             design,report=resize_module._adapt_with_diagnostics(source,target_canvas)
         finally:
             qwen_seed.generate_seed=original_generate
+            resize_module._micro_snap_qwen_proposal=original_snap
     else:
         design,report=resize_module._adapt_with_diagnostics(source,target_canvas)
-    return design,report,(captured[-1] if captured else None)
+    return design,report,(captured[-1] if captured else None),(
+        captured_micro[-1] if captured_micro else None)
 
 
 def _geometry_metrics(elements,target_elements,canvas):
@@ -84,14 +93,29 @@ def _geometry_metrics(elements,target_elements,canvas):
 
 def _html(rows):
     data=json.dumps(rows,ensure_ascii=False).replace("</","<\\/")
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Qwen held-out engine comparison</title><style>
- :root{{color-scheme:dark;font:16px system-ui;background:#0b1018;color:#edf2f8}}body{{margin:0;padding:22px}}header{{display:flex;gap:12px;align-items:center;position:sticky;top:0;background:#0b1018;padding:8px 0;z-index:2}}button{{font:inherit;padding:10px 18px;border:1px solid #607086;border-radius:10px;background:#1b2635;color:white;cursor:pointer}}button:disabled{{opacity:.45}}#count{{font-variant-numeric:tabular-nums;color:#bdc9d8}}#meta{{color:#bdc9d8;margin:8px 0 16px;white-space:pre-wrap}}.grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}}figure{{margin:0;padding:12px;background:#161f2b;border:1px solid #2a3747;border-radius:14px;min-width:0}}figcaption{{font-weight:650;margin-bottom:8px}}img{{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain;background:#10151d;border-radius:8px}}#diag{{margin-top:16px;padding:14px;background:#161f2b;border:1px solid #2a3747;border-radius:12px;white-space:pre-wrap;line-height:1.55}}@media(max-width:1100px){{.grid{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}@media(max-width:700px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:520px){{body{{padding:12px}}.grid{{grid-template-columns:1fr}}}}</style></head><body>
+    return '''<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Qwen held-out engine comparison</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;background:#0b1018;color:#edf2f8}
+body{margin:0;padding:22px}header{display:flex;gap:12px;align-items:center;position:sticky;top:0;background:#0b1018;padding:8px 0;z-index:2}
+button{font:inherit;padding:10px 18px;border:1px solid #607086;border-radius:10px;background:#1b2635;color:white;cursor:pointer}
+button:disabled{opacity:.45}#count{font-variant-numeric:tabular-nums;color:#bdc9d8}#meta{color:#bdc9d8;margin:8px 0 16px;white-space:pre-wrap}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+figure{margin:0;padding:12px;background:#161f2b;border:1px solid #2a3747;border-radius:14px;min-width:0}
+figcaption{font-weight:650;margin-bottom:8px}img{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain;background:#10151d;border-radius:8px}
+#diag{margin-top:16px;padding:14px;background:#161f2b;border:1px solid #2a3747;border-radius:12px;white-space:pre-wrap;line-height:1.55}
+@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr}}
+</style></head><body>
 <header><button id="prev">← Previous</button><button id="next">Next →</button><span id="count"></span></header><div id="meta"></div>
-<main class="grid"><figure><figcaption>Dataset preview</figcaption><img id="preview"></figure><figure><figcaption>Local target JSON render</figcaption><img id="target"></figure><figure><figcaption>Raw Qwen proposal</figcaption><img id="raw"></figure><figure><figcaption>Engine, Qwen off</figcaption><img id="base"></figure><figure><figcaption>Engine, Qwen on</figcaption><img id="adapter"></figure></main>
-<section id="diag"></section>
-<p>Use the arrow keys or buttons to compare. These are held-out examples. Qwen output still passes through the normal engine pipeline.</p>
-<script>const rows={data};let i=0;function show(){{const r=rows[i];for(const key of ['preview','target','raw','base','adapter'])document.getElementById(key).src=r[key];document.getElementById('meta').textContent=`${{r.pair_id}} · ${{r.canvas.width}}×${{r.canvas.height}} · ${{r.element_count}} elements · off: ${{r.off_status}} · on: ${{r.on_status}}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${{i+1}} / ${{rows.length}}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}}function move(d){{i=Math.max(0,Math.min(rows.length-1,i+d));show()}}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)}});show();</script></body></html>'''
+<main class="grid">
+<figure><figcaption>Dataset preview</figcaption><img id="preview"></figure>
+<figure><figcaption>Local target JSON render (unadjusted)</figcaption><img id="target"></figure>
+<figure><figcaption>Qwen proposal after decoder checks</figcaption><img id="raw"></figure>
+<figure><figcaption>Micro-repaired Qwen proposal</figcaption><img id="micro"></figure>
+<figure><figcaption>Engine, Qwen off</figcaption><img id="base"></figure>
+<figure><figcaption>Engine, Qwen on</figcaption><img id="adapter"></figure></main>
+<section id="diag"></section><p>Use arrow keys or buttons to compare. This review uses the starter renderer without the dataset-only tight-text-width adjustment. The micro-repaired image shows Qwen geometry after source-evidenced local repairs; the engine output also applies its standard constraints and ranking.</p>
+<script>const rows=__ROWS__;let i=0;function show(){const r=rows[i];for(const key of ['preview','target','raw','micro','base','adapter'])document.getElementById(key).src=r[key]||'';document.getElementById('meta').textContent=`${r.pair_id} · ${r.canvas.width}×${r.canvas.height} · ${r.element_count} elements · off: ${r.off_status} · on: ${r.on_status}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${i+1} / ${rows.length}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}function move(d){i=Math.max(0,Math.min(rows.length-1,i+d));show()}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)});show();</script></body></html>'''.replace('__ROWS__',data)
 
 
 def main():
@@ -99,21 +123,24 @@ def main():
     parser.add_argument("--input",type=Path,default=ROOT/"data"/"qwen_lora"/"test.jsonl")
     parser.add_argument("--output",type=Path,default=OUT_DIR)
     parser.add_argument("--limit",type=int,default=8)
+    parser.add_argument("--raw-starter-renderer",action="store_true",
+                        help="Skip the dataset-only text-width tolerance for every review render")
     args=parser.parse_args()
     if args.limit<1:parser.error("--limit must be positive")
     os.environ["MAGICANVAS_DATASET_RENDERING"]="1"
     from scripts.dataset_renderer import render_design_to_png
-    from engine.qwen_prompt import decode_v2_completion
+    from engine.qwen_prompt import decode_v2_completion, record_prompt_version
     indexes={split:_index(folder) for split,folder in SPLIT_DIRS.items()}
     records=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if records:
-        prompt_version=2 if "box" in json.loads(records[0]["messages"][-1]["content"])["elements"][0] else 1
-        if prompt_version==2:
+        if len({record_prompt_version(row) for row in records})!=1:raise SystemExit("Mixed prompt versions in review input")
+        prompt_version=record_prompt_version(records[0])
+        if prompt_version in (2,3):
             import engine.qwen_seed as qwen_seed
             marker=qwen_seed.ADAPTER_DIR/"magicanvas_prompt_version.txt"
             adapter_version=int(marker.read_text().strip()) if marker.is_file() else 1
-            if adapter_version!=2:
-                raise SystemExit(f"Held-out JSONL requires prompt v2, but installed adapter is v{adapter_version}. Train/install the v2 adapter before building this comparison.")
+            if adapter_version!=prompt_version:
+                raise SystemExit(f"Held-out JSONL requires prompt v{prompt_version}, but installed adapter is v{adapter_version}. Train/install the v2 adapter before building this comparison.")
         os.environ["MAGICANVAS_QWEN_PROMPT_VERSION"]=str(prompt_version)
     selected=_select(records,args.limit)
     args.output.mkdir(parents=True,exist_ok=True)
@@ -130,50 +157,93 @@ def main():
         with Image.open(preview_path) as image:preview_size=image.size
         target_path=args.output/f"{prefix}_target.png"
         render_design_to_png(target,SPLIT_DIRS[target_split],target_path,
-                             ROOT/"data"/"crello_fonts.pickle")
+                             ROOT/"data"/"crello_fonts.pickle",
+                             adjust_tight_text_widths=not args.raw_starter_renderer)
         with Image.open(target_path) as image:
             if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(target_path)
-        off,off_report,_=_render_candidate(source,target_canvas,False)
-        on,on_report,raw_qwen=_render_candidate(source,target_canvas,True)
+        off,off_report,_,_=_render_candidate(source,target_canvas,False)
+        on,on_report,raw_qwen,micro_qwen=_render_candidate(source,target_canvas,True)
         off_path=args.output/f"{prefix}_qwen_off.png";on_path=args.output/f"{prefix}_qwen_on.png"
         raw_path=args.output/f"{prefix}_raw_qwen.png"
+        micro_path=args.output/f"{prefix}_micro_qwen.png"
         if raw_qwen is not None:
             import engine.resize as resize_module
             backgrounds,_=resize_module._analyze(source)
             raw_design=resize_module._assemble(raw_qwen,backgrounds,source,
                                                target_canvas["width"],target_canvas["height"])
             raw_warnings=render_design_to_png(raw_design,SPLIT_DIRS[source_split],raw_path,
-                                              ROOT/"data"/"crello_fonts.pickle")
+                                              ROOT/"data"/"crello_fonts.pickle",
+                                              adjust_tight_text_widths=not args.raw_starter_renderer)
             with Image.open(raw_path) as image:
                 if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(raw_path)
         else:
             raw_warnings=["Qwen did not return a proposal"]
+        if micro_qwen is not None:
+            import engine.resize as resize_module
+            backgrounds,_=resize_module._analyze(source)
+            micro_design=resize_module._assemble(micro_qwen,backgrounds,source,
+                                                target_canvas["width"],target_canvas["height"])
+            micro_warnings=render_design_to_png(micro_design,SPLIT_DIRS[source_split],micro_path,
+                                                ROOT/"data"/"crello_fonts.pickle",
+                                                adjust_tight_text_widths=not args.raw_starter_renderer)
+            with Image.open(micro_path) as image:
+                if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(micro_path)
+        else:
+            micro_warnings=["No Qwen proposal to micro-repair"]
         off_warnings=render_design_to_png(off,SPLIT_DIRS[source_split],off_path,
-                                          ROOT/"data"/"crello_fonts.pickle")
+                                          ROOT/"data"/"crello_fonts.pickle",
+                                          adjust_tight_text_widths=not args.raw_starter_renderer)
         on_warnings=render_design_to_png(on,SPLIT_DIRS[source_split],on_path,
-                                        ROOT/"data"/"crello_fonts.pickle")
+                                        ROOT/"data"/"crello_fonts.pickle",
+                                        adjust_tight_text_widths=not args.raw_starter_renderer)
         for path in (off_path,on_path):
             with Image.open(path) as image:
                 if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(path)
         target_payload=json.loads(row["messages"][-1]["content"])
-        target_answer=(decode_v2_completion(target_payload,source,target_canvas)["elements"]
+        target_answer=(decode_v2_completion(target_payload,source,target_canvas,record_prompt_version(row))["elements"]
                        if target_payload.get("elements") and "box" in target_payload["elements"][0]
                        else target_payload["elements"])
+        import engine.resize as resize_module
+        _,source_units=resize_module._analyze(source)
+        source_ids={e['id'] for e in source['elements']}
+        hard_checks={}
+        for label,design in (("qwen_off",off),("qwen_on",on)):
+            output_ids={e['id'] for e in design.get('elements',[])}
+            hard_checks[label]={
+                "all_source_ids_preserved":output_ids==source_ids,
+                "missing_ids":sorted(source_ids-output_ids),
+                "extra_ids":sorted(output_ids-source_ids),
+                "unintended_text_overlaps":resize_module._unintended_text_overlaps(
+                    design.get('elements',[]),source_units),
+            }
+        if raw_qwen is not None:
+            backgrounds,_=resize_module._analyze(source)
+            raw_design=resize_module._assemble(raw_qwen,backgrounds,source,
+                                               target_canvas["width"],target_canvas["height"])
+            hard_checks['raw_qwen']={
+                "all_source_ids_preserved":{e['id'] for e in raw_design['elements']}==source_ids,
+                "unintended_text_overlaps":resize_module._unintended_text_overlaps(
+                    raw_design['elements'],source_units),
+            }
         qdiag=on_report.get("qwen_diagnostics",{})
-        pipeline_elements=qdiag.get("optimized_elements") or qdiag.get("constrained_elements")
+        pipeline_elements=qdiag.get("constrained_elements")
         raw_metrics=_geometry_metrics(raw_qwen,target_answer,target_canvas) if raw_qwen else None
         constrained_metrics=_geometry_metrics(pipeline_elements,target_answer,target_canvas) if pipeline_elements else None
         final_metrics=_geometry_metrics(on["elements"],target_answer,target_canvas)
         off_metrics=_geometry_metrics(off["elements"],target_answer,target_canvas)
         visual_report=on_report.get("visual",{})
-        siglip_report=visual_report.get("perceptual",{})
+        siglip_report=dict(visual_report.get("perceptual",{}))
+        siglip_report.update({k:visual_report[k] for k in
+                              ("objective_cost_components","rejected_contrast_variants")
+                              if k in visual_report})
         diagnostics=(f"Qwen status: {qdiag.get('status','not reported')}\n"
                      f"Proposal received: {qdiag.get('proposal_received',False)} · "
                      f"constraints accepted: {qdiag.get('constraint_feasible',False)} · "
                      f"optimized: {qdiag.get('optimized',False)}\n"
                      f"Qwen candidate energy: {qdiag.get('optimized_energy',qdiag.get('constrained_energy','n/a'))} · "
                      f"engine winner: {on_report.get('winner','unknown')} · "
-                     f"Qwen win: {on_report.get('winner')=='qwen-proposal'}\n"
+                     f"Qwen win: {on_report.get('winner','').startswith('qwen-')}\n"
+                     f"Hard checks: {hard_checks}\n"
                      f"Target geometry MAE (normalized): raw Qwen {raw_metrics['geometry_mae'] if raw_metrics else 'n/a'} · "
                      f"after engine constraints {constrained_metrics['geometry_mae'] if constrained_metrics else 'n/a'} · "
                      f"final Qwen-on engine {final_metrics['geometry_mae']} · "
@@ -184,21 +254,38 @@ def main():
                      f"Qwen eligible: {siglip_report.get('qwen_eligible',False)} · "
                      f"safety: {siglip_report.get('qwen_safety_checks','n/a')}\n"
                      f"Interpretation: Qwen proposes geometry; the engine applies constraints, repairs, renders, and ranks candidates.")
-        entries.append({"pair_id":row["pair_id"],"canvas":target_canvas,
+        # Persist model and engine geometry as text evidence as well as PNGs.
+        output_dir=args.output/"candidate_outputs"
+        output_dir.mkdir(exist_ok=True)
+        output_file=output_dir/f"{prefix}.json"
+        output_file.write_text(json.dumps(dict(pair_id=row['pair_id'],source=source,
+            target_canvas=target_canvas,decoded_model=qdiag.get('model_elements'),
+            decoder_checked=raw_qwen,relationship_repaired=micro_qwen,
+            qwen_off=off,qwen_on=on,winner=on_report.get('winner')),ensure_ascii=False,indent=2)+"\n")
+        entries.append({"candidate_output":str(output_file.relative_to(args.output)),"pair_id":row["pair_id"],"canvas":target_canvas,
                         "element_count":len(source["elements"]),
                         "preview":os.path.relpath(preview_path,args.output),
                         "target":target_path.name,"raw":raw_path.name if raw_qwen is not None else "",
+                        "micro":micro_path.name if micro_qwen is not None else "",
                         "base":off_path.name,"adapter":on_path.name,
                         "off_status":"render warnings" if off_warnings else "rendered",
                         "on_status":"render warnings" if on_warnings else "rendered",
                         "off_warnings":off_warnings,"on_warnings":on_warnings,
                         "raw_warnings":raw_warnings,
+                        "hard_checks":hard_checks,
                         "diagnostics":diagnostics,
                         "qwen_diagnostics":{k:v for k,v in qdiag.items() if not k.endswith('_elements')},
                         "siglip_diagnostics":{k:v for k,v in siglip_report.items()
                                               if k in ("used","note","reason","qwen_eligible",
-                                                       "qwen_safety_checks","tie_band","scores",
-                                                       "objective_costs")},
+                                                       "qwen_safety_checks","trained_ranker_loaded","tie_band","scores",
+                                                       "objective_costs","objective_cost_components",
+                                                       "qwen_family_band","eligible_qwen_names",
+                                                       "rejected_contrast_variants")},
+                        "visual_candidate_diagnostics":[
+                            {k:c.get(k) for k in ("name","cost","checked","low_contrast",
+                                "invisible_text","contrast_by_text","busy_background","warnings","error")
+                             if k in c}
+                            for c in visual_report.get("candidates",[])],
                         "target_geometry_mae":{"raw_qwen":raw_metrics,"after_constraints":constrained_metrics,
                                                 "qwen_on_final":final_metrics,"qwen_off_final":off_metrics}})
         print(f"Rendered {number}/{len(selected)}: {row['pair_id']}",flush=True)

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build Qwen chat-format SFT examples from verified Crello resize pairs.
 
-Exact pairs are eligible for train/validation/test by their original split.
+Exact pairs are assigned to train/validation/test by connected template family.
 Core pairs are exported to a separate review-only JSONL and never enter the
-training/validation/test files.
+training/validation/test files. Optional direction caps apply per source
+template, while connected components remain the split-isolation unit.
 """
 from __future__ import annotations
 
@@ -17,14 +18,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from engine.qwen_prompt import messages_for
-from engine.resize import _fit_text
 PAIR_FILE = ROOT / "data" / "crello_verified_pairs.json"
 SPLIT_DIRS = {
     "train": ROOT / "data" / "crello_train",
     "validation": ROOT / "data" / "crello_validation",
     "test": ROOT / "data" / "crello_test",
 }
-DEFAULT_TRAIN_DIRECTION_CAP = 0  # Use every eligible exact direction by default.
+DEFAULT_TRAIN_SOURCE_CAP = 2
+DEFAULT_EVAL_SOURCE_CAP = 2
 
 
 def manifest_index(root):
@@ -53,7 +54,7 @@ def _project_geometry(source_element, target_element, source, target):
         return {"x":0.,"y":0.,"width":float(cw),"height":float(ch)}
     width=min(float(cw),max(1.,float(target_element["width"])))
     height=min(float(ch),max(1.,float(target_element["height"])))
-    if source_element["type"]=="image":
+    if source_element["type"]=="image" and source_element.get("fit")!="cover":
         aspect=float(source_element["width"])/max(1e-6,float(source_element["height"]))
         scale=min(width/max(1e-6,float(target_element["width"])),
                   height/max(1e-6,float(target_element["height"])))
@@ -65,17 +66,16 @@ def _project_geometry(source_element, target_element, source, target):
     y=min(ch-height,max(0.,float(target_element["y"])))
     result={"x":x,"y":y,"width":width,"height":height}
     if source_element["type"]=="text":
-        text=dict(source_element)
         desired=max(1.,float(target_element.get("font_size") or source_element.get("font_size") or 1))
-        source_font=max(1.,float(source_element.get("font_size") or 1))
-        text["letter_spacing"]=(float(source_element.get("letter_spacing",0))
-                                * desired/source_font)
-        text["font_size"]=desired
-        result["font_size"]=_fit_text(text,width,height,desired)
+        # This is supervised geometry from a verified human-designed target.
+        # Do not pass its font size through engine fit heuristics: local font
+        # metrics and safety padding can shrink exact target labels even when
+        # the source design intentionally uses a tightly fitted text box.
+        result["font_size"]=desired
     return result
 
 
-def build_example(pair, a_design, b_design, reverse=False):
+def build_example(pair, a_design, b_design, reverse=False, prompt_version=2):
     source, target = (b_design, a_design) if reverse else (a_design, b_design)
     source_info, target_info = (pair["b"], pair["a"]) if reverse else (pair["a"], pair["b"])
     mapping = {}
@@ -98,8 +98,10 @@ def build_example(pair, a_design, b_design, reverse=False):
         answers.append({"id":source_element["id"],**{k:round(v,2) for k,v in geom.items()}})
     completion = json.dumps({"elements": answers}, ensure_ascii=False, separators=(",", ":"))
     return {
-        "messages": messages_for(source,target["canvas"],completion,version=2),
+        "messages": messages_for(source,target["canvas"],completion,version=prompt_version),
         "pair_id": f"{source_info['id']}__to__{target_info['id']}",
+        "source_template_id":source_info["id"],
+        "prompt_version":prompt_version,
         "source_split": source_info["split"], "target_split": target_info["split"],
         "target_canvas": target["canvas"],
     }
@@ -136,12 +138,20 @@ def write_jsonl(path, records):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=Path, default=PAIR_FILE)
-    parser.add_argument("--output", type=Path, default=ROOT / "data" / "qwen_lora")
-    parser.add_argument("--train-family-cap", type=int, default=DEFAULT_TRAIN_DIRECTION_CAP,
-                        help="Maximum directed training examples per connected family; 0 keeps all eligible directions")
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--train-source-cap",type=int,default=DEFAULT_TRAIN_SOURCE_CAP,
+                        help="Maximum directed training examples per source template; 0 keeps all eligible directions")
+    parser.add_argument("--eval-source-cap",type=int,default=DEFAULT_EVAL_SOURCE_CAP,
+                        help="Maximum validation/test directions per source template; 0 keeps all")
+    parser.add_argument("--prompt-version",type=int,choices=(2,3),default=2,
+                        help="v2 short-side font encoding; experimental v3 geometric mean")
     args = parser.parse_args()
-    if args.train_family_cap < 0:
-        parser.error("--train-family-cap must be zero (unlimited) or positive")
+    if args.output is None:
+        args.output=ROOT/"data"/("qwen_lora_source_capped_v2" if args.prompt_version==2
+                                  else "qwen_lora_v3_source_capped")
+    if args.eval_source_cap<0:parser.error("--eval-source-cap must be nonnegative")
+    if args.train_source_cap < 0:
+        parser.error("--train-source-cap must be zero (unlimited) or positive")
     pair_doc = json.loads(args.pairs.read_text())
     indexes = {split: manifest_index(root) for split, root in SPLIT_DIRS.items()}
     designs = {}
@@ -155,7 +165,7 @@ def main():
         return designs[key]
 
     # Build exact-pair connected components before assigning examples. A family
-    # that leaks across upstream splits is omitted entirely from this export.
+    # that crosses upstream splits is assigned to exactly one model split.
     # Core links are excluded as supervised examples, but still connect likely
     # template families for leakage-safe grouping.
     family_edges=[p for p in pair_doc["pairs"]
@@ -220,37 +230,40 @@ def main():
             skipped[filter_reason]+=2
             continue
         for reverse in (False, True):
-            record = build_example(pair, ad, bd, reverse)
+            record = build_example(pair, ad, bd, reverse,prompt_version=args.prompt_version)
             if record is None:
                 skipped["unmappable"] += 1
                 continue
             record["model_split"]=assigned_split
+            record["family_id"]=family
             records_by_family[family][assigned_split].append(record)
 
     capped_train=0
     capped_eval=0
     for family,split_records in records_by_family.items():
         for split,records in split_records.items():
-            cap=args.train_family_cap if split=="train" else 12
-            if cap and len(records)>cap:
-                # Deterministic spread across canvas aspect ratios prevents a
-                # large template pack from dominating the training epoch.
-                records.sort(key=lambda r:(r["target_canvas"]["width"]/r["target_canvas"]["height"],r["pair_id"]))
-                n=cap
-                picks=sorted({round(i*(len(records)-1)/max(1,n-1)) for i in range(n)})
-                removed=len(records)-len(picks)
-                if split=="train":capped_train+=removed
-                else:capped_eval+=removed
-                records=[records[i] for i in picks]
-            exact_by_split[split].extend(records)
+            cap=args.train_source_cap if split=="train" else args.eval_source_cap
+            by_source=defaultdict(list)
+            for record in records:by_source[record["source_template_id"]].append(record)
+            retained=[]
+            for source_id,directions in by_source.items():
+                directions.sort(key=lambda r:(r["target_canvas"]["width"]/r["target_canvas"]["height"],r["pair_id"]))
+                if cap and len(directions)>cap:
+                    n=cap
+                    picks=sorted({round(i*(len(directions)-1)/max(1,n-1)) for i in range(n)})
+                    if split=="train":capped_train+=len(directions)-len(picks)
+                    else:capped_eval+=len(directions)-len(picks)
+                    directions=[directions[i] for i in picks]
+                retained.extend(directions)
+            exact_by_split[split].extend(retained)
 
     write_jsonl(args.output / "train.jsonl", exact_by_split["train"])
     write_jsonl(args.output / "validation.jsonl", exact_by_split["validation"])
     write_jsonl(args.output / "test.jsonl", exact_by_split["test"])
     write_jsonl(args.output / "core_review.jsonl", core_review)
     summary = {"dataset": pair_doc.get("dataset"), "revision": pair_doc.get("revision"),
-               "training_prompt_version": 2,
-               "coordinate_encoding": "normalized 0..1000 canvas fractions; font scale relative to short side",
+               "training_prompt_version": args.prompt_version,
+               "coordinate_encoding": "normalized 0..1000 canvas fractions; font scale relative to "+("short side" if args.prompt_version==2 else "sqrt(width*height)"),
                "source_pair_manifest": str(args.pairs),
                "exact_examples": {key: len(value) for key, value in exact_by_split.items()},
                "core_review_examples_not_for_training": len(core_review),
@@ -259,8 +272,10 @@ def main():
                "cross_split_families_reassigned": len(reassigned_cross_split_families),
                "family_split_policy":"stable hash of exact+core connected component (80/10/10)",
                "family_graph_edges":"exact and core matches; core remains review-only",
-               "train_family_direction_cap": args.train_family_cap or None,
+               "train_source_direction_cap":args.train_source_cap or None,
                "train_directions_removed_by_cap": capped_train,
+               "eval_source_direction_cap":args.eval_source_cap or None,
+               "families_per_split":{split:len({r["family_id"] for r in rows}) for split,rows in exact_by_split.items()},
                "validation_test_directions_removed_by_cap": capped_eval}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))

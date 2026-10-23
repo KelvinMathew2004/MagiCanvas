@@ -560,6 +560,7 @@ def _analyze(source):
     median=fonts[len(fonts)//2] if fonts else 24
     for u in units:
         u['font_median']=median
+        u['source_canvas']=(sw,sh)
     return backgrounds, units
 
 
@@ -1100,6 +1101,35 @@ def _sync_backing_panels(elements,units,width,height):
     return elements
 
 
+def _micro_snap_qwen_proposal(elements, units, width, height):
+    """Repair source-supported lockups and whole column chains jointly."""
+    from engine.qwen_refine import repair_relationships
+    return repair_relationships(elements, units, width, height)
+
+
+def _unintended_text_overlaps(elements, units):
+    """Return overlapping text pairs unless that overlap was present in source."""
+    source_text={e['id']:e for unit in units for e in unit['items']
+                 if e.get('type')=='text' and e.get('content','').strip()}
+    intentional=set()
+    source_values=list(source_text.values())
+    for i,a in enumerate(source_values):
+        for b in source_values[:i]:
+            if _overlap(_text_visible_bounds(a),_text_visible_bounds(b))>1.:
+                intentional.add(frozenset((a['id'],b['id'])))
+    candidate=[e for e in elements if e.get('type')=='text' and e.get('content','').strip()]
+    collisions=[]
+    for i,a in enumerate(candidate):
+        box_a=_text_visible_bounds(a)
+        for b in candidate[:i]:
+            pair=frozenset((a['id'],b['id']))
+            if pair in intentional:
+                continue
+            if _overlap(box_a,_text_visible_bounds(b))>1.:
+                collisions.append(tuple(sorted((a['id'],b['id']))))
+    return collisions
+
+
 def _decorations(units,width,height,sw,sh,occupied):
     result=[]
     for u in units:
@@ -1110,7 +1140,9 @@ def _decorations(units,width,height,sw,sh,occupied):
                 panel=deepcopy(u['items'][0])
                 _sync_backing_panels(children+[panel],[u],width,height)
                 result.append(panel)
-            continue
+                continue
+            # A standalone/fallback render still has to retain the panel when
+            # no adapted children were placed. Fall through to normal sizing.
         x,y,r,b=u['bounds']
         # Match the source's scale to the target's usable short side, then
         # search for modest growth when the surrounding layout leaves room.
@@ -2178,6 +2210,8 @@ def _feasible(elements, units, width, height, strict_margins=True, gap_factor=.0
            or e['x']+e['width'] > width+1e-5 or e['y']+e['height'] > height+1e-5
            for e in elements):
         return False
+    if _unintended_text_overlaps(elements,units):
+        return False
     records = [(u,_bounds(items)) for u,items in _records(elements,units)]
     gap = min(width,height)*gap_factor
     for i,(u,b) in enumerate(records):
@@ -3219,6 +3253,20 @@ def _luminance(rgb):
     return sum((v/12.92 if v<=.04045 else ((v+.055)/1.055)**2)*w for v,w in zip(channels,(.2126,.7152,.0722)))
 
 
+def _qwen_contrast_safe(candidate, baseline, qwen_primary=False):
+    """Compare soft warnings against available alternatives; invisible ink is hard."""
+    if candidate is None or candidate.get('invisible_text') or 'error' in candidate:
+        return False
+    baselines=baseline if isinstance(baseline,(list,tuple)) else [baseline]
+    baselines=[e for e in baselines if e is not None and not e.get('invisible_text') and 'error' not in e]
+    if not baselines:
+        return True
+    weak=min(len(e.get('low_contrast',[])) for e in baselines)
+    cost=min(e.get('cost',0.) for e in baselines)
+    return (len(candidate.get('low_contrast',[]))<=weak
+            or candidate.get('cost',0.)<=cost+1.25)
+
+
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
     """Rendered diagnostics plus an optional learned SigLIP perceptual judge.
 
@@ -3227,8 +3275,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     When the baked SigLIP weights are present, a learned image/text score is
     blended with the deterministic cost as a closer proxy for the PNG evaluator;
     otherwise the deterministic ranking is used unchanged. Either way this stage
-    only *reorders* candidates that already passed every hard constraint -- it
-    never edits geometry, text, assets, or the element list.
+    retains existing candidates and can add bounded source-local Qwen contrast
+    variants. Every added layout passes geometry checks and is rendered again.
     """
     if not candidates or width*height>16000000:
         return candidates[0],dict(used=False,reason='Canvas exceeds diagnostic raster budget')
@@ -3254,7 +3302,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                              default=None)
             if dataset_root is not None:
                 render_diagnostic=lambda doc,assets,path,max_size=640: render_crello_dataset(
-                    doc,dataset_root,path,_CRELLO_FONTS_PICKLE,max_size=max_size)
+                    doc,dataset_root,path,_CRELLO_FONTS_PICKLE,max_size=max_size,adjust_tight_text_widths=False)
                 diagnostic_assets=dataset_root
         except ImportError:
             pass
@@ -3263,22 +3311,17 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
     has_reflow=any(c['name']!='proportional' for c in candidates)
     shortlist=[];families=set()
+    qwen_candidates=[c for c in candidates if c['name'].startswith('qwen-')]
     for candidate in candidates:
         name=candidate['name']
-        if ratio_shift>=1.6 and has_reflow and name=='proportional':
-            continue
+        if name.startswith('qwen-'):continue
+        if ratio_shift>=1.6 and has_reflow and name=='proportional':continue
         family=re.sub(r'-\d+(?:\.\d+)?$','',name)
-        if family in families:
-            continue
+        if family in families:continue
         families.add(family);shortlist.append(candidate)
-        if len(shortlist)>=8:
-            break
-    qwen_candidate=next((candidate for candidate in candidates
-                         if candidate['name']=='qwen-proposal'),None)
-    if qwen_candidate is not None and qwen_candidate not in shortlist:
-        if len(shortlist)>=8:
-            shortlist.pop()
-        shortlist.append(qwen_candidate)
+        if len(shortlist)>=(4 if qwen_candidates else 8):break
+    # Keep combined font+position siblings available to the visual judge.
+    shortlist.extend(qwen_candidates[:6])
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
         reference_image=None
@@ -3305,6 +3348,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     under=image.convert('RGB')
                 ink=ImageChops.difference(full,under).convert('L')
                 cost,checked,weak,busy,invisible=0.,0,[],[],[]
+                contrast_by_text={}
                 for e in doc['elements']:
                     if e['type']!='text' or not e.get('content','').strip():
                         continue
@@ -3316,28 +3360,51 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     bottom=min(under.height,max(top+1,round((e['y']+e['height'])/height*under.height)))
                     if right<=left or bottom<=top:
                         continue
-                    patch=under.crop((left,top,right,bottom)).resize((8,8))
+                    under_crop=under.crop((left,top,right,bottom))
+                    ink_crop=ink.crop((left,top,right,bottom))
+                    backing_pixels=list(under_crop.getdata())
+                    ink_pixels=list(ink_crop.getdata())
+                    active_pixels=[pixel for pixel,mask in zip(backing_pixels,ink_pixels) if mask>12]
+                    if not active_pixels:
+                        cost+=3.;invisible.append(e['id']);weak.append(e['id']);checked+=1
+                        contrast_by_text[e['id']]=dict(minimum=None,lower_quintile=None,ink_pixels=0)
+                        continue
                     contrasts,lumas=[],[]
-                    for pixel in (patch.get_flattened_data() if hasattr(patch, 'get_flattened_data') else patch.getdata()):
+                    for pixel in active_pixels:
                         alpha=color[3]*e.get('opacity',1)
                         foreground=tuple(color[k]*alpha+pixel[k]*(1-alpha) for k in range(3))
                         a,b=_luminance(foreground),_luminance(pixel)
                         contrasts.append((max(a,b)+.05)/(min(a,b)+.05));lumas.append(b)
                     target=3 if e['font_size']>=24 or e.get('font_weight')=='bold' and e['font_size']>=18 else 4.5
-                    low=sorted(contrasts)[6]
+                    sorted_contrasts=sorted(contrasts)
+                    low=sorted_contrasts[max(0,len(sorted_contrasts)//5)]
+                    minimum=sorted_contrasts[0]
+                    contrast_by_text[e['id']]=dict(minimum=round(minimum,3),
+                                                   lower_quintile=round(low,3),
+                                                   ink_pixels=len(active_pixels))
                     deficit=max(0,(target-low)/target)
                     cost+=deficit*5
-                    if deficit>.03:
+                    if deficit>.03 or minimum<2.5:
                         weak.append(e['id'])
                     roughness=sum(abs(lumas[j]-lumas[j-1]) for j in range(1,len(lumas)) if j%8)/56
                     cost+=max(0,roughness-.04)*8
                     if roughness>.08:
                         busy.append(e['id'])
-                    if ink.crop((left,top,right,bottom)).getextrema()[1]<5:
-                        cost+=3;invisible.append(e['id'])
                     checked+=1
                 cost=cost/max(1,checked)+(8.0 if invisible else 0.0)+(4.0 if weak else 0.0)
-                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,warnings=warnings,image=full.copy()))
+                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,warnings=warnings,image=full.copy()))
+                if (candidate['name'].startswith('qwen-') and weak and not invisible
+                        and 'contrast-repaired' not in candidate['name']
+                        and sum('contrast-repaired' in c['name'] for c in shortlist)<4):
+                    from engine.qwen_refine import contrast_variant
+                    repairs,_=contrast_variant(candidate['elements'],units,width,height,weak,under,full,
+                                               return_alternatives=True)
+                    for repair_index,(repaired,changes) in enumerate(repairs,1):
+                        if sum('contrast-repaired' in c['name'] for c in shortlist)>=10:break
+                        shortlist.append(dict(name=f"{candidate['name']}-contrast-repaired-{repair_index:02d}",
+                            elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
+                            contrast_repairs=changes))
+
             except Exception as exc:
                 # Diagnostics are optional; isolate third-party renderer faults.
                 # Do not catch BaseException (interrupts and shutdown still work).
@@ -3345,40 +3412,72 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     if not entries or all('error' in item for item in entries):
         return candidates[0],dict(used=False,reason='Diagnostic rendering failed',errors=[e.get('error') for e in entries])
     valid=[e for e in entries if 'error' not in e]
-    heuristic_cost=lambda e:e['candidate']['energy']+e['cost']
+    # Contrast repair is only an alternative when the actual full-raster
+    # diagnostics confirm it improved the parent. Pixel-sampled contrast inside
+    # the proposal helper alone can miss new low-contrast glyphs elsewhere.
+    by_name={e['candidate']['name']:e for e in valid}
+    rejected_contrast=[]
+    filtered=[]
+    for entry in valid:
+        candidate=entry['candidate'];name=candidate['name']
+        if '-contrast-repaired-' not in name:
+            filtered.append(entry);continue
+        parent_name=name.split('-contrast-repaired-',1)[0]
+        parent=by_name.get(parent_name)
+        moved={eid for change in candidate.get('contrast_repairs',[])
+               for eid in (change.get('element_ids',[])+change.get('backing_for',[]))}
+        before=parent.get('contrast_by_text',{}) if parent else {}
+        after=entry.get('contrast_by_text',{})
+        worsened=[eid for eid in moved if eid in before and eid in after
+                  and before[eid].get('lower_quintile') is not None
+                  and after[eid].get('lower_quintile') is not None
+                  and after[eid]['lower_quintile']+1e-4<before[eid]['lower_quintile']]
+        before_count=len(parent.get('low_contrast',[])) if parent else 0
+        after_count=len(entry.get('low_contrast',[]))
+        failed_minimum=[eid for eid in moved if eid in before and eid in after
+            and before[eid].get('minimum') is not None and before[eid]['minimum']<3.0
+            and (after[eid].get('minimum') is None or after[eid]['minimum']<3.0)]
+        if (parent is None or after_count>=before_count or worsened or failed_minimum):
+            rejected_contrast.append(dict(name=name,parent=parent['candidate']['name'] if parent else None,
+                reason='low-contrast count did not decrease' if parent and after_count>=before_count
+                       else 'moved text minimum contrast stayed below 3.0' if failed_minimum
+                       else 'moved text contrast regressed' if worsened else 'parent unavailable'))
+        else:filtered.append(entry)
+    valid=filtered
+    objective_layout_costs=[_objective_layout_cost(e['candidate']['elements'],units,source,
+                width,height,desired,allow_text_visual_overlap=e['candidate']['name'].startswith('qwen-'))
+                for e in valid]
+    for entry,layout_cost in zip(valid,objective_layout_costs):
+        entry['layout_defect_cost']=layout_cost
+        entry['has_layout_defects']=(not _feasible(entry['candidate']['elements'],units,width,height,
+                strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
+                or bool(_unintended_text_overlaps(entry['candidate']['elements'],units))
+                or bool(entry.get('invisible_text')))
     objective_cost=lambda e:(_objective_layout_cost(e['candidate']['elements'],units,source,
-                                                    width,height,desired,
-                                                    allow_text_visual_overlap=e['candidate']['name']=='qwen-proposal')+e['cost'])
-    qwen_feasible=(qwen_candidate is not None and _feasible(
-        qwen_candidate['elements'],units,width,height,strict_margins=False,gap_factor=.004,
-        allow_text_visual_overlap=True))
-    state=_aspect_state(source,width,height)
+                width,height,desired,allow_text_visual_overlap=e['candidate']['name'].startswith('qwen-'))+e['cost'])
+    qwen_feasible={e['candidate']['name']:_feasible(e['candidate']['elements'],units,width,height,
+                    strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
+                   for e in valid if e['candidate']['name'].startswith('qwen-')}
     qwen_primary=abs(log(state['delta']))>=.12
     perceptual=_siglip_rerank(valid,objective_cost,reference_image,relationship_context,
                               qwen_feasible=qwen_feasible,qwen_primary=qwen_primary)
-    index=perceptual.get('selected_index')
-    if index is not None:
-        selected=valid[index]
-    elif qwen_primary and qwen_feasible:
-        qwen_entry=next((entry for entry in valid
-                         if entry['candidate']['name']=='qwen-proposal'),None)
-        heuristic_entries=[entry for entry in valid
-                           if entry['candidate']['name']!='qwen-proposal']
-        best_entry=min(heuristic_entries,key=heuristic_cost) if heuristic_entries else None
-        best_objective=min((objective_cost(entry) for entry in valid),default=float('inf'))
-        qwen_objective=objective_cost(qwen_entry) if qwen_entry is not None else float('inf')
-        defect_tolerance=max(6.,abs(best_objective)*.20)
-        safe=(qwen_entry is not None and not qwen_entry.get('invisible_text')
-              and qwen_objective<=best_objective+defect_tolerance
-              and (best_entry is None or
-                   len(qwen_entry.get('low_contrast',[]))<=len(best_entry.get('low_contrast',[]))))
-        selected=qwen_entry if safe else (best_entry or min(valid,key=heuristic_cost))
-    else:
-        selected=min(valid,key=heuristic_cost)
+    if perceptual.get('selected_index') is None:
+        fallback=_select_visual_candidate(valid,[objective_cost(e) for e in valid],[0.]*len(valid),
+                                           qwen_feasible,qwen_primary,False)
+        perceptual.update(fallback,used=False)
+    selected=valid[perceptual['selected_index']]
     report=dict(used=True,
                 method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
                 perceptual=perceptual,qwen_primary=qwen_primary,
-                candidates=[{k:v for k,v in e.items() if k not in ('candidate','image')}|{'name':e['candidate']['name']} for e in entries])
+                objective_cost_components=[dict(name=e['candidate']['name'],
+                    visual_cost=round(e['cost'],4),layout_defect_cost=round(layout_cost,4),
+                    total=round(e['cost']+layout_cost,4))
+                    for e,layout_cost in zip(valid,objective_layout_costs)],
+                candidates=[{k:v for k,v in e.items() if k not in ('candidate','image')}
+                            |{'name':e['candidate']['name'],
+                              'contrast_repairs':e['candidate'].get('contrast_repairs',[])}
+                            for e in entries],
+                rejected_contrast_variants=rejected_contrast)
     return selected['candidate'],report
 
 
@@ -3408,78 +3507,92 @@ def _visual_relationship_context(units,source,width,height):
                 callout_quadrants=sorted(set(quadrants)))
 
 
+def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary=False,
+                             ranker_trained=False):
+    """Rank safe Qwen siblings; keep objective and contrast bands explicit."""
+    qwen=[i for i,e in enumerate(valid) if e['candidate']['name'].startswith('qwen-')]
+    heur=[i for i in range(len(valid)) if i not in qwen]
+    baselines=[valid[i] for i in heur]
+    feasible=lambda i:(qwen_feasible.get(valid[i]['candidate']['name'],False)
+                       if isinstance(qwen_feasible,dict) else bool(qwen_feasible))
+    safe=[i for i in qwen if feasible(i) and _qwen_contrast_safe(valid[i],baselines,qwen_primary)]
+    best=min(range(len(costs)),key=costs.__getitem__)
+    tolerance=max(1.25,abs(costs[best])*.20)
+    global_band=[i for i,c in enumerate(costs) if c<=costs[best]+tolerance]
+    best_heuristic=min(heur,key=lambda i:costs[i]) if heur else None
+    family_band=[]
+    if safe:
+        family_best=min(costs[i] for i in safe)
+        family_tol=max(1.25,abs(family_best)*.20)
+        family_band=[i for i in safe if costs[i]<=family_best+family_tol]
+        # First minimize the number of weak text elements across safe family
+        # candidates. Compare rendered/objective cost next, with SigLIP only a
+        # tie-break among candidates with the same contrast result.
+        contrast_best=min(len(valid[i].get('low_contrast',[])) for i in family_band)
+        contrast_band=[i for i in family_band
+                       if len(valid[i].get('low_contrast',[]))==contrast_best]
+        qchoice=max(contrast_band,key=lambda i:scores[i]
+                    -.15*(costs[i]-family_best)/max(family_tol,1e-9))
+        # When a rendered contrast repair is a safe member of the same family
+        # band and fixes more weak text, prefer it over its un-repaired parent.
+        by_name={valid[i]['candidate']['name']:i for i in family_band}
+        repaired=[]
+        for i in family_band:
+            name=valid[i]['candidate']['name']
+            if '-contrast-repaired-' not in name or valid[i].get('has_layout_defects',True):continue
+            parent=by_name.get(name.split('-contrast-repaired-',1)[0])
+            if parent is None:continue
+            if len(valid[i].get('low_contrast',[]))<len(valid[parent].get('low_contrast',[])):
+                repaired.append(i)
+        if repaired and contrast_best>0:
+            # If no candidate clears all weak text, preserve the strongest
+            # safe repair within the minimum-contrast family band.
+            repaired=[i for i in repaired if i in contrast_band]
+            if repaired:qchoice=max(repaired,key=lambda i:scores[i]
+                                    -.15*(costs[i]-family_best)/max(family_tol,1e-9))
+    else:qchoice=None
+    eligible=[i for i in global_band if i not in qwen or i in safe]
+    if not eligible:eligible=heur or safe or [best]
+    chosen=max(eligible,key=lambda i:scores[i]-.10*(costs[i]-costs[best])/tolerance)
+    if qchoice is not None and qwen_primary:
+        # A trained domain judge can veto the family with a strong preference;
+        # unvalidated zero-shot scores select within Qwen's local trust region.
+        alternatives=[i for i in eligible if i not in qwen and not valid[i].get('invisible_text')]
+        veto=max(alternatives,key=lambda i:scores[i]) if alternatives else None
+        chosen=(veto if ranker_trained and veto is not None and scores[veto]>scores[qchoice]+.15 else qchoice)
+    checked=qchoice if qchoice is not None else (qwen[0] if qwen else None)
+    return dict(selected_index=chosen,objective_costs=[round(c,4) for c in costs],
+        tie_band=global_band,qwen_family_band=family_band,tolerance=round(tolerance,4),
+        qwen_eligible=bool(safe),eligible_qwen_names=[valid[i]['candidate']['name'] for i in safe],
+        trained_ranker_loaded=ranker_trained,
+        qwen_safety_checks=dict(feasible=bool(checked is not None and feasible(checked)),
+            no_invisible_text=bool(checked is not None and not valid[checked].get('invisible_text')),
+            contrast_within_tolerance=bool(checked is not None and _qwen_contrast_safe(valid[checked],baselines,qwen_primary)),
+            qwen_primary=qwen_primary,objective_within_band=checked in family_band,
+            objective_within_global_band=checked in global_band,
+            siglip_margin=bool(checked is not None and best_heuristic is not None and scores[checked]>scores[best_heuristic]+.03)),
+        overrode_heuristic=chosen!=best_heuristic)
+
+
 def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=None,
                    qwen_feasible=False, qwen_primary=False):
-    """Optional learned SigLIP tie-break among already-valid candidate renders.
-
-    Returns a diagnostic dict. When used, ``selected_index`` points at the chosen
-    entry in ``valid``; otherwise it is ``None`` and the caller keeps the pure
-    heuristic winner. SigLIP may only pick among candidates whose heuristic cost
-    (layout energy + legibility/busyness cost) is within a near-tie band of the
-    best -- so it reorders geometry-preference ties but can never rescue a
-    materially worse (e.g. illegible or off-balance) layout. Degrades to a no-op
-    when torch/transformers or the baked weights are absent.
-    """
+    """Optional visual scoring with a deterministic family-aware fallback."""
     if len(valid)<2:
         return dict(used=False,selected_index=None,reason='Fewer than two candidates to compare')
+    ranker_trained=False;scores=None;note='SigLIP unavailable'
     try:
-        from engine.vision import score_layouts
+        from engine.vision import score_layouts, _load_ranker
+        ranker_trained=_load_ranker() is not None
+        result=score_layouts([e['image'] for e in valid],reference_image=reference_image,
+                            layout_context=layout_context) if len(valid)>1 else None
+        if result is not None:scores,note=result
     except Exception as exc:
-        return dict(used=False,selected_index=None,reason=f'Vision module unavailable: {exc}')
-    result=score_layouts([e['image'] for e in valid],reference_image=reference_image,
-                         layout_context=layout_context)
-    if result is None:
-        return dict(used=False,selected_index=None,reason='SigLIP returned no scores')
-    scores,note=result
-    if scores is None:
-        return dict(used=False,selected_index=None,reason=note)
-    costs=[objective_cost(e) for e in valid]
-    best_cost=min(costs)
-    tolerance=max(6.0,abs(best_cost)*.20)
-    qwen_indices=[i for i,e in enumerate(valid)
-                  if e['candidate']['name']=='qwen-proposal']
-    heuristic_indices=[i for i,e in enumerate(valid)
-                       if e['candidate']['name']!='qwen-proposal']
-    best_heuristic=min(heuristic_indices,key=lambda i:costs[i]) if heuristic_indices else None
-    band=[i for i,c in enumerate(costs)
-          if c<=best_cost+tolerance and i not in qwen_indices]
-    qwen_eligible=False
-    if qwen_indices and best_heuristic is not None and qwen_feasible:
-        qwen_index=qwen_indices[0]
-        qwen_entry=valid[qwen_index]
-        best_entry=valid[best_heuristic]
-        safety_ok=(not qwen_entry.get('invisible_text')
-                   and len(qwen_entry.get('low_contrast',[]))
-                       <=len(best_entry.get('low_contrast',[])))
-        defect_ok=costs[qwen_index]<=best_cost+tolerance
-        qwen_eligible=(safety_ok and defect_ok and
-                       (qwen_primary or scores[qwen_index]>scores[best_heuristic]+.03))
-        if qwen_eligible:
-            band.append(qwen_index)
-    if not band:
-        band=[best_heuristic] if best_heuristic is not None else [min(range(len(costs)),key=costs.__getitem__)]
-    # On real reflows, default to a safe Qwen layout. Let a heuristic take over
-    # only when SigLIP sees a clear quality advantage (>0.15).
-    if qwen_eligible and qwen_primary:
-        qwen_index=qwen_indices[0]
-        chosen=(best_heuristic if scores[best_heuristic]>scores[qwen_index]+.15
-                else qwen_index)
-    else:
-        chosen=max(band,key=lambda i:scores[i]-.10*(costs[i]-best_cost)/max(tolerance,1e-9))
-    return dict(used=True,note=note,selected_index=chosen,
-                scores=[round(s,4) for s in scores],
-                objective_costs=[round(c,4) for c in costs],
-                tie_band=band,tolerance=round(tolerance,4),
-                qwen_eligible=qwen_eligible,
-                qwen_safety_checks=dict(feasible=qwen_feasible,
-                                        no_invisible_text=(not qwen_indices or not valid[qwen_indices[0]].get('invisible_text')),
-                                        contrast_not_worse=(not qwen_indices or best_heuristic is None or
-                                            len(valid[qwen_indices[0]].get('low_contrast',[]))<=len(valid[best_heuristic].get('low_contrast',[]))),
-                                        qwen_primary=qwen_primary,
-                                        objective_within_band=(not qwen_indices or costs[qwen_indices[0]]<=best_cost+tolerance),
-                                        siglip_margin=(not qwen_indices or best_heuristic is None or
-                                            scores[qwen_indices[0]]>scores[best_heuristic]+.03)),
-                overrode_heuristic=chosen!=best_heuristic)
+        note=f'Vision module unavailable: {type(exc).__name__}: {exc}'
+    used=scores is not None and len(scores)==len(valid)
+    if not used:return dict(used=False,selected_index=None,reason=note)
+    report=_select_visual_candidate(valid,[objective_cost(e) for e in valid],scores,
+                                    qwen_feasible,qwen_primary,ranker_trained)
+    return dict(report,used=used,note=note,scores=[round(s,4) for s in scores])
 
 
 def _assemble(elements,backgrounds,source,width,height):
@@ -3564,11 +3677,31 @@ def _adapt_with_diagnostics(source,target_canvas):
     if os.environ.get('MAGICANVAS_QWEN_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         try:
             from engine.qwen_seed import generate_seed
-            proposal, qwen_status = generate_seed(source, target_canvas, seeds[0]['elements'])
+            generation={}
+            proposal, qwen_status = generate_seed(source, target_canvas, seeds[0]['elements'],diagnostics=generation)
+            qwen_diagnostics['generation']={k:v for k,v in generation.items() if k!='model_elements'}
+            qwen_diagnostics['model_elements']=[dict(id=eid,**values) for eid,values in generation.get('model_elements',{}).items()]
             qwen_diagnostics['status'] = qwen_status
             if proposal is not None:
+                from engine.qwen_refine import anchor_superscripts, font_variant
+                original_proposal=deepcopy(proposal)
+                proposal,snapped_labels=_micro_snap_qwen_proposal(proposal,units,width,height)
+                # Keep compact source-linked superscripts attached in the
+                # primary proposal as well as in the calibrated sibling.
+                proposal,anchor_changes=anchor_superscripts(proposal,units)
                 qwen_diagnostics['proposal_received'] = True
+                qwen_diagnostics['micro_snapped_labels']=snapped_labels
+                qwen_diagnostics['superscript_anchored_ids']=anchor_changes
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
+                if original_proposal!=proposal:
+                    seeds.append(dict(name='qwen-original',elements=original_proposal))
+                calibrated,font_changes=font_variant(proposal,units,width,height)
+                qwen_diagnostics['font_calibrated_ids']=font_changes
+                if calibrated!=proposal:
+                    # Relationship repair sets shared transforms and source
+                    # offsets. Running it again would overwrite measured font
+                    # sizes with source-scaled fonts, silently undoing the fit.
+                    seeds.append(dict(name='qwen-font-fitted',elements=calibrated))
         except Exception as exc:
             qwen_status = f'Qwen proposal unavailable: {type(exc).__name__}: {exc}'
             qwen_diagnostics['status'] = qwen_status
@@ -3635,9 +3768,12 @@ def _adapt_with_diagnostics(source,target_canvas):
     feasible=[]
     rejected=[]
     for seed in seeds:
-        _sync_backing_panels(seed['elements'],units,width,height)
         projected=None
-        qwen_seed=seed['name']=='qwen-proposal'
+        qwen_seed=seed['name'].startswith('qwen-')
+        if not qwen_seed:
+            _sync_backing_panels(seed['elements'],units,width,height)
+        elif _unintended_text_overlaps(seed['elements'],units):
+            qwen_diagnostics['constraint_reason']='unintended text-on-text overlap'
         if qwen_seed and _feasible(seed['elements'],units,width,height,
                                    strict_margins=False,gap_factor=.004,
                                    allow_text_visual_overlap=True):
@@ -3661,7 +3797,7 @@ def _adapt_with_diagnostics(source,target_canvas):
                 projected=seed['elements']
         if projected is None:
             rejected.append(seed)
-            if seed['name'] == 'qwen-proposal':
+            if seed['name'] == 'qwen-proposal' and 'constraint_reason' not in qwen_diagnostics:
                 qwen_diagnostics['constraint_reason'] = 'rejected by layout constraints'
         else:
             energy=_energy(projected,units,source,width,height,desired)
@@ -3671,7 +3807,7 @@ def _adapt_with_diagnostics(source,target_canvas):
                                         constrained_elements=deepcopy(projected),
                                         constrained_energy=energy)
     # Spend a bounded repair budget on the most promising rejected seeds.
-    rejected=[seed for seed in rejected if seed['name']!='qwen-proposal']
+    rejected=[seed for seed in rejected if not seed['name'].startswith('qwen-')]
     rejected.sort(key=lambda c:_constraint_violation(c['elements'],units,width,height))
     recovered=0
     for i,seed in enumerate(rejected[:3]):
@@ -3688,15 +3824,14 @@ def _adapt_with_diagnostics(source,target_canvas):
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
     optimize_candidates=feasible[:10]
-    qwen_candidate=next((candidate for candidate in feasible
-                         if candidate['name']=='qwen-proposal'),None)
-    if qwen_candidate is not None and qwen_candidate not in optimize_candidates:
-        optimize_candidates=optimize_candidates+[qwen_candidate]
+    for candidate in feasible:
+        if candidate['name'].startswith('qwen-') and candidate not in optimize_candidates:
+            optimize_candidates.append(candidate)
     for i,candidate in enumerate(optimize_candidates):
-        is_qwen=candidate['name']=='qwen-proposal'
+        is_qwen=candidate['name'].startswith('qwen-')
         if is_qwen:
-            # Keep Qwen's feasible geometry as its own candidate. A separate
-            # heuristic seed supplies the polished alternative if useful.
+            # Retain this geometry; bounded source-local refinement is added
+            # below as a sibling rather than overwriting the proposal.
             elements=deepcopy(candidate['elements'])
             optimization=dict(before=candidate['energy'],after=candidate['energy'],accepted=0,iterations=0)
         elif candidate['name']=='dense-short-banner' and _feasible(candidate['elements'],units,width,height):
@@ -3725,17 +3860,40 @@ def _adapt_with_diagnostics(source,target_canvas):
             _repair_sparse_vertical_stack(elements,units,width,height)
             _align_peer_rows(elements,units)
         optimized.append(dict(name=candidate['name'],elements=elements,energy=_energy(elements,units,source,width,height,desired),optimization=optimization))
-        if candidate['name'] == 'qwen-proposal':
-            qwen_diagnostics.update(optimized=True,
-                                    optimized_elements=deepcopy(elements),
-                                    optimized_energy=_energy(elements,units,source,width,height,desired),
-                                    optimization=optimization)
+        if candidate['name'] in ('qwen-proposal','qwen-font-fitted'):
+            from engine.qwen_refine import polish_variant
+            local,search=polish_variant(elements,units,source,width,height,desired)
+            if candidate['name']=='qwen-proposal':
+                qwen_diagnostics.update(optimized=search['accepted']>0,
+                                        optimized_elements=deepcopy(local),
+                                        optimized_energy=_energy(local,units,source,width,height,desired),
+                                        optimization=search)
+                local_name='qwen-local-refined'
+            else:
+                local_name='qwen-local-refined-font-fitted'
+            # Keep the combined font-and-position sibling even when the bounded
+            # position search accepts no move: calibration itself is a distinct
+            # candidate and must be judged against its uncalibrated parent.
+            if search['accepted'] or candidate['name']=='qwen-font-fitted':
+                optimized.append(dict(name=local_name,elements=local,
+                    energy=_energy(local,units,source,width,height,desired),optimization=search))
+    # Reapply measured superscript anchoring after all position searches so a
+    # local refinement cannot restore a model-proposed box-edge offset.
+    if any(c['name'].startswith('qwen-') for c in optimized):
+        from engine.qwen_refine import anchor_superscripts
+        anchored_ids=set()
+        for candidate in optimized:
+            if not candidate['name'].startswith('qwen-'):continue
+            candidate['elements'],changed=anchor_superscripts(candidate['elements'],units)
+            candidate['energy']=_energy(candidate['elements'],units,source,width,height,desired)
+            anchored_ids.update(changed)
+        if anchored_ids:qwen_diagnostics['superscript_anchored_ids']=sorted(anchored_ids)
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
     qwen_diagnostics['winner'] = winner['name']
-    if qwen_diagnostics['constraint_feasible'] and not qwen_diagnostics['optimized']:
-        qwen_diagnostics['pruned_before_optimization'] = True
+    qwen_diagnostics['variants']=sorted({c['name'] for c in optimized+visual.get('candidates',[])
+                                        if c['name'].startswith('qwen-')})
     output=_assemble(winner['elements'],backgrounds,source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
@@ -3744,9 +3902,9 @@ def _adapt_with_diagnostics(source,target_canvas):
                 visual=visual,qwen=qwen_status,qwen_diagnostics=qwen_diagnostics,
                 hard_constraints_passed=_feasible(
                     winner['elements'],units,width,height,
-                    strict_margins=winner['name']!='qwen-proposal',
-                    gap_factor=.004 if winner['name']=='qwen-proposal' else .008,
-                    allow_text_visual_overlap=winner['name']=='qwen-proposal'),
+                    strict_margins=not winner['name'].startswith('qwen-'),
+                    gap_factor=.004 if winner['name'].startswith('qwen-') else .008,
+                    allow_text_visual_overlap=winner['name'].startswith('qwen-')),
                 seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),total=round(perf_counter()-start,4)))
     return output,report
 

@@ -7,11 +7,23 @@ instead of memorizing UUIDs and resolutions.
 from __future__ import annotations
 
 import json
+from math import sqrt
 SYSTEM = (
     "You predict geometry for resizing an existing graphic design. Return "
     "only the requested JSON. Preserve every element, its content, type, and "
     "source-evidenced relationships."
 )
+
+
+def font_reference(canvas, version=2):
+    width,height=float(canvas['width']),float(canvas['height'])
+    return sqrt(width*height) if version==3 else min(width,height)
+
+
+def record_prompt_version(row):
+    if 'prompt_version' in row:return int(row['prompt_version'])
+    answer=json.loads(row['messages'][-1]['content'])
+    return 2 if answer.get('elements') and 'box' in answer['elements'][0] else 1
 
 
 def _v1_prompt(source, target_canvas):
@@ -57,7 +69,7 @@ def _overlap(a, b):
     return iw * ih
 
 
-def _v2_prompt(source, target_canvas):
+def _v2_prompt(source, target_canvas, version=2):
     sw, sh = float(source["canvas"]["width"]), float(source["canvas"]["height"])
     tw, th = float(target_canvas["width"]), float(target_canvas["height"])
     aliases = {e["id"]: f"e{i:03d}" for i, e in enumerate(source["elements"])}
@@ -75,7 +87,7 @@ def _v2_prompt(source, target_canvas):
         if element["type"] == "text":
             row.update(text=str(element.get("content", ""))[:120],
                        font=element.get("font_family", ""),
-                       font_scale=round(float(element.get("font_size", 1)) / min(sw, sh) * 1000, 2),
+                       font_scale=round(float(element.get("font_size", 1)) / font_reference(source["canvas"],version) * 1000, 2),
                        align=element.get("text_align", "left"),
                        weight=element.get("font_weight", "regular"),
                        color=element.get("color", ""))
@@ -122,11 +134,11 @@ def _v2_prompt(source, target_canvas):
             break
 
     return (
-        "Layout prediction format v2. Every box is normalized independently to its canvas: "
+        f"Layout prediction format v{version}. Every box is normalized independently to its canvas: "
         "[x,y,width,height] where 0..1000 spans the full canvas width or height. "
-        "font_scale is font size divided by the canvas short side, then multiplied by 1000.\n"
-        f"Source aspect ratio: {sw / sh:.5f}; target aspect ratio: {tw / th:.5f}; "
-        f"target/source short-side ratio: {min(tw, th) / min(sw, sh):.5f}.\n"
+        + ("font_scale is font size divided by " + ("the canvas short side" if version==2 else "sqrt(canvas width * canvas height)") + ", then multiplied by 1000.\n")
+        + f"Source aspect ratio: {sw / sh:.5f}; target aspect ratio: {tw / th:.5f}; "
+        f"target/source {'short-side' if version==2 else 'font-reference'} ratio: {font_reference(target_canvas,version) / font_reference(source['canvas'],version):.5f}.\n"
         "Source elements:\n" + json.dumps(items, ensure_ascii=False, separators=(",", ":"))
         + "\nSource relationships [kind, element IDs, optional layer order]:\n"
         + json.dumps(relations, ensure_ascii=False, separators=(",", ":"))
@@ -140,12 +152,12 @@ def _v2_prompt(source, target_canvas):
     )
 
 
-def encode_v2_completion(completion, source, target_canvas):
+def encode_v2_completion(completion, source, target_canvas, version=2):
     payload = json.loads(completion) if isinstance(completion, str) else completion
     elements = source["elements"]
     aliases = {e["id"]: f"e{i:03d}" for i, e in enumerate(elements)}
     cw, ch = float(target_canvas["width"]), float(target_canvas["height"])
-    short = min(cw, ch)
+    short = font_reference(target_canvas,version)
     encoded = []
     for row in payload["elements"]:
         eid = row["id"]
@@ -158,17 +170,20 @@ def encode_v2_completion(completion, source, target_canvas):
     return json.dumps({"elements": encoded}, ensure_ascii=False, separators=(",", ":"))
 
 
-def decode_v2_completion(payload, source, target_canvas):
+def decode_v2_completion(payload, source, target_canvas, version=2):
     """Decode compact normalized supervision into ordinary engine geometry."""
     if isinstance(payload, str):
         payload = json.loads(payload)
     elements = source["elements"]
     cw, ch = float(target_canvas["width"]), float(target_canvas["height"])
-    short = min(cw, ch)
+    short = font_reference(target_canvas,version)
     result = []
     for row in payload["elements"]:
         try:
-            index = int(row["id"][1:])
+            alias=row["id"]
+            if not isinstance(alias,str) or not alias.startswith("e") or not alias[1:].isdigit():continue
+            index = int(alias[1:])
+            if index<0 or index>=len(elements):continue
             source_element = elements[index]
         except (KeyError, ValueError, IndexError, TypeError):
             continue
@@ -183,10 +198,11 @@ def decode_v2_completion(payload, source, target_canvas):
 
 
 def messages_for(source, target_canvas, completion=None, version=1):
-    prompt = _v2_prompt(source, target_canvas) if version == 2 else _v1_prompt(source, target_canvas)
+    if version not in (1,2,3):raise ValueError(f"Unsupported Qwen prompt version: {version}")
+    prompt = _v2_prompt(source, target_canvas,version) if version in (2,3) else _v1_prompt(source, target_canvas)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]
     if completion is not None:
-        if version == 2:
-            completion = encode_v2_completion(completion, source, target_canvas)
+        if version in (2,3):
+            completion = encode_v2_completion(completion, source, target_canvas,version)
         messages.append({"role": "assistant", "content": completion})
     return messages
