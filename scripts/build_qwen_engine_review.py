@@ -16,6 +16,26 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 SPLIT_DIRS={name:ROOT/"data"/f"crello_{name}" for name in ("train","validation","test")}
 OUT_DIR=ROOT/"data"/"qwen_lora"/"engine_review"
+EXCLUSION_FILE=ROOT/"data"/"qwen_lora"/"excluded_pairs.json"
+
+
+def _exclusions():
+    if not EXCLUSION_FILE.is_file():
+        return set(), set()
+    document=json.loads(EXCLUSION_FILE.read_text())
+    rows=document.get("excluded_pairs", [])
+    pairs={row["pair_id"] for row in rows}
+    templates={template_id for row in rows for template_id in row.get("template_ids", [])}
+    return pairs, templates
+
+
+def _is_excluded_pair(pair_id, excluded_pairs, excluded_templates):
+    parts=pair_id.split("__to__",1)
+    if len(parts)==2 and (parts[0] in excluded_templates or parts[1] in excluded_templates):
+        return True
+    if pair_id in excluded_pairs:
+        return True
+    return len(parts)==2 and f"{parts[1]}__to__{parts[0]}" in excluded_pairs
 
 
 def _index(folder):
@@ -137,23 +157,20 @@ def _html(rows,renderer_mode):
 body{margin:0;padding:22px}header{display:flex;gap:12px;align-items:center;position:sticky;top:0;background:#0b1018;padding:8px 0;z-index:2}
 button{font:inherit;padding:10px 18px;border:1px solid #607086;border-radius:10px;background:#1b2635;color:white;cursor:pointer}
 button:disabled{opacity:.45}#count{font-variant-numeric:tabular-nums;color:#bdc9d8}#meta{color:#bdc9d8;margin:8px 0 16px;white-space:pre-wrap}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 figure{margin:0;padding:12px;background:#161f2b;border:1px solid #2a3747;border-radius:14px;min-width:0}
 figcaption{font-weight:650;margin-bottom:8px}img{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain;background:#10151d;border-radius:8px}
 #diag{margin-top:16px;padding:14px;background:#161f2b;border:1px solid #2a3747;border-radius:12px;white-space:pre-wrap;line-height:1.55}
-@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr}}
+@media(max-width:760px){body{padding:12px}.grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><button id="prev">← Previous</button><button id="next">Next →</button><span id="count"></span></header><div id="meta"></div>
 <main class="grid">
 <figure><figcaption>Dataset preview</figcaption><img id="preview"></figure>
 <figure><figcaption>Local target JSON render (unadjusted)</figcaption><img id="target"></figure>
-<figure><figcaption>Qwen proposal after decoder checks</figcaption><img id="raw"></figure>
-<figure><figcaption>Micro-repaired Qwen proposal</figcaption><img id="micro"></figure>
-<figure id="layerFigure"><figcaption>Source-stack-preserved Qwen candidate</figcaption><img id="layer"></figure>
 <figure><figcaption>Engine, Qwen off</figcaption><img id="base"></figure>
 <figure><figcaption>Engine, Qwen on</figcaption><img id="adapter"></figure></main>
-<section id="diag"></section><p>Use arrow keys or buttons to compare. Renderer mode: __RENDERER_NOTE__. The micro-repaired image shows Qwen geometry after source-evidenced local repairs; the engine output also applies its standard constraints and ranking.</p>
-<script>const rows=__ROWS__;let i=0;function show(){const r=rows[i];for(const key of ['preview','target','raw','micro','layer','base','adapter'])document.getElementById(key).src=r[key]||'';document.getElementById('layerFigure').hidden=!r.layer;document.getElementById('meta').textContent=`${r.pair_id} · ${r.canvas.width}×${r.canvas.height} · ${r.element_count} elements · off: ${r.off_status} · on: ${r.on_status}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${i+1} / ${rows.length}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}function move(d){i=Math.max(0,Math.min(rows.length-1,i+d));show()}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)});show();</script></body></html>'''.replace('__ROWS__',data).replace('__RENDERER_NOTE__',renderer_note)
+<section id="diag"></section><p>Four views per case: the dataset reference, converted target JSON, and final engine output with Qwen off/on. Intermediate Qwen stages and geometry diagnostics remain in the manifest and candidate JSON. Use arrow keys or buttons to compare. Renderer mode: __RENDERER_NOTE__.</p>
+<script>const rows=__ROWS__;let i=0;function show(){const r=rows[i];for(const key of ['preview','target','base','adapter'])document.getElementById(key).src=r[key]||'';document.getElementById('meta').textContent=`${r.pair_id} · ${r.canvas.width}×${r.canvas.height} · ${r.element_count} elements · off: ${r.off_status} · on: ${r.on_status}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${i+1} / ${rows.length}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}function move(d){i=Math.max(0,Math.min(rows.length-1,i+d));show()}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)});show();</script></body></html>'''.replace('__ROWS__',data).replace('__RENDERER_NOTE__',renderer_note)
 
 
 def main():
@@ -174,6 +191,9 @@ def main():
     from engine.qwen_prompt import decode_v2_completion, record_prompt_version
     indexes={split:_index(folder) for split,folder in SPLIT_DIRS.items()}
     records=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
+    excluded_pairs,excluded_templates=_exclusions()
+    records=[row for row in records if not _is_excluded_pair(
+        row.get("pair_id", ""), excluded_pairs, excluded_templates)]
     if records:
         if len({record_prompt_version(row) for row in records})!=1:raise SystemExit("Mixed prompt versions in review input")
         prompt_version=record_prompt_version(records[0])
@@ -289,7 +309,7 @@ def main():
         visual_report=on_report.get("visual",{})
         siglip_report=dict(visual_report.get("perceptual",{}))
         siglip_report.update({k:visual_report[k] for k in
-                              ("objective_cost_components","rejected_contrast_variants")
+                              ("objective_cost_components","rejected_contrast_variants","source_contrast")
                               if k in visual_report})
         from engine.qwen_seed import ADAPTER_DIR
         diagnostics=(f"Adapter: {ADAPTER_DIR.resolve()}\n"
@@ -345,11 +365,12 @@ def main():
                                                        "busy_background_tolerated_names",
                                                        "qwen_family_band","eligible_qwen_names",
                                                        "contrast_repair_suppressed_names",
-                                                       "source_lockup_rejected_names",
+                                                       "source_lockup_rejected_names","source_contrast",
                                                        "rejected_contrast_variants")},
                         "visual_candidate_diagnostics":[
                             {k:c.get(k) for k in ("name","cost","layout_defect_cost","source_lockup_error","has_layout_defects","checked","low_contrast",
-                                "invisible_text","contrast_by_text","contrast_repairs","busy_background","warnings","error")
+                                "readability_floor","readability_floor_met",
+                                "invisible_text","occlusion_defects","contrast_by_text","contrast_repairs","busy_background","warnings","error")
                              if k in c}
                             for c in visual_report.get("candidates",[])],
                         "target_geometry_mae":{"raw_qwen":raw_metrics,"after_constraints":constrained_metrics,

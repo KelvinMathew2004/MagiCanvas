@@ -34,24 +34,4 @@ models/*
 # Local Crello downloads/exports contain dataset previews, embedded artwork, and
 # fonts. Keep these generated local copies out of Git; other data/ files remain
 # trackable. Recreate them with scripts/convert_crello_dataset.py.
-/data/crello_train/
-/data/crello_validation/
-/data/crello_test/
-/data/crello_sample/
-/data/crello_fonts.pickle
-/data/crello_verified_pairs.json
-/data/crello_pair_viewer.html
-/data/qwen_lora/
-/data/qwen_lora_balanced_v2/
-/data/qwen_lora_source_capped_v2/
-/data/qwen_lora_v3/
-/data/qwen_lora_v3_source_capped/
-/data/siglip_pairs/
-/data/siglip_previews/
-/data/siglip_negative_pairs/
-/data/gemini_siglip_audit_tmp/
-/data/gemini_crello_conversion_audit/
-/data/gemini_crello_conversion_audit.zip
-/data/qwen_lora_v2_restored_review
-/data/gemini_qwen_expanded_v2_review_tmp
-/data/qwen_lora_expanded_v2
+/data

@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXCLUSIONS = ROOT / "data" / "qwen_lora" / "excluded_pairs.json"
 sys.path.insert(0,str(ROOT))
 from engine.qwen_prompt import messages_for
 PAIR_FILE = ROOT / "data" / "crello_verified_pairs.json"
@@ -212,6 +213,12 @@ def pair_filter_reason(pair,a_design,b_design):
     for match in pair["matches"]:
         a=a_design["elements"][match["a_index"]]
         b=b_design["elements"][match["b_index"]]
+        # Current Qwen output formats predict box/font geometry only, and the
+        # inference path preserves source rotation. Do not teach an impossible
+        # target when the paired human design changes an element's angle.
+        angle_delta=(float(b.get("rotation",0.))-float(a.get("rotation",0.))+180.)%360.-180.
+        if abs(angle_delta)>1.:
+            return "element_rotation_changed"
         if a["type"]=="text" and a.get("content","")!=b.get("content",""):
             return "text_content_changed"
         if a["type"]=="image" and b["type"]=="image":
@@ -250,6 +257,8 @@ def main():
                         help="Maximum validation/test directions per source template; 0 keeps all")
     parser.add_argument("--prompt-version",type=int,choices=(2,3),default=2,
                         help="v2 short-side font encoding; experimental v3 geometric mean")
+    parser.add_argument("--exclusions",type=Path,default=DEFAULT_EXCLUSIONS,
+                        help="JSON ledger of directed pair IDs excluded from supervised/evaluation exports")
     args = parser.parse_args()
     if args.output is None:
         args.output=ROOT/"data"/("qwen_lora_source_capped_v2" if args.prompt_version==2
@@ -260,6 +269,16 @@ def main():
     if args.train_family_cap < 0:
         parser.error("--train-family-cap must be zero (unlimited) or positive")
     pair_doc = json.loads(args.pairs.read_text())
+    excluded_pairs = set()
+    excluded_templates = set()
+    if args.exclusions.is_file():
+        exclusion_doc = json.loads(args.exclusions.read_text())
+        excluded_pairs = {row["pair_id"] for row in exclusion_doc.get("excluded_pairs", [])}
+        excluded_templates = {
+            template_id
+            for row in exclusion_doc.get("excluded_pairs", [])
+            for template_id in row.get("template_ids", [])
+        }
     indexes = {split: manifest_index(root) for split, root in SPLIT_DIRS.items()}
     designs = {}
     def load_design(split, template_id):
@@ -310,6 +329,11 @@ def main():
     for pair in pair_doc["pairs"]:
         category = pair["classification"]
         a, b = pair["a"], pair["b"]
+        directed_pair_ids = {f'{a["id"]}__to__{b["id"]}', f'{b["id"]}__to__{a["id"]}'}
+        if (directed_pair_ids & excluded_pairs
+                or a["id"] in excluded_templates or b["id"] in excluded_templates):
+            skipped["curated_pair_exclusion"] += 1
+            continue
         family=canonical_by_member.get(a["id"],a["id"])
         if category not in ("exact", "core"):
             continue
@@ -408,6 +432,9 @@ def main():
                "training_prompt_version": args.prompt_version,
                "coordinate_encoding": "normalized 0..1000 canvas fractions; font scale relative to "+("short side" if args.prompt_version==2 else "sqrt(width*height)"),
                "source_pair_manifest": str(args.pairs),
+               "curated_exclusions_file": str(args.exclusions),
+               "curated_excluded_pair_count": len(excluded_pairs),
+               "curated_excluded_template_count": len(excluded_templates),
                "exact_examples": {key: len(value) for key, value in exact_by_split.items()},
                "core_review_examples_not_for_training": len(core_review),
                "skipped": dict(skipped),

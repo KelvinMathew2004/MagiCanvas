@@ -66,11 +66,34 @@ def _crello_font_manager():
         return None
 
 
+def _rotated_bounds(element):
+    """Compute visual bounds for a rotated element around its center pivot."""
+    x = float(element.get('x', 0.0))
+    y = float(element.get('y', 0.0))
+    w = float(element.get('width', 1.0))
+    h = float(element.get('height', 1.0))
+    rad = radians(float(element.get('rotation', 0.0)))
+    cx, cy = x + w / 2.0, y + h / 2.0
+    rw = w * abs(cos(rad)) + h * abs(sin(rad))
+    rh = w * abs(sin(rad)) + h * abs(cos(rad))
+    return (cx - rw / 2.0, cy - rh / 2.0, cx + rw / 2.0, cy + rh / 2.0)
+
+
 def _bounds(items):
     boxes = []
     for e in items:
+        rot = float(e.get('rotation', 0.0)) % 360.0
+        is_rot = (0.5 < rot < 359.5) and abs(rot - 180.0) > 0.5
         if e.get('type')=='image':
-            boxes.append(visible_content_bounds(e,_asset_root(e)))
+            vb = visible_content_bounds(e,_asset_root(e))
+            if is_rot:
+                w, h, a = e['width'], e['height'], radians(rot)
+                rw, rh = abs(w*cos(a))+abs(h*sin(a)), abs(w*sin(a))+abs(h*cos(a))
+                cx, cy = e['x']+w/2, e['y']+h/2
+                boxes.append((min(vb[0], e['x'], cx-rw/2), min(vb[1], e['y'], cy-rh/2),
+                              max(vb[2], e['x']+w, cx+rw/2), max(vb[3], e['y']+h, cy+rh/2)))
+            else:
+                boxes.append(vb)
             continue
         w, h, a = e['width'], e['height'], radians(e.get('rotation', 0))
         rw, rh = abs(w*cos(a))+abs(h*sin(a)), abs(w*sin(a))+abs(h*cos(a))
@@ -397,10 +420,18 @@ def _analyze(source):
     sw, sh = source['canvas']['width'], source['canvas']['height']
     max_font = max((e.get('font_size', 0) for e in elements), default=24)
     backgrounds, rest = [], []
+    background_candidates = []
     for e in elements:
         full = e['x'] <= sw*.02 and e['y'] <= sh*.02 and e['x']+e['width'] >= sw*.98 and e['y']+e['height'] >= sh*.98
         behind = all(e.get('z_index', 0) <= f.get('z_index', 0) for f in elements if f['type']=='text')
-        (backgrounds if full and behind and not e.get('group_id') and e['type']!='text' else rest).append(e)
+        if full and behind and not e.get('group_id') and e['type']!='text':
+            background_candidates.append(e)
+        else:
+            rest.append(e)
+    # Full-canvas overlays can be frames, borders, or transparent textures.
+    # Keep them registered to the canvas, but preserve each layer's authored
+    # fit mode so a contain-fitted border is never silently cropped to cover.
+    backgrounds.extend(background_candidates)
     parent = list(range(len(rest)))
     def root(i):
         while i != parent[i]:
@@ -502,9 +533,44 @@ def _analyze(source):
         panel_area=_area(panel)
         if text_groups>=1:
             panel_candidates.append((panel_area,panel,tuple(sorted(set(backed)))) )
+    # Nested cards often have a translucent tint/backplate directly beneath
+    # the opaque white card. Treat the front card as the sole layout anchor
+    # and carry the lower-z plate with it. If both are independent anchors,
+    # Qwen can enlarge the tint to fill the canvas while leaving the actual
+    # card and its contents behind in a different location.
+    shadowed_panels=set()
+    underlays_by_panel={}
+    for _,underlay,underlay_children in panel_candidates:
+        underlay_box=_bounds([underlay])
+        underlay_area=max(1e-9,_area(underlay))
+        underlay_text={eid for eid in underlay_children
+                       if any(e['id']==eid and e['type']=='text' for group in groups for e in group)}
+        parents=[]
+        for _,front,front_children in panel_candidates:
+            if front['id']==underlay['id'] or front.get('z_index',0)<=underlay.get('z_index',0):
+                continue
+            front_box=_bounds([front])
+            if _overlap(front_box,underlay_box)/underlay_area<.80:
+                continue
+            front_text={eid for eid in front_children
+                        if any(e['id']==eid and e['type']=='text' for group in groups for e in group)}
+            if (underlay_text & front_text) or front['id'] in underlay_children:
+                parents.append(front)
+        if parents:
+            front=max(parents,key=lambda item:float(item.get('z_index',0)))
+            shadowed_panels.add(underlay['id'])
+            underlays_by_panel.setdefault(front['id'],[]).append(underlay['id'])
     assigned=set()
-    for _,panel,backed in sorted(panel_candidates,key=lambda candidate:candidate[0]):
+    # Prefer the frontmost contained card as the text anchor. A translucent
+    # tint/underlay may be microscopically smaller than the white panel above
+    # it; area-only sorting wrongly detached copy from the visible card.
+    for _,panel,backed in sorted(panel_candidates,
+                                 key=lambda candidate:(-float(candidate[1].get('z_index',0)),
+                                                       candidate[0])):
+        if panel['id'] in shadowed_panels:
+            continue
         children=tuple(eid for eid in backed if eid not in assigned)
+        children=tuple(dict.fromkeys((*children,*underlays_by_panel.get(panel['id'],()))))
         if not children:continue
         panel_children[panel['id']]=children
         assigned.update(children)
@@ -547,6 +613,10 @@ def _analyze(source):
                                      if e['id'] in source_parent_for_text}))
         if source_parents:
             unit['source_parent_ids']=source_parents
+        backed_by=tuple(sorted(panel_id for panel_id,children in panel_children.items()
+                               if any(e['id'] in children for e in items)))
+        if backed_by:
+            unit['backed_by_ids']=backed_by
         if len(items)==1 and items[0]['id'] in panel_children:
             panel=items[0]
             unit.update(backing_panel=True,backed_ids=panel_children[panel['id']],
@@ -1101,10 +1171,130 @@ def _sync_backing_panels(elements,units,width,height):
     return elements
 
 
+def _separate_qwen_text_collisions(elements,units,width,height):
+    """Nudge proposal-only touching text units apart without resizing type."""
+    repaired=deepcopy(elements)
+    changes=[]
+    by_id={e['id']:e for e in repaired}
+    # Model boxes occasionally close a source gap between adjacent logo or
+    # subtitle lines by only a few pixels. Repair that small error locally so
+    # a useful proposal is not discarded wholesale. Move the later-painted,
+    # smaller text unit; keep its font hierarchy and all source geometry.
+    for _ in range(max(1,len(repaired))):
+        collisions=_unintended_text_overlaps(repaired,units)
+        if not collisions:break
+        moved=False
+        for first_id,second_id in collisions:
+            first,second=by_id.get(first_id),by_id.get(second_id)
+            if first is None or second is None:continue
+            a_box,b_box=_text_visible_bounds(first),_text_visible_bounds(second)
+            # Prefer moving the smaller text, breaking ties toward later z.
+            candidates=sorted((first,second),key=lambda e:(
+                float(e.get('font_size',1.)), -float(e.get('z_index',0)), e['id']))
+            for item in candidates:
+                other=second if item is first else first
+                item_box=_text_visible_bounds(item);other_box=_text_visible_bounds(other)
+                if item_box[3]<=other_box[1] or other_box[3]<=item_box[1]:continue
+                gap=max(2.,min(float(width),float(height))*.003)
+                down=max(0.,other_box[3]-item_box[1])+gap
+                up=max(0.,item_box[3]-other_box[1])+gap
+                unit=next((u for u in units if any(e['id']==item['id'] for e in u['items'])),None)
+                group_ids={e['id'] for e in unit['items']} if unit else {item['id']}
+                group=[by_id[eid] for eid in group_ids if eid in by_id]
+                for dy in (down,-up):
+                    if any(e['y']+dy<0 or e['y']+dy+e['height']>height for e in group):continue
+                    for e in group:e['y']+=dy
+                    if not _unintended_text_overlaps(repaired,units):
+                        changes.append(dict(kind='minimal-text-separation',element_ids=sorted(group_ids),dy=round(dy,3)))
+                        moved=True
+                        break
+                    for e in group:e['y']-=dy
+                if moved:break
+            if moved:break
+        if not moved:break
+    return repaired,changes
+
+
+def _separate_qwen_unit_collisions(elements,units,width,height,gap=None):
+    """Resolve small Qwen box collisions between otherwise separate units."""
+    repaired=deepcopy(elements)
+    changes=[]
+    gap=float(gap if gap is not None else min(width,height)*.004)
+    by_id={e['id']:e for e in repaired}
+    for _ in range(max(1,len(units)*2)):
+        records=[(u,_bounds([by_id[e['id']] for e in u['items'] if e['id'] in by_id]))
+                 for u in units]
+        moved=False
+        for i,(a,ab) in enumerate(records):
+            for b,bb in records[:i]:
+                if _qwen_layered(a,b):continue
+                dx=max(0.,min(ab[2]+gap-bb[0],bb[2]+gap-ab[0]))
+                dy=max(0.,min(ab[3]+gap-bb[1],bb[3]+gap-ab[1]))
+                if dx<=1e-4 or dy<=1e-4:continue
+                # Move the smaller text-bearing unit; otherwise keep the
+                # larger/source-art unit fixed and move the smaller sibling.
+                a_text=any(e['type']=='text' for e in a['items'])
+                b_text=any(e['type']=='text' for e in b['items'])
+                size_a=max(1.,(ab[2]-ab[0])*(ab[3]-ab[1]))
+                size_b=max(1.,(bb[2]-bb[0])*(bb[3]-bb[1]))
+                candidates=sorted(((a,ab,a_text,size_a),(b,bb,b_text,size_b)),
+                                  key=lambda item:(not item[2],item[3]))
+                applied=False
+                for unit,box,_,_ in candidates:
+                    group=[by_id[e['id']] for e in unit['items'] if e['id'] in by_id]
+                    # Preserve source reading direction when one axis already
+                    # separates the boxes; for true overlap prefer the text's
+                    # nearest available vertical clearance.
+                    if ab[3]<=bb[1]+gap:
+                        options=[(0.,-dy if unit is a else dy)]
+                    elif bb[3]<=ab[1]+gap:
+                        options=[(0.,dy if unit is a else -dy)]
+                    else:
+                        other=bb if unit is a else ab
+                        center=(box[1]+box[3])/2
+                        other_center=(other[1]+other[3])/2
+                        direction=1. if center>=other_center else -1.
+                        options=[(0.,direction*dy),
+                                 (direction*dx,0.)]
+                    for mx,my in options:
+                        if any(e['x']+mx<0 or e['y']+my<0 or
+                               e['x']+mx+e['width']>width or
+                               e['y']+my+e['height']>height for e in group):
+                            continue
+                        for e in group:e['x']+=mx;e['y']+=my
+                        next_records=[(u,_bounds([by_id[e['id']] for e in u['items'] if e['id'] in by_id]))
+                                      for u in units]
+                        overlap=False
+                        for j,(u,ub) in enumerate(next_records):
+                            for v,vb in next_records[:j]:
+                                if _qwen_layered(u,v):continue
+                                if not (ub[2]+gap<=vb[0]+1e-5 or vb[2]+gap<=ub[0]+1e-5 or
+                                        ub[3]+gap<=vb[1]+1e-5 or vb[3]+gap<=ub[1]+1e-5):
+                                    overlap=True;break
+                            if overlap:break
+                        if not overlap:
+                            changes.append(dict(kind='minimal-unit-separation',
+                                                element_ids=sorted(e['id'] for e in group),
+                                                dx=round(mx,3),dy=round(my,3)))
+                            moved=applied=True
+                            break
+                        for e in group:e['x']-=mx;e['y']-=my
+                    if applied:break
+                if moved:break
+            if moved:break
+        if not moved:break
+    return repaired,changes
+
+
 def _micro_snap_qwen_proposal(elements, units, width, height):
-    """Repair source-supported lockups and whole column chains jointly."""
+    """Repair source-supported lockups and small proposal-only text collisions."""
     from engine.qwen_refine import repair_relationships
-    return repair_relationships(elements, units, width, height)
+    repaired,changes=repair_relationships(elements, units, width, height)
+    repaired,separation_changes=_separate_qwen_text_collisions(repaired,units,width,height)
+    changes.extend(separation_changes)
+    repaired,unit_changes=_separate_qwen_unit_collisions(repaired,units,width,height)
+    changes.extend(unit_changes)
+    return repaired,changes
 
 
 def _unintended_text_overlaps(elements, units):
@@ -2158,7 +2348,8 @@ def _layered(a, b):
     if (set(a.get('backed_ids',())) & b_ids
             or set(b.get('backed_ids',())) & a_ids
             or set(a.get('source_parent_ids',())) & b_ids
-            or set(b.get('source_parent_ids',())) & a_ids):
+            or set(b.get('source_parent_ids',())) & a_ids
+            or set(a.get('backed_by_ids',())) & set(b.get('backed_by_ids',()))):
         return True
     if a['role'] == 'decoration' or b['role'] == 'decoration':
         # A text-bearing corner callout gets separation from main content.
@@ -2193,14 +2384,37 @@ def _unit_margin(box, width, height, unit=None):
 
 
 def _qwen_layered(a, b):
-    """Permit Qwen to place text on visual regions while keeping peer units apart."""
+    """Allow only source-supported layering in model-proposed layouts.
+
+    Qwen candidates used to bypass separation for every text/visual pair. That
+    let CTAs drift underneath later-painted foreground artwork and let copy
+    collide with unrelated images while still passing feasibility. `_analyze`
+    already records contained backplates and groups intentional source stacks;
+    layouts retain those overlaps through `_layered` without granting this
+    blanket exception.
+    """
     if _layered(a,b):
         return True
-    a_text=any(item.get('type')=='text' for item in a.get('items',[]))
-    b_text=any(item.get('type')=='text' for item in b.get('items',[]))
-    a_visual=any(item.get('type') in ('image','shape') for item in a.get('items',[]))
-    b_visual=any(item.get('type') in ('image','shape') for item in b.get('items',[]))
-    return (a_text and b_visual) or (b_text and a_visual)
+    # Rotated full-bleed artwork often has a large rectangular frame even
+    # when most of its pixels are transparent. Permit foreground content to
+    # sit over a source-scale backdrop only when the artwork is a source
+    # cluster and the cluster has an image layer painted below that content.
+    # Foreground artwork remains protected by _source_occlusion_defects().
+    visual=a if a.get('role')=='visual' else b if b.get('role')=='visual' else None
+    foreground=b if visual is a else a if visual is b else None
+    if visual is not None and visual.get('preserve_layer_stack'):
+        front_items=foreground.get('items',())
+        front_z=min((float(e.get('z_index',0)) for e in front_items),default=0.)
+        source_w,source_h=visual.get('source_canvas',(0.,0.))
+        if source_w>0 and source_h>0:
+            full_backdrop=any(
+                e.get('type')=='image'
+                and float(e.get('z_index',0))<front_z
+                and float(e.get('width',0))*float(e.get('height',0))>=source_w*source_h*.80
+                for e in visual.get('items',()))
+            if full_backdrop:
+                return True
+    return False
 
 
 def _feasible(elements, units, width, height, strict_margins=True, gap_factor=.008,
@@ -2421,6 +2635,110 @@ def _constrain(elements, units, width, height, topology='nearest', strict_margin
                                allow_text_visual_overlap) else None
 
 
+@lru_cache(maxsize=128)
+def _poster_like_background(asset_path):
+    """Detect flat graphic backgrounds without mistaking textured photos for art."""
+    try:
+        from PIL import Image, ImageFilter
+        with Image.open(asset_path) as opened:
+            # Transparent full-canvas layers are often color washes or frames
+            # intended to composite over a photo. Converting one to RGB while
+            # making a matte turns its transparent pixels opaque and hides the
+            # actual background underneath it.
+            if ('A' in opened.getbands()
+                    and opened.getchannel('A').getextrema()[0]<250):
+                return False
+            image=opened.convert('RGB').resize((32,32))
+        hsv=image.convert('HSV')
+        pixels=list(hsv.getdata())
+        mean_saturation=sum(pixel[1] for pixel in pixels)/(255.0*max(1,len(pixels)))
+        strong_saturation=sum(pixel[1]>=160 for pixel in pixels)/max(1,len(pixels))
+        # Saturation alone labels foliage and colorful photographs as flat
+        # posters. Their fine texture should be cropped as a normal background,
+        # rather than letterboxed over the old hard-coded maroon matte.
+        edges=image.convert('L').filter(ImageFilter.FIND_EDGES)
+        edge_density=sum(edges.getdata())/(255.0*max(1,edges.width*edges.height))
+        return (mean_saturation>=.72 and strong_saturation>=.70
+                and edge_density<=.12)
+    except (OSError,ValueError,ImportError):
+        return False
+
+
+def _background_fit(element,source,width,height):
+    """Avoid cropping saturated raster poster art when changing aspect ratio.
+
+    Photographic backgrounds retain cover-cropping. Graphic-like full-canvas
+    art uses fill only for a substantial aspect change, so baked-in stars,
+    borders, and ornaments remain visible instead of being silently clipped.
+    """
+    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
+    source_ratio=sw/max(1.0,sh);target_ratio=float(width)/max(1.0,float(height))
+    ratio_shift=max(source_ratio/target_ratio,target_ratio/source_ratio)
+    asset=Path(_asset_root(element))/str(element.get('asset_id',''))
+    if ratio_shift>=1.35 and _poster_like_background(str(asset)):
+        return 'fill'
+    return 'cover'
+
+
+def _poster_matte_asset(element,width,height):
+    """Make an aspect-correct, edge-matted copy of a flattened poster layer.
+
+    A poster-like background may contain decorations baked into one raster.
+    Stretching it to a very different canvas preserves pixels but distorts
+    them; cropping it loses those decorations. For local dataset assets, keep
+    the complete raster at its original aspect and extend its plain top/bottom
+    edge color into the letterbox area. The generated asset is content-addressed
+    by the canvas dimensions and remains next to the original asset so the
+    unchanged renderer can resolve it through the normal asset ID.
+    """
+    try:
+        from PIL import Image, ImageFilter
+        root=Path(_asset_root(element))
+        asset_id=str(element.get('asset_id',''))
+        source_path=root/asset_id
+        if not source_path.is_file():return None
+        with Image.open(source_path) as opened:
+            source=opened.convert('RGB')
+        target_w=max(1,min(2048,int(round(float(width)))))
+        target_h=max(1,min(2048,int(round(float(height)))))
+        if max(target_w/source.width,target_h/source.height)>4.0:return None
+        scale=min(target_w/source.width,target_h/source.height)
+        fitted=source.resize((max(1,round(source.width*scale)),
+                              max(1,round(source.height*scale))),Image.Resampling.LANCZOS)
+        x=(target_w-fitted.width)//2;y=(target_h-fitted.height)//2
+        edge_pixels=[source.getpixel((x,y)) for x in (0,source.width-1)
+                     for y in range(0,source.height,max(1,source.height//32))]
+        matte=tuple(round(sum(pixel[channel] for pixel in edge_pixels)/max(1,len(edge_pixels)))
+                    for channel in range(3))
+        output=Image.new('RGB',(target_w,target_h),matte)
+        # Extend only the central edge bands, avoiding the corner ornaments.
+        band=max(1,round(min(source.width,source.height)*.045))
+        x0=round(source.width*.20);x1=round(source.width*.80)
+        top=source.crop((x0,0,max(x0+1,x1),min(source.height,band)))
+        bottom=source.crop((x0,max(0,source.height-band),max(x0+1,x1),source.height))
+        if y>0:
+            output.paste(top.resize((target_w,y),Image.Resampling.BILINEAR),(0,0))
+        if y+fitted.height<target_h:
+            pad_h=target_h-y-fitted.height
+            output.paste(bottom.resize((target_w,pad_h),Image.Resampling.BILINEAR),
+                         (0,y+fitted.height))
+        if x>0:
+            y0=round(fitted.height*.20);y1=round(fitted.height*.80)
+            left=fitted.crop((0,y0,max(1,band),y1)).resize(
+                (x,target_h),Image.Resampling.BILINEAR)
+            right=fitted.crop((max(0,fitted.width-band),y0,fitted.width,y1)).resize(
+                (max(1,target_w-x-fitted.width),target_h),Image.Resampling.BILINEAR)
+            output.paste(left,(0,0));output.paste(right,(x+fitted.width,0))
+        output.paste(fitted,(x,y))
+        derived=source_path.with_name(
+            f'{source_path.stem}_canvas_{target_w}x{target_h}_matte.png')
+        derived.parent.mkdir(parents=True,exist_ok=True)
+        if not derived.is_file():output.save(derived,optimize=True)
+        return derived.relative_to(root).as_posix()
+    except (OSError,ValueError,ImportError):
+        return None
+
+
 def _perceptual_context(source, backgrounds, units, width, height):
     """Conservative geometry affiliations and an image-busyness proxy, not semantics."""
     sw,sh=source['canvas']['width'],source['canvas']['height']
@@ -2468,7 +2786,7 @@ def _perceptual_context(source, backgrounds, units, width, height):
         items=deepcopy(backgrounds)
         for e in items:
             e.update(x=0,y=0,width=width,height=height)
-            if e['type']=='image':e['fit']='cover'
+            if e['type']=='image':e['fit']=_background_fit(e,source,width,height)
         with TemporaryDirectory(prefix='chameleon-background-') as directory:
             path=Path(directory)/'background.png'
             warnings=render_design_to_png(dict(canvas=dict(width=width,height=height),elements=items),
@@ -2736,14 +3054,49 @@ def _banner_centerline(records,width,height):
     return (margin+max(margin,bottom))/2
 
 
+def _source_occlusion_defects(elements,source):
+    """Detect text newly buried by a later-painted visual layer.
+
+    Compare visible text/image bounds with the authored design so intentional
+    source overlaps remain valid. A candidate is defective only when a visual
+    element painted after the text newly covers a substantial share of its
+    visible bounds.
+    """
+    candidate={e['id']:e for e in elements}
+    originals={e['id']:e for e in source.get('elements',[])}
+    visuals=[e for e in source.get('elements',[]) if e.get('type') in ('image','shape')]
+    defects=[]
+    for text in elements:
+        if text.get('type')!='text' or not text.get('content','').strip():continue
+        original_text=originals.get(text['id'])
+        if original_text is None:continue
+        text_box=_text_visible_bounds(text)
+        text_area=max(1e-9,(text_box[2]-text_box[0])*(text_box[3]-text_box[1]))
+        source_text_box=_text_visible_bounds(original_text)
+        source_text_area=max(1e-9,(source_text_box[2]-source_text_box[0])*(source_text_box[3]-source_text_box[1]))
+        for original_visual in visuals:
+            if original_visual.get('z_index',0)<=original_text.get('z_index',0):continue
+            visual=candidate.get(original_visual['id'])
+            if visual is None:continue
+            source_fraction=_overlap(source_text_box,_bounds([original_visual]))/source_text_area
+            candidate_fraction=_overlap(text_box,_bounds([visual]))/text_area
+            allowed=max(source_fraction*1.5,source_fraction+.20)
+            if candidate_fraction>allowed and candidate_fraction>.15:
+                defects.append(dict(text_id=text['id'],visual_id=visual['id'],
+                    fraction=round(candidate_fraction,4),allowed_fraction=round(allowed,4)))
+    return defects
+
+
 def _energy_terms(elements, units, source, width, height, desired,
                   allow_text_visual_overlap=False):
     records = _records(elements,units)
     boxes = [_bounds(items) for _,items in records]
     state=_aspect_state(source,width,height)
-    terms = dict(overlap=0.,boundary=0.,edge_margin=0.,text_fit=0.,readability=0.,balance=0.,
+    terms = dict(overlap=0.,occlusion=0.,boundary=0.,edge_margin=0.,text_fit=0.,readability=0.,balance=0.,
                  hierarchy=0.,alignment=0.,spacing=0.,canvas_use=0.,source_fidelity=0.)
     terms.update(rag=0.,affinity=0.,whitespace=0.,background_busyness=0.,axial=0.,badge_flow=0.,footer_anchor=0.,hero_prominence=0.,cta_prominence=0.,brand_visibility=0.,column_alignment=0.,avoidable_wrap=0.,banner_action_stack=0.,banner_gap_evenness=0.,banner_centering=0.,stack_balance=0.,badge_alignment=0.,brand_media_spacing=0.,footer_visibility=0.,primary_clearance=0.,callout_migration=0.,source_order=0.,decoration_composition=0.)
+    terms['occlusion']=sum(defect['fraction']-defect['allowed_fraction']
+                           for defect in _source_occlusion_defects(elements,source))
     # Keep decorative elements in the broad source regions that gave them
     # compositional purpose. When source accents occupy opposite corners,
     # discourage the optimizer from clustering them into the same corner.
@@ -3016,7 +3369,7 @@ def _energy_terms(elements, units, source, width, height, desired,
     return terms
 
 
-_ENERGY_WEIGHTS=dict(overlap=1000.,boundary=1500.,edge_margin=8.,text_fit=500.,readability=13.,
+_ENERGY_WEIGHTS=dict(overlap=1000.,occlusion=180.,boundary=1500.,edge_margin=8.,text_fit=500.,readability=13.,
                      balance=18.,hierarchy=30.,alignment=16.,spacing=8.,
                      canvas_use=35.,source_fidelity=18.,rag=5.,affinity=18.,whitespace=5.,background_busyness=7.,axial=160.,badge_flow=70.,footer_anchor=100.,hero_prominence=210.,cta_prominence=85.,brand_visibility=45.,column_alignment=120.,avoidable_wrap=25.,banner_action_stack=180.,banner_gap_evenness=12.,banner_centering=80.,stack_balance=300.,badge_alignment=80.,brand_media_spacing=55.,footer_visibility=240.,primary_clearance=65.,callout_migration=8.,source_order=65.,decoration_composition=48.)
 
@@ -3031,7 +3384,7 @@ def _objective_layout_cost(elements,units,source,width,height,desired,
     """Score geometry and text defects without template or style preferences."""
     terms=_energy_terms(elements,units,source,width,height,desired,
                         allow_text_visual_overlap=allow_text_visual_overlap)
-    defect_terms=('overlap','boundary','text_fit')
+    defect_terms=('overlap','occlusion','boundary','text_fit')
     cost=sum(terms.get(name,0.)*_ENERGY_WEIGHTS.get(name,1.) for name in defect_terms)
     minimum_font=min(8.,min(width,height)*.065)
     for _,items in _records(elements,units):
@@ -3253,7 +3606,7 @@ def _luminance(rgb):
     return sum((v/12.92 if v<=.04045 else ((v+.055)/1.055)**2)*w for v,w in zip(channels,(.2126,.7152,.0722)))
 
 
-def _qwen_contrast_safe(candidate, baseline, qwen_primary=False):
+def _qwen_contrast_safe(candidate, baseline, qwen_primary=False, source_contrast=None):
     """Compare soft warnings against available alternatives; invisible ink is hard."""
     if candidate is None or candidate.get('invisible_text') or 'error' in candidate:
         return False
@@ -3263,8 +3616,26 @@ def _qwen_contrast_safe(candidate, baseline, qwen_primary=False):
         return True
     weak=min(len(e.get('low_contrast',[])) for e in baselines)
     cost=min(e.get('cost',0.) for e in baselines)
-    return (len(candidate.get('low_contrast',[]))<=weak
-            or candidate.get('cost',0.)<=cost+1.25)
+    if (len(candidate.get('low_contrast',[]))<=weak
+            or candidate.get('cost',0.)<=cost+1.25):
+        return True
+    # Don't reject a better reflow solely for retaining text that was already
+    # low-contrast in the source. Require every weak output label to be weak
+    # in the rendered source too, and keep its measured glyph contrast close
+    # to that source value. New contrast failures remain disqualifying.
+    if source_contrast:
+        metrics=candidate.get('contrast_by_text',{})
+        weak_ids=candidate.get('low_contrast',[])
+        inherited=bool(weak_ids) and all(
+            eid in source_contrast
+            and source_contrast[eid].get('near_threshold')
+            and metrics.get(eid,{}).get('lower_quintile') is not None
+            and metrics[eid]['lower_quintile'] >=
+                max(1.0,source_contrast[eid].get('lower_quintile',0.0)*.88)
+            for eid in weak_ids)
+        if inherited:
+            return True
+    return False
 
 
 def _needs_contrast_repair(entry):
@@ -3278,7 +3649,7 @@ def _needs_contrast_repair(entry):
         e=elements.get(eid,{})
         target=3. if e.get('font_size',0)>=24 or e.get('font_weight')=='bold' and e.get('font_size',0)>=18 else 4.5
         if minimum<3.0 or lower<target*.90:return True
-    return bool(entry.get('invisible_text'))
+    return bool(entry.get('invisible_text') or entry.get('busy_background'))
 
 
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
@@ -3336,9 +3707,23 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         if len(shortlist)>=(4 if qwen_candidates else 8):break
     # Keep combined font+position siblings available to the visual judge.
     shortlist.extend(qwen_candidates[:6])
+    # A preserved source-stack layout can have a higher geometric objective
+    # because it retains authored composition. Always compare it visually.
+    shortlist.extend(c for c in qwen_candidates
+                     if c['name']=='qwen-layer-preserved' and c not in shortlist)
+    # Rotation and typography-floor siblings are deliberately few, but must
+    # survive the family cap above so the renderer can compare them directly.
+    shortlist.extend(c for c in candidates
+                     if c['name'].startswith(('qwen-background-rotation-', 'background-rotation-',
+                                               'qwen-rotation-', 'rotation-',
+                                               'qwen-readable-text-floor',
+                                               'readable-text-floor-'))
+                     if c not in shortlist)
+    shortlist.extend(c for c in qwen_candidates
+                     if c['name']=='qwen-source-contained-proposal' and c not in shortlist)
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
-        reference_image=None;source_under=None
+        reference_image=None;source_under=None;source_contrast={}
         try:
             reference_path=Path(directory)/'source.png'
             render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
@@ -3350,12 +3735,40 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 render_diagnostic(source_backing,diagnostic_assets,source_backing_path,max_size=640)
                 with Image.open(source_backing_path) as image:
                     source_under=image.convert('RGB')
+                # Measure whether source text already has low contrast at its
+                # authored location. This lets the selector preserve an
+                # existing style without tolerating newly introduced failures.
+                source_ink=ImageChops.difference(reference_image,source_under).convert('L')
+                sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
+                for e in source.get('elements',[]):
+                    if e.get('type')!='text' or not e.get('content','').strip():continue
+                    color=_rgba(e.get('color',''))
+                    if not color or abs(float(e.get('rotation',0)))>1:continue
+                    left=max(0,round(e['x']/sw*source_under.width))
+                    top=max(0,round(e['y']/sh*source_under.height))
+                    right=min(source_under.width,max(left+1,round((e['x']+e['width'])/sw*source_under.width)))
+                    bottom=min(source_under.height,max(top+1,round((e['y']+e['height'])/sh*source_under.height)))
+                    if right<=left or bottom<=top:continue
+                    bg=list(source_under.crop((left,top,right,bottom)).getdata())
+                    mask=list(source_ink.crop((left,top,right,bottom)).getdata())
+                    active=[px for px,m in zip(bg,mask) if m>12]
+                    if not active:continue
+                    alpha=color[3]*float(e.get('opacity',1.0));ratios=[]
+                    for px in active:
+                        fg=tuple(color[k]*alpha+px[k]*(1-alpha) for k in range(3))
+                        a,b=_luminance(fg),_luminance(px)
+                        ratios.append((max(a,b)+.05)/(min(a,b)+.05))
+                    ratios.sort();lower=ratios[max(0,len(ratios)//5)]
+                    threshold=3. if e.get('font_size',0)>=24 or e.get('font_weight')=='bold' and e.get('font_size',0)>=18 else 4.5
+                    source_contrast[e['id']]=dict(lower_quintile=lower,
+                        low=lower<threshold*.97,near_threshold=lower<threshold*1.20)
         except Exception:
             # Identity continuity is a soft cue; candidate diagnostics remain
             # useful if the source render fails for an unrelated renderer issue.
             pass
         for index,candidate in enumerate(shortlist):
-            doc=_assemble(candidate['elements'],backgrounds,source,width,height)
+            candidate_backgrounds=candidate.get('backgrounds',backgrounds)
+            doc=_assemble(candidate['elements'],candidate_backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
             backing_path=Path(directory)/f'{index}-backing.png'
             try:
@@ -3404,22 +3817,36 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                                                    ink_pixels=len(active_pixels))
                     deficit=max(0,(target-low)/target)
                     cost+=deficit*5
-                    if deficit>.03 or minimum<2.5:
+                    # The 20th percentile represents contrast across a
+                    # meaningful share of glyph pixels. A single anti-aliased
+                    # edge pixel should not trigger a repair when the glyph
+                    # itself clears its contrast target.
+                    if deficit>.03:
                         weak.append(e['id'])
                     roughness=sum(abs(lumas[j]-lumas[j-1]) for j in range(1,len(lumas)) if j%8)/56
                     cost+=max(0,roughness-.04)*8
-                    if roughness>.08:
+                    from PIL import ImageFilter
+                    edge_crop=under_crop.convert('L').filter(ImageFilter.FIND_EDGES)
+                    edge_data=list(edge_crop.getdata())
+                    edge_density=sum(edge_data)/(255.0*max(1,len(edge_data)))
+                    mean_luma=sum(lumas)/max(1,len(lumas))
+                    luma_std=(sum((x-mean_luma)**2 for x in lumas)/max(1,len(lumas)))**0.5
+                    cost+=edge_density*5.0
+                    if roughness>.08 or edge_density>.07 or (luma_std>.15 and edge_density>.04):
                         busy.append(e['id'])
                     checked+=1
                 cost=cost/max(1,checked)+(8.0 if invisible else 0.0)+(4.0 if weak else 0.0)
-                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,warnings=warnings,image=full.copy()))
-                if (candidate['name'].startswith('qwen-') and weak and not invisible
+                occlusion_defects=_source_occlusion_defects(doc['elements'],source)
+                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,occlusion_defects=occlusion_defects,warnings=warnings,image=full.copy()))
+                target_repair_ids=sorted(set(weak)|set(busy))
+                if (candidate['name'].startswith('qwen-') and target_repair_ids and not invisible
                         and _needs_contrast_repair(entries[-1])
                         and 'contrast-repaired' not in candidate['name']
                         and sum('contrast-repaired' in c['name'] for c in shortlist)<10):
                     from engine.qwen_refine import contrast_variant
-                    repairs,_=contrast_variant(candidate['elements'],units,width,height,weak,under,full,
-                                               return_alternatives=True,source_under=source_under)
+                    repairs,_=contrast_variant(candidate['elements'],units,width,height,target_repair_ids,under,full,
+                                               return_alternatives=True,source_under=source_under,
+                                               source_elements=source['elements'])
                     # Share the render budget across parent proposals. A first
                     # parent's many nudges must not crowd out a sound raw-layout
                     # column repair from a later sibling.
@@ -3427,7 +3854,9 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         if sum('contrast-repaired' in c['name'] for c in shortlist)>=10:break
                         shortlist.append(dict(name=f"{candidate['name']}-contrast-repaired-{repair_index:02d}",
                             elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
-                            contrast_repairs=changes))
+                            contrast_repairs=changes,
+                            readability_floor=candidate.get('readability_floor'),
+                            readability_floor_met=candidate.get('readability_floor_met',False)))
 
             except Exception as exc:
                 # Diagnostics are optional; isolate third-party renderer faults.
@@ -3452,29 +3881,50 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                for eid in (change.get('element_ids',[])+change.get('backing_for',[]))}
         before=parent.get('contrast_by_text',{}) if parent else {}
         after=entry.get('contrast_by_text',{})
-        worsened=[eid for eid in moved if eid in before and eid in after
-                  and before[eid].get('lower_quintile') is not None
-                  and after[eid].get('lower_quintile') is not None
-                  and after[eid]['lower_quintile']+1e-4<before[eid]['lower_quintile']]
         before_count=len(parent.get('low_contrast',[])) if parent else 0
         after_count=len(entry.get('low_contrast',[]))
+        before_busy=len(parent.get('busy_background',[])) if parent else 0
+        after_busy=len(entry.get('busy_background',[]))
         zone_floors={eid:floor for change in candidate.get('contrast_repairs',[])
                      if change.get('repair_type')=='background-column-fit'
                      for eid,floor in change.get('source_contrast_floor',{}).items()}
+        def clears_floor(metrics,floor):
+            # Prefer the lower glyph percentile; tolerate a few edge pixels
+            # below the floor when the rest of the glyph is readable.
+            lower=metrics.get('lower_quintile')
+            minimum=metrics.get('minimum')
+            return (lower is not None and lower>=floor) or (
+                minimum is not None and minimum>=2.2 and lower is not None and lower>=3.0)
         restored_zone=bool(zone_floors) and after_count<=before_count and all(
             eid in before and eid in after and before[eid].get('minimum') is not None
             and after[eid].get('minimum') is not None
             and after[eid]['minimum']>=floor
             and after[eid]['minimum']>=before[eid]['minimum']+.5
             for eid,floor in zone_floors.items())
+        is_quiet_2d = any(change.get('repair_type') in ('lockup-repositioned-2d', 'lockup-repositioned')
+                          for change in candidate.get('contrast_repairs', []))
+        is_backdrop_rotation=any(change.get('repair_type')=='backdrop-rotation-variant'
+                                 for change in candidate.get('contrast_repairs',[]))
+        contrast_ids=(set(before)&set(after)) if is_backdrop_rotation else moved
+        all_above_min = all(clears_floor(after.get(eid,{}),zone_floors.get(eid,3.0))
+                            for eid in contrast_ids if eid in after)
+        improved_quiet = bool(is_quiet_2d and after_count <= before_count and all_above_min and
+                              (after_busy < before_busy or entry['cost'] < (parent['cost'] if parent else 0.0) - 0.1))
+        worsened=[eid for eid in contrast_ids if eid in before and eid in after
+                  and before[eid].get('lower_quintile') is not None
+                  and after[eid].get('lower_quintile') is not None
+                  and after[eid]['lower_quintile']+1e-4<before[eid]['lower_quintile']
+                  and not (improved_quiet and clears_floor(after[eid],zone_floors.get(eid,3.0)))]
         failed_minimum=[eid for eid in moved if eid in before and eid in after
             and before[eid].get('minimum') is not None and before[eid]['minimum']<3.0
-            and (after[eid].get('minimum') is None
-                 or after[eid]['minimum']<zone_floors.get(eid,3.0))]
-        if (parent is None or after_count>=before_count and not restored_zone or worsened or failed_minimum):
+            and not clears_floor(after[eid],zone_floors.get(eid,3.0))]
+        improved_backdrop=(bool(is_backdrop_rotation and parent and after_count<=before_count
+                                and entry['cost']<parent['cost']-.1 and not worsened))
+        if (parent is None or (after_count>=before_count and not restored_zone and not improved_quiet
+                               and not improved_backdrop) or worsened or failed_minimum):
             rejected_contrast.append(dict(name=name,parent=parent['candidate']['name'] if parent else None,
-                reason='low-contrast count did not decrease' if parent and after_count>=before_count
-                       else 'moved text minimum contrast stayed below 3.0' if failed_minimum
+                reason='low-contrast count did not decrease' if parent and after_count>=before_count and not restored_zone and not improved_quiet and not improved_backdrop
+                       else 'moved text contrast stayed below its glyph floor' if failed_minimum
                        else 'moved text contrast regressed' if worsened else 'parent unavailable'))
         else:filtered.append(entry)
     valid=filtered
@@ -3500,22 +3950,26 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     qwen_primary=abs(log(state['delta']))>=.12
     perceptual=_siglip_rerank(valid,objective_cost,reference_image,relationship_context,
                               qwen_feasible=qwen_feasible,qwen_primary=qwen_primary,
-                              display_text_ids=display_text_ids)
+                              display_text_ids=display_text_ids,source_contrast=source_contrast)
     if perceptual.get('selected_index') is None:
         fallback=_select_visual_candidate(valid,[objective_cost(e) for e in valid],[0.]*len(valid),
                                            qwen_feasible,qwen_primary,False,
-                                           display_text_ids=display_text_ids)
+                                           display_text_ids=display_text_ids,
+                                           source_contrast=source_contrast)
         perceptual.update(fallback,used=False)
     selected=valid[perceptual['selected_index']]
     report=dict(used=True,
                 method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
                 perceptual=perceptual,qwen_primary=qwen_primary,
+                source_contrast=source_contrast,
                 objective_cost_components=[dict(name=e['candidate']['name'],
                     visual_cost=round(e['cost'],4),layout_defect_cost=round(layout_cost,4),
                     total=round(e['cost']+layout_cost,4))
                     for e,layout_cost in zip(valid,objective_layout_costs)],
                 candidates=[{k:v for k,v in e.items() if k not in ('candidate','image')}
                             |{'name':e['candidate']['name'],
+                              'readability_floor':e['candidate'].get('readability_floor'),
+                              'readability_floor_met':e['candidate'].get('readability_floor_met',False),
                               'contrast_repairs':e['candidate'].get('contrast_repairs',[])}
                             for e in entries],
                 rejected_contrast_variants=rejected_contrast)
@@ -3546,6 +4000,168 @@ def _visual_relationship_context(units,source,width,height):
     return dict(bucket=bucket,roles=sorted(roles),density=density,
                 grouped_units=any(len(unit['items'])>1 for unit in units),
                 callout_quadrants=sorted(set(quadrants)))
+
+
+def _readable_text_floor_variant(elements,units,width,height):
+    """Offer a hierarchy-preserving sibling when all type can grow safely.
+
+    This is deliberately a candidate, not an unconditional edit: an authored
+    tiny footer or a crowded canvas may not have room for larger type. The
+    under-floor text group receives a common additive increase, preserving its
+    internal size gaps; the next larger size caps the floor so hierarchy order
+    cannot invert. Tracking scales with each font, and affected frames grow
+    around their existing centers. Normal geometry checks decide if the result
+    can be used.
+    """
+    short=min(float(width),float(height))
+    floor=min(16.,max(8.,short*.018))
+    texts=[e for e in elements if e.get('type')=='text' and e.get('content','').strip()]
+    if not texts:return None
+    smallest=min(float(e.get('font_size',1.)) for e in texts)
+    if smallest>=floor-1e-4:return None
+    below=[e for e in texts if float(e.get('font_size',1.))<floor]
+    largest_below=max(float(e.get('font_size',1.)) for e in below)
+    next_size=min((float(e.get('font_size',1.)) for e in texts
+                   if float(e.get('font_size',1.))>=floor),default=None)
+    target_floor=floor
+    if next_size is not None:
+        target_floor=min(target_floor,max(smallest,next_size*.90))
+    delta=min(target_floor-smallest,
+              max(0.,(next_size*.90-largest_below) if next_size is not None else target_floor-smallest))
+    # Keep this an exploration step, not a wholesale change to the layout.
+    if delta<=1e-4 or delta>min(12.,short*.025):return None
+    below_ids={e['id'] for e in below}
+    result=deepcopy(elements)
+    for e in result:
+        if e.get('id') not in below_ids:continue
+        old_size=max(1.,float(e.get('font_size',1.)))
+        new_size=old_size+delta
+        old_cx=e['x']+e['width']/2.;old_cy=e['y']+e['height']/2.
+        e['font_size']=new_size
+        e['letter_spacing']=float(e.get('letter_spacing',0.))*(new_size/old_size)
+        measured_h,measured_w,lines=_text_info(e,max(e['width'],1e6),new_size)[:3]
+        new_width=max(e['width'],measured_w+new_size*.12)
+        if new_width>width or (e.get('max_lines') and lines>e['max_lines']):return None
+        measured_h=_text_info(e,new_width,new_size)[0]
+        new_height=max(e['height'],measured_h)
+        e.update(width=new_width,height=new_height,
+                 x=old_cx-new_width/2.,y=old_cy-new_height/2.)
+    return result
+
+
+def _source_scaled_art_variant(elements,units,source,width,height):
+    """Offer a proportional source-layout sibling for heavily shrunken art.
+
+    Qwen can identify the right image group but sometimes compresses the whole
+    group far below the source-to-target area scale. This candidate restores
+    the group's relative geometry using one uniform scale around the canvas
+    centers. It is considered only for large, unboxed image groups; ranking
+    and feasibility checks still decide whether it survives.
+    """
+    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
+    scale=sqrt(float(width)*float(height)/max(1.,sw*sh))
+    by_id={e['id']:e for e in elements}
+    source_by_id={e['id']:e for e in source['elements']}
+    result=deepcopy(elements);changed=False
+    canvas_area=max(1.,sw*sh)
+    for unit in units:
+        items=unit.get('items',())
+        if not items or any(e.get('type')!='image' for e in items):
+            continue
+        if unit.get('backed_ids') or unit.get('backed_by_ids'):
+            continue
+        source_bounds=unit.get('bounds')
+        if not source_bounds:
+            continue
+        sx0,sy0,sx1,sy1=map(float,source_bounds)
+        if max(0.,sx1-sx0)*max(0.,sy1-sy0)/canvas_area<.045:
+            continue
+        ids=[e['id'] for e in items]
+        if any(eid not in by_id or eid not in source_by_id for eid in ids):
+            continue
+        current=[by_id[eid] for eid in ids]
+        if any(abs(float(e.get('rotation',0.)))>.5 for e in current):
+            continue
+        cx0=min(float(e['x']) for e in current)
+        cy0=min(float(e['y']) for e in current)
+        cx1=max(float(e['x'])+float(e['width']) for e in current)
+        cy1=max(float(e['y'])+float(e['height']) for e in current)
+        expected_w=(sx1-sx0)*scale;expected_h=(sy1-sy0)*scale
+        if expected_w<=1 or expected_h<=1:
+            continue
+        # Avoid touching ordinary model sizing; only explore a substantial
+        # correction when both dimensions show that the group collapsed.
+        if ((cx1-cx0)>=expected_w*.78
+                or (cy1-cy0)>=expected_h*.78):
+            continue
+        proposed=[]
+        for original in items:
+            source_item=source_by_id[original['id']]
+            proposed.append({
+                'id':original['id'],
+                'x':(float(source_item['x'])-sw/2.)*scale+float(width)/2.,
+                'y':(float(source_item['y'])-sh/2.)*scale+float(height)/2.,
+                'width':float(source_item['width'])*scale,
+                'height':float(source_item['height'])*scale,
+            })
+        min_x=min(e['x'] for e in proposed);min_y=min(e['y'] for e in proposed)
+        max_x=max(e['x']+e['width'] for e in proposed)
+        max_y=max(e['y']+e['height'] for e in proposed)
+        if max_x-min_x>width or max_y-min_y>height:
+            continue
+        dx=dy=0.
+        # Apply one shared boundary correction so internal spacing is exact.
+        if min_x<0:dx=-min_x
+        elif max_x>width:dx=float(width)-max_x
+        if min_y<0:dy=-min_y
+        elif max_y>height:dy=float(height)-max_y
+        for e in proposed:
+            target=next(item for item in result if item['id']==e['id'])
+            target.update(x=e['x']+dx,y=e['y']+dy,
+                          width=e['width'],height=e['height'])
+        changed=True
+    return result if changed else None
+
+
+def _rotation_candidate_variants(elements,units,width,height,limit=6):
+    """Generate small rotation alternatives for canvas-registered backgrounds."""
+    from engine.qwen_refine import _rotated_bounds
+    """Generate bounded background rotations; leave foreground art and rules alone."""
+    variants=[]
+    # This helper is retained for compatibility with older callers. Foreground
+    # rotation was the source of tilted separator rules; background alternatives
+    # are created separately where the renderer can expand their crop safely.
+    return variants
+
+
+def _background_rotation_variants(backgrounds,limit=4):
+    """Return gentle rotations for full-canvas image backgrounds only."""
+    variants=[]
+    for original in backgrounds:
+        if original.get('type')!='image':
+            continue
+        asset=Path(_asset_root(original))/str(original.get('asset_id',''))
+        try:
+            from PIL import Image
+            with Image.open(asset) as opened:
+                if 'A' in opened.getbands() and opened.getchannel('A').getextrema()[0]<250:
+                    # Transparent color washes and border layers stay
+                    # canvas-registered; rotate only an opaque backdrop.
+                    continue
+        except (OSError,ValueError,ImportError):
+            continue
+        label=' '.join(str(original.get(k,'')) for k in ('asset_id','name','semantic')).lower()
+        if any(word in label for word in ('logo','wordmark','frame','border')):
+            continue
+        angle=float(original.get('rotation',0.))
+        for delta in (-4.,-2.,2.,4.):
+            changed=deepcopy(backgrounds)
+            next(e for e in changed if e['id']==original['id'])['rotation']=angle+delta
+            variants.append((changed,dict(element_id=original['id'],from_rotation=angle,
+                                          to_rotation=angle+delta,delta=delta)))
+            if len(variants)>=limit:
+                return variants
+    return variants
 
 
 def _busy_background_font_shrink_only(candidate, baselines, display_text_ids):
@@ -3609,7 +4225,7 @@ def _busy_background_font_shrink_only(candidate, baselines, display_text_ids):
 
 
 def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary=False,
-                             ranker_trained=False,display_text_ids=None):
+                             ranker_trained=False,display_text_ids=None,source_contrast=None):
     """Rank safe Qwen siblings; keep objective and contrast bands explicit."""
     qwen=[i for i,e in enumerate(valid) if e['candidate']['name'].startswith('qwen-')]
     heur=[i for i in range(len(valid)) if i not in qwen]
@@ -3619,7 +4235,7 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
     tolerated={i:_busy_background_font_shrink_only(valid[i],baselines,display_text_ids)
                for i in qwen}
     safe=[i for i in qwen if feasible(i) and
-          (_qwen_contrast_safe(valid[i],baselines,qwen_primary) or bool(tolerated[i]))]
+          (_qwen_contrast_safe(valid[i],baselines,qwen_primary,source_contrast) or bool(tolerated[i]))]
     coherent=[i for i in safe if valid[i].get('source_lockup_error',0.)<=.025
               and not valid[i].get('has_layout_defects',False)]
     fractured=[]
@@ -3657,6 +4273,28 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
                        if len(valid[i].get('low_contrast',[]))==contrast_best]
         qchoice=max(contrast_band,key=lambda i:scores[i]
                     -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
+        readable_floor=[i for i in contrast_band
+                        if valid[i]['candidate'].get('readability_floor_met')
+                        and not valid[i].get('has_layout_defects',False)
+                        and not valid[i].get('invisible_text')]
+        if readable_floor:
+            # The ranker is a style tie-breaker; when hard checks and measured
+            # contrast are equal, honor a feasible minimum-size typography
+            # sibling over a smaller-text candidate.
+            qchoice=max(readable_floor,key=lambda i:scores[i]
+                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
+        # When Qwen has substantially undersized a large unboxed art group,
+        # keep its source-proportional candidate if SigLIP rates it at least as
+        # well as the current family choice. This restores a plausible art
+        # scale while leaving the model/vision score in control of placement.
+        source_scaled=[i for i in contrast_band
+                       if valid[i]['candidate']['name'].startswith('qwen-source-scaled-art-')
+                       and not valid[i].get('has_layout_defects',False)
+                       and not valid[i].get('invisible_text')
+                       and scores[i]>=scores[qchoice]-.05]
+        if source_scaled:
+            qchoice=max(source_scaled,key=lambda i:scores[i]
+                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
         # When a rendered contrast repair is a safe member of the same family
         # band and fixes more weak text, prefer it over its un-repaired parent.
         by_name={valid[i]['candidate']['name']:i for i in family_band}
@@ -3696,7 +4334,7 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
         qwen_safety_checks=dict(feasible=bool(checked is not None and feasible(checked)),
             no_invisible_text=bool(checked is not None and not valid[checked].get('invisible_text')),
             contrast_within_tolerance=bool(checked is not None and
-                (_qwen_contrast_safe(valid[checked],baselines,qwen_primary) or bool(tolerated.get(checked)))),
+                (_qwen_contrast_safe(valid[checked],baselines,qwen_primary,source_contrast) or bool(tolerated.get(checked)))),
             qwen_primary=qwen_primary,objective_within_band=checked in family_band,
             objective_within_global_band=checked in global_band,
             siglip_margin=bool(checked is not None and best_heuristic is not None and scores[checked]>scores[best_heuristic]+.03),
@@ -3705,7 +4343,8 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
 
 
 def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=None,
-                   qwen_feasible=False, qwen_primary=False,display_text_ids=None):
+                   qwen_feasible=False, qwen_primary=False,display_text_ids=None,
+                   source_contrast=None):
     """Optional visual scoring with a deterministic family-aware fallback."""
     if len(valid)<2:
         return dict(used=False,selected_index=None,reason='Fewer than two candidates to compare')
@@ -3722,32 +4361,58 @@ def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=N
     if not used:return dict(used=False,selected_index=None,reason=note)
     report=_select_visual_candidate(valid,[objective_cost(e) for e in valid],scores,
                                     qwen_feasible,qwen_primary,ranker_trained,
-                                    display_text_ids=display_text_ids)
+                                    display_text_ids=display_text_ids,
+                                    source_contrast=source_contrast)
     return dict(report,used=used,note=note,scores=[round(s,4) for s in scores])
 
 
 def _assemble(elements,backgrounds,source,width,height):
     by_id={e['id']:deepcopy(e) for e in elements}
     for old in backgrounds:
-        e=deepcopy(old);e.update(x=0,y=0,width=width,height=height)
+        e=deepcopy(old)
         if e['type']=='image':
-            e['fit']='cover'
+            angle=abs(float(e.get('rotation',0.)))%180.
+            theta=radians(angle)
+            c,s=abs(cos(theta)),abs(sin(theta))
+            # Size the rotated rectangle so every canvas corner stays inside
+            # the image. Covering only the rotated bounding-box dimensions is
+            # insufficient: a rectangle's diagonal corners can still expose
+            # transparent canvas wedges after rotation.
+            scale=max((float(width)*c+float(height)*s)/max(1e-6,float(width)),
+                      (float(height)*c+float(width)*s)/max(1e-6,float(height)))
+            fitted_w,fitted_h=float(width)*scale,float(height)*scale
+            e.update(x=(float(width)-fitted_w)/2.,y=(float(height)-fitted_h)/2.,
+                     width=fitted_w,height=fitted_h)
+            e['fit']=_background_fit(old,source,width,height)
+            if e['fit']=='fill':
+                matte=_poster_matte_asset(old,width,height)
+                if matte:
+                    e['asset_id']=matte
+                    e['fit']='fill'
+        else:
+            e.update(x=0,y=0,width=width,height=height)
         by_id[e['id']]=e
     return dict(canvas=dict(width=int(width),height=int(height)),elements=[by_id[e['id']] for e in source['elements']])
 
 
 def _broken_source_stack_units(proposal, units):
-    """Find source-evidenced stacks that Qwen has separated in its proposal.
+    """Find source-evidenced stacks whose overlap Qwen materially worsened.
 
-    The stack analyzer already groups substantial overlaps with a clear paint
-    order. Keep this check narrow: an alternative is needed only when at least
-    one such source relationship falls below the same overlap threshold in the
-    proposed geometry. Other Qwen placements remain untouched.
+    A simple overlap-present/absent check misses harmful cases: a source pair
+    that just touches can still count as layered after Qwen moves one element
+    completely underneath another. Compare overlap as a fraction of the
+    smaller visible element and preserve the authored shared transform when
+    the proposal increases that fraction substantially.
     """
     proposed_by_id={e['id']:e for e in proposal}
     def visible_box(element):
         return (_text_visible_bounds(element) if element['type']=='text'
                 else _bounds([element]))
+    def overlap_fraction(a,b):
+        a_box,b_box=visible_box(a),visible_box(b)
+        a_area=max(1e-9,(a_box[2]-a_box[0])*(a_box[3]-a_box[1]))
+        b_area=max(1e-9,(b_box[2]-b_box[0])*(b_box[3]-b_box[1]))
+        return _overlap(a_box,b_box)/min(a_area,b_area)
 
     broken=[]
     for unit in units:
@@ -3765,7 +4430,13 @@ def _broken_source_stack_units(proposal, units):
                     continue
                 if not _intentional_stack_pair(a,b,visible_box(a),visible_box(b)):
                     continue
-                if not _intentional_stack_pair(pa,pb,visible_box(pa),visible_box(pb)):
+                source_fraction=overlap_fraction(a,b)
+                proposed_fraction=overlap_fraction(pa,pb)
+                # Do not accept a much denser collision just because the two
+                # frames still overlap. This is especially important for
+                # small controls adjacent to a foreground image edge.
+                if (not _intentional_stack_pair(pa,pb,visible_box(pa),visible_box(pb))
+                        or proposed_fraction>max(source_fraction*1.5,source_fraction+.20)):
                     stack_broken=True
                     break
             if stack_broken:
@@ -3775,7 +4446,7 @@ def _broken_source_stack_units(proposal, units):
     return broken
 
 
-def _preserve_layered_proposals(proposal, units):
+def _preserve_layered_proposals(proposal, units, return_anchor_ids=False):
     """Project model proposals for source stacks onto one shared transform.
 
     A layout model may choose where and how large a composite should be, but
@@ -3785,39 +4456,139 @@ def _preserve_layered_proposals(proposal, units):
     proposed_by_id={e['id']:e for e in result}
     geometry_keys=('x','y','width','height','font_size','letter_spacing',
                    'corner_radius','stroke_width')
+    anchor_ids = []
     for unit in units:
         if not unit.get('preserve_layer_stack') or len(unit['items'])<2:
             continue
-        source_box=unit['bounds']
-        source_w=max(1e-6,source_box[2]-source_box[0])
-        source_h=max(1e-6,source_box[3]-source_box[1])
-        suggested=[proposed_by_id[e['id']] for e in unit['items'] if e['id'] in proposed_by_id]
-        if len(suggested)!=len(unit['items']):
+        source_items = unit['items']
+        suggested=[proposed_by_id[e['id']] for e in source_items if e['id'] in proposed_by_id]
+        if len(suggested)!=len(source_items):
             continue
-        suggested_box=_bounds(suggested)
-        suggested_w=max(1e-6,suggested_box[2]-suggested_box[0])
-        suggested_h=max(1e-6,suggested_box[3]-suggested_box[1])
-        # One scale factor preserves source aspect ratios (notably contain-fit
-        # images) while fitting the complete stack inside Qwen's envelope.
-        env_w=max(1.,suggested_w);env_h=max(1.,suggested_h)
-        factor=min(env_w/max(1.,source_w),env_h/max(1.,source_h))
-        block=_scale(unit['items'],factor)
-        box=_bounds(block)
-        target_x=(suggested_box[0]+suggested_box[2]-box[2]+box[0])/2
-        target_y=(suggested_box[1]+suggested_box[3]-box[3]+box[1])/2
-        _move(block,target_x,target_y)
-        for item in block:
-            target=proposed_by_id[item['id']]
-            if item['type']=='text':
-                scaled_size=max(1.,item.get('font_size',1.))
-                fitted_size=_fit_text(item,item['width'],item['height'],scaled_size)
-                if fitted_size<scaled_size:
-                    item['letter_spacing']=item.get('letter_spacing',0.)*(fitted_size/scaled_size)
-                item['font_size']=fitted_size
-            for key in geometry_keys:
-                if key in item:
-                    target[key]=item[key]
+        visual_items = [e for e in source_items if e['type'] in ('image', 'shape')]
+        text_items = [e for e in source_items if e['type']=='text']
+        largest_visual_area=max((float(e.get('width',0.0))*float(e.get('height',0.0))
+                                 for e in visual_items),default=0.0)
+        largest_text_area=max((float(e.get('width',0.0))*float(e.get('height',0.0))
+                               for e in text_items),default=0.0)
+        # A small ornament can overlap a headline without representing the
+        # scale or position of the whole lockup. Use it as the transform anchor
+        # only when its area is substantial relative to the largest text item.
+        if visual_items and (not text_items or largest_visual_area>=.5*largest_text_area):
+            anchor = max(visual_items, key=lambda e: float(e.get('width', 0.0)) * float(e.get('height', 0.0)))
+            anchor_id = anchor['id']
+            anchor_ids.append(anchor_id)
+            prop_anchor = proposed_by_id[anchor_id]
+            factor = min(float(prop_anchor['width']) / max(1e-6, float(anchor['width'])),
+                         float(prop_anchor['height']) / max(1e-6, float(anchor['height'])))
+            anchor_cx = float(prop_anchor['x']) + float(prop_anchor['width']) / 2.0
+            anchor_cy = float(prop_anchor['y']) + float(prop_anchor['height']) / 2.0
+            src_anchor_cx = float(anchor['x']) + float(anchor['width']) / 2.0
+            src_anchor_cy = float(anchor['y']) + float(anchor['height']) / 2.0
+        else:
+            scales = [proposed_by_id[e['id']]['width'] / max(1e-6, float(e.get('width', 1.0)))
+                      for e in source_items if e['id'] in proposed_by_id and float(e.get('width', 0)) > 0]
+            from statistics import median
+            factor = median(scales) if scales else 1.0
+            anchor_cx = median(proposed_by_id[e['id']]['x'] + proposed_by_id[e['id']]['width'] / 2.0
+                               for e in source_items if e['id'] in proposed_by_id)
+            anchor_cy = median(proposed_by_id[e['id']]['y'] + proposed_by_id[e['id']]['height'] / 2.0
+                               for e in source_items if e['id'] in proposed_by_id)
+            src_anchor_cx = (unit['bounds'][0] + unit['bounds'][2]) / 2.0
+            src_anchor_cy = (unit['bounds'][1] + unit['bounds'][3]) / 2.0
+            anchor_id = source_items[0]['id']
+            anchor_ids.append(anchor_id)
+
+        for item in source_items:
+            target = proposed_by_id[item['id']]
+            src_cx = item['x'] + item['width'] / 2.0
+            src_cy = item['y'] + item['height'] / 2.0
+            tgt_cx = anchor_cx + (src_cx - src_anchor_cx) * factor
+            tgt_cy = anchor_cy + (src_cy - src_anchor_cy) * factor
+            tgt_w = item['width'] * factor
+            tgt_h = item['height'] * factor
+            target['width'] = tgt_w
+            target['height'] = tgt_h
+            target['x'] = tgt_cx - tgt_w / 2.0
+            target['y'] = tgt_cy - tgt_h / 2.0
+            for k in ('corner_radius', 'stroke_width'):
+                if k in item:
+                    target[k] = item[k] * factor
+            if item['type'] == 'text':
+                src_font = max(1.0, float(item.get('font_size', 1.0)))
+                scaled_size = max(1.0, src_font * factor)
+                fitted_size = _fit_text(target, tgt_w, tgt_h, scaled_size)
+                target['font_size'] = fitted_size
+                target['letter_spacing'] = float(item.get('letter_spacing', 0.0)) * (fitted_size / src_font)
+    if return_anchor_ids:
+        return result, anchor_ids
     return result
+
+
+def _preserve_backed_containment(proposal,units,width,height):
+    """Keep source-contained panel contents inside their proposed backing panel.
+
+    Large source panels are intentionally separate units so a model can place
+    them independently. This sibling repairs only children that Qwen has moved
+    substantially outside the panel, mapping their source-relative positions
+    into the panel's proposed frame while retaining Qwen's font choice when it
+    still fits.
+    """
+    result=deepcopy(proposal)
+    by_id={e['id']:e for e in result}
+    source_by_id={e['id']:e for unit in units for e in unit['items']}
+    repaired=[]
+    for panel_unit in units:
+        if not panel_unit.get('backing_panel'):
+            continue
+        source_panel=panel_unit['items'][0]
+        panel=by_id.get(source_panel['id'])
+        if panel is None:
+            continue
+        sw=max(1.,float(source_panel.get('width',1.)))
+        sh=max(1.,float(source_panel.get('height',1.)))
+        sx=max(.05,float(panel.get('width',sw))/sw)
+        sy=max(.05,float(panel.get('height',sh))/sh)
+        panel_box=_bounds([panel])
+        panel_area=max(1.,(panel_box[2]-panel_box[0])*(panel_box[3]-panel_box[1]))
+        local=[]
+        for eid in panel_unit.get('backed_ids',()):
+            original=source_by_id.get(eid);current=by_id.get(eid)
+            if original is None or current is None:
+                continue
+            current_box=(_text_visible_bounds(current) if current.get('type')=='text'
+                         else _bounds([current]))
+            current_area=max(1.,(current_box[2]-current_box[0])*(current_box[3]-current_box[1]))
+            containment=_overlap(panel_box,current_box)/current_area
+            # Preserve a model's intentional reflow if it kept the content in
+            # the source backing. Repair only the detached children.
+            if containment>=.97:
+                continue
+            x_offset=float(original['x'])-float(source_panel['x'])
+            y_offset=float(original['y'])-float(source_panel['y'])
+            current['x']=float(panel['x'])+x_offset*sx
+            current['y']=float(panel['y'])+y_offset*sy
+            if current.get('type')=='text':
+                current['width']=max(1.,float(original['width'])*sx)
+                current['height']=max(1.,float(original['height'])*sy)
+                source_size=max(1.,float(original.get('font_size',1.)))
+                size=max(1.,float(current.get('font_size',source_size)))
+                size=min(size,source_size*min(sx,sy))
+                fitted=_fit_text(current,current['width'],current['height'],size)
+                current['font_size']=max(1.,fitted)
+                current['letter_spacing']=float(original.get('letter_spacing',0.))*current['font_size']/source_size
+            else:
+                scale=min(sx,sy)
+                current['width']=max(1.,float(original['width'])*scale)
+                current['height']=max(1.,float(original['height'])*scale)
+            local.append(eid)
+        if local:
+            repaired.extend(local)
+    # Reject this sibling if the recovered card no longer fits on the canvas.
+    for e in result:
+        if e['id'] in repaired:
+            e['x']=min(max(0.,float(e['x'])),max(0.,width-float(e['width'])))
+            e['y']=min(max(0.,float(e['y'])),max(0.,height-float(e['height'])))
+    return result,sorted(set(repaired))
 
 
 def _adapt_with_diagnostics(source,target_canvas):
@@ -3866,17 +4637,48 @@ def _adapt_with_diagnostics(source,target_canvas):
                 # Keep compact source-linked superscripts attached in the
                 # primary proposal as well as in the calibrated sibling.
                 proposal,anchor_changes=anchor_superscripts(proposal,units)
+                # Superscript anchoring may change a text box after the first
+                # overlap cleanup. Recheck the final proposal geometry before
+                # feasibility validation so a repair cannot reintroduce a
+                # collision with adjacent logo/subtitle text.
+                proposal,post_anchor_changes=_separate_qwen_text_collisions(
+                    proposal,units,width,height)
+                proposal,post_anchor_unit_changes=_separate_qwen_unit_collisions(
+                    proposal,units,width,height)
+                decoded_candidate,decoded_separations=_separate_qwen_text_collisions(
+                    original_proposal,units,width,height)
+                decoded_candidate,decoded_unit_changes=_separate_qwen_unit_collisions(
+                    decoded_candidate,units,width,height)
                 qwen_diagnostics['proposal_received'] = True
                 qwen_diagnostics['micro_snapped_labels']=snapped_labels
                 qwen_diagnostics['superscript_anchored_ids']=anchor_changes
+                qwen_diagnostics['post_anchor_text_separations']=post_anchor_changes
+                qwen_diagnostics['post_anchor_unit_separations']=post_anchor_unit_changes
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
+                contained_candidate,contained_ids=_preserve_backed_containment(
+                    proposal,units,width,height)
+                if (contained_ids and contained_candidate!=proposal
+                        and _feasible(contained_candidate,units,width,height,
+                                      strict_margins=False,gap_factor=.004,
+                                      allow_text_visual_overlap=True)):
+                    seeds.append(dict(name='qwen-source-contained-proposal',
+                                      elements=contained_candidate))
+                    qwen_diagnostics['source_containment_repaired_ids']=contained_ids
+                if decoded_candidate!=original_proposal:
+                    # Preserve the model's decoded composition independently
+                    # from source-lockup repairs, which can over-scale a
+                    # rotated composite that already contains the layout.
+                    seeds.append(dict(name='qwen-decoded-repaired',
+                                      elements=decoded_candidate))
+                    qwen_diagnostics['decoded_text_separations']=decoded_separations
+                    qwen_diagnostics['decoded_unit_separations']=decoded_unit_changes
                 # Preserve a source-evidenced overlapping artwork stack only
                 # when Qwen separated one of its layers. Keep the model layout
                 # above as a sibling so the renderer/ranker can still prefer
                 # an intentional reflow when it renders better.
                 broken_stack_units=_broken_source_stack_units(proposal,units)
                 if broken_stack_units:
-                    stacked=_preserve_layered_proposals(proposal,broken_stack_units)
+                    stacked,stack_anchor_ids=_preserve_layered_proposals(proposal,broken_stack_units,return_anchor_ids=True)
                     stacked,stack_anchor_changes=anchor_superscripts(stacked,units)
                     raw_stack_cost=_objective_layout_cost(
                         proposal,units,source,width,height,desired,
@@ -3884,12 +4686,31 @@ def _adapt_with_diagnostics(source,target_canvas):
                     preserved_stack_cost=_objective_layout_cost(
                         stacked,units,source,width,height,desired,
                         allow_text_visual_overlap=True)
-                    if stacked!=proposal and preserved_stack_cost<=raw_stack_cost+1e-7:
-                        seeds.append(dict(name='qwen-layer-preserved',elements=stacked))
-                        qwen_diagnostics['layer_preserved_elements']=deepcopy(stacked)
+                    preserved_candidate=stacked
+                    if not _feasible(preserved_candidate,units,width,height,
+                                     strict_margins=False,gap_factor=.004,
+                                     allow_text_visual_overlap=True):
+                        for topology in ('nearest','centers','alternate'):
+                            projected=_constrain(stacked,units,width,height,topology,
+                                                 strict_margins=False,
+                                                 allow_text_visual_overlap=True)
+                            if projected is not None and _feasible(
+                                    projected,units,width,height,strict_margins=False,
+                                    gap_factor=.004,allow_text_visual_overlap=True):
+                                preserved_candidate=projected
+                                break
+                    if (stacked!=proposal and preserved_candidate is not None
+                            and _feasible(preserved_candidate,units,width,height,
+                                          strict_margins=False,gap_factor=.004,
+                                          allow_text_visual_overlap=True)):
+                        # This sibling is intentionally retained even when its
+                        # geometric score is higher. The rendered judge decides
+                        # whether preserving the source overlap improves design.
+                        seeds.append(dict(name='qwen-layer-preserved',elements=preserved_candidate))
+                        qwen_diagnostics['layer_preserved_elements']=deepcopy(preserved_candidate)
                         qwen_diagnostics['layer_stack_repaired_ids']=sorted({
                             e['id'] for unit in broken_stack_units for e in unit['items']})
-                        qwen_diagnostics['layer_stack_anchor_ids']=stack_anchor_changes
+                        qwen_diagnostics['layer_stack_anchor_ids']=stack_anchor_ids if stack_anchor_ids else stack_anchor_changes
                         qwen_diagnostics['layer_stack_defect_cost']={
                             'proposal':round(raw_stack_cost,6),
                             'preserved':round(preserved_stack_cost,6)}
@@ -3972,10 +4793,10 @@ def _adapt_with_diagnostics(source,target_canvas):
         qwen_seed=seed['name'].startswith('qwen-')
         if not qwen_seed:
             _sync_backing_panels(seed['elements'],units,width,height)
-        elif _unintended_text_overlaps(seed['elements'],units):
+        elif seed['name']=='qwen-proposal' and _unintended_text_overlaps(seed['elements'],units):
             qwen_diagnostics['constraint_reason']='unintended text-on-text overlap'
         if qwen_seed and _feasible(seed['elements'],units,width,height,
-                                   strict_margins=False,gap_factor=.004,
+                                   strict_margins=False,gap_factor=.001,
                                    allow_text_visual_overlap=True):
             # Retain a valid model layout intact. Only project it when it
             # violates on-canvas bounds or separation constraints.
@@ -3992,7 +4813,7 @@ def _adapt_with_diagnostics(source,target_canvas):
             if projected is None and _feasible(
                     seed['elements'],units,width,height,
                     strict_margins=not qwen_seed,
-                    gap_factor=.004 if qwen_seed else .008,
+                    gap_factor=.001 if qwen_seed else .008,
                     allow_text_visual_overlap=qwen_seed):
                 projected=seed['elements']
         if projected is None:
@@ -4021,6 +4842,74 @@ def _adapt_with_diagnostics(source,target_canvas):
         # target. Keep bounded geometry and expose fallback in diagnostics.
         fallback=_safe_grid(units,width,height,desired)
         feasible=[dict(name='bounded-grid-fallback',elements=fallback,energy=_energy(fallback,units,source,width,height,desired))]
+    feasible.sort(key=lambda c:(c['energy'],c['name']))
+    # Make bounded exploratory siblings from the best distinct layouts. The
+    # parent always remains in the candidate set, so these repairs can never
+    # force a rotation or larger typography when the original scores better.
+    exploratory=[]
+    bases=[]
+    seen_bases=set()
+    preferred_bases=([c for c in feasible if c['name'] in
+                      ('qwen-proposal','qwen-font-fitted','qwen-original',
+                       'qwen-local-refined','qwen-local-refined-font-fitted')]+
+                     feasible)
+    for candidate in preferred_bases:
+        if candidate['name'].endswith(('-readable-text-floor',)) or '-rotation-' in candidate['name']:
+            continue
+        signature=tuple((e['id'],round(e['x'],1),round(e['y'],1),round(e['width'],1),
+                         round(e['height'],1),round(e.get('rotation',0.),1))
+                        for e in candidate['elements'])
+        if signature in seen_bases:continue
+        seen_bases.add(signature);bases.append(candidate)
+        if len(bases)>=5:break
+    for parent in bases:
+        is_qwen=parent['name'].startswith('qwen-')
+        label=parent['name'].removeprefix('qwen-') if is_qwen else parent['name']
+        readable=_readable_text_floor_variant(parent['elements'],units,width,height)
+        if readable is not None:
+            readable_candidate=readable
+            if not _feasible(readable_candidate,units,width,height,strict_margins=False,
+                             gap_factor=.004,allow_text_visual_overlap=True):
+                for topology in ('nearest','centers','alternate'):
+                    projected=_constrain(readable,units,width,height,topology,
+                                          strict_margins=False,allow_text_visual_overlap=True)
+                    if projected is not None and _feasible(
+                            projected,units,width,height,strict_margins=False,
+                            gap_factor=.004,allow_text_visual_overlap=True):
+                        readable_candidate=projected
+                        break
+            if (_feasible(readable_candidate,units,width,height,strict_margins=False,
+                          gap_factor=.004,allow_text_visual_overlap=True)
+                    and not set(_unintended_text_overlaps(readable_candidate,units))-
+                               set(_unintended_text_overlaps(parent['elements'],units))):
+                name=('qwen-' if is_qwen else '')+'readable-text-floor-'+label
+                floor=min(16.,max(8.,min(float(width),float(height))*.018))
+                minimum_font=min(float(e.get('font_size',1.)) for e in readable_candidate
+                                 if e.get('type')=='text' and e.get('content','').strip())
+                exploratory.append(dict(name=name,elements=readable_candidate,
+                    energy=_energy(readable_candidate,units,source,width,height,desired),
+                    variant_of=parent['name'],readability_floor=floor,
+                    readability_floor_met=minimum_font>=floor-1e-4))
+        if is_qwen:
+            source_scaled=_source_scaled_art_variant(
+                parent['elements'],units,source,width,height)
+            if source_scaled is not None and _feasible(
+                    source_scaled,units,width,height,strict_margins=False,
+                    gap_factor=.004,allow_text_visual_overlap=True):
+                if not set(_unintended_text_overlaps(source_scaled,units))-set(
+                        _unintended_text_overlaps(parent['elements'],units)):
+                    name='qwen-source-scaled-art-'+label
+                    exploratory.append(dict(name=name,elements=source_scaled,
+                        energy=_energy(source_scaled,units,source,width,height,desired),
+                        variant_of=parent['name']))
+        # Generic rotation of foreground images tilts decorative lines and
+        # ornaments. Rotation candidates are generated for the background only.
+    # Limit total renderer work while ensuring at least one model-first source
+    # layout, when available, contributes exploratory siblings.
+    if exploratory:
+        qwen_exploratory=[c for c in exploratory if c['name'].startswith('qwen-')]
+        other_exploratory=[c for c in exploratory if not c['name'].startswith('qwen-')]
+        feasible.extend(qwen_exploratory[:12]+other_exploratory[:12])
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
     optimize_candidates=feasible[:10]
@@ -4059,7 +4948,13 @@ def _adapt_with_diagnostics(source,target_canvas):
             _repair_banner_cta_copy_proximity(elements,units,width,height)
             _repair_sparse_vertical_stack(elements,units,width,height)
             _align_peer_rows(elements,units)
-        optimized.append(dict(name=candidate['name'],elements=elements,energy=_energy(elements,units,source,width,height,desired),optimization=optimization))
+        optimized.append(dict(name=candidate['name'],elements=elements,
+            energy=_energy(elements,units,source,width,height,desired),optimization=optimization,
+            readability_floor=candidate.get('readability_floor'),
+            readability_floor_met=candidate.get('readability_floor_met',False),
+            rotation_change=candidate.get('rotation_change'),
+            **({'backgrounds':deepcopy(candidate['backgrounds'])}
+               if candidate.get('backgrounds') is not None else {})))
         if candidate['name'] in ('qwen-proposal','qwen-font-fitted'):
             from engine.qwen_refine import polish_variant
             local,search=polish_variant(elements,units,source,width,height,desired)
@@ -4077,6 +4972,21 @@ def _adapt_with_diagnostics(source,target_canvas):
             if search['accepted'] or candidate['name']=='qwen-font-fitted':
                 optimized.append(dict(name=local_name,elements=local,
                     energy=_energy(local,units,source,width,height,desired),optimization=search))
+    # Add a small background-only rotation sweep to the rendered candidates.
+    # Each variant keeps the original text and foreground geometry unchanged.
+    rotation_parents=[]
+    for candidate in sorted(optimized,key=lambda c:(c['energy'],c['name'])):
+        if candidate['name'] in ('qwen-proposal','qwen-source-contained-proposal','proportional'):
+            rotation_parents.append(candidate)
+        if len(rotation_parents)>=2:break
+    for parent in rotation_parents:
+        for index,(rotated_backgrounds,change) in enumerate(
+                _background_rotation_variants(backgrounds,limit=4),1):
+            prefix='qwen-' if parent['name'].startswith('qwen-') else ''
+            optimized.append(dict(name=f"{prefix}background-rotation-{parent['name']}-{index:02d}",
+                elements=deepcopy(parent['elements']),backgrounds=rotated_backgrounds,
+                energy=parent['energy'],optimization=dict(before=parent['energy'],
+                after=parent['energy'],accepted=0,iterations=0),rotation_change=change))
     # Reapply measured superscript anchoring after all position searches so a
     # local refinement cannot restore a model-proposed box-edge offset.
     if any(c['name'].startswith('qwen-') for c in optimized):
@@ -4094,7 +5004,12 @@ def _adapt_with_diagnostics(source,target_canvas):
     qwen_diagnostics['winner'] = winner['name']
     qwen_diagnostics['variants']=sorted({c['name'] for c in optimized+visual.get('candidates',[])
                                         if c['name'].startswith('qwen-')})
-    output=_assemble(winner['elements'],backgrounds,source,width,height)
+    # The visual reranker may select a background-only rotation sibling. Use
+    # that candidate's background layers for the delivered layout as well as
+    # for its diagnostic render; otherwise the report records a winner that
+    # the final JSON silently discards.
+    output=_assemble(winner['elements'],winner.get('backgrounds',backgrounds),
+                     source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],
                 generated=len(seeds),feasible=len(feasible),rejected_topologies=len(rejected),recovered=recovered,starts=len(optimized),winner=winner['name'],
                 energy_terms=_energy_terms(winner['elements'],units,source,width,height,desired),

@@ -28,6 +28,21 @@ def units(items):
 
 
 class QwenPipelineTests(unittest.TestCase):
+    def test_full_canvas_layers_keep_authored_fit_modes(self):
+        from engine.resize import _assemble
+        source=dict(canvas=dict(width=500,height=500),elements=[
+            dict(id='base',type='image',x=0,y=0,width=500,height=500,z_index=0,fit='cover'),
+            dict(id='frame',type='image',x=0,y=0,width=500,height=500,z_index=1,fit='contain'),
+            text('label',x=100,y=100,width=300,height=40,z_index=2),
+        ])
+        backgrounds,analysis_units=_analyze(source)
+        self.assertEqual({e['id'] for e in backgrounds},{'base','frame'})
+        self.assertFalse(analysis_units)
+        assembled=_assemble(source['elements'],backgrounds,source,600,400)
+        by_id={e['id']:e for e in assembled['elements']}
+        self.assertEqual(by_id['frame']['fit'],'contain')
+        self.assertEqual(by_id['base']['fit'],'cover')
+
     def test_source_backdrop_overlap_does_not_trigger_hero_clearance(self):
         from engine.qwen_refine import _repair_hero_clearance
         dome=dict(id='dome',type='image',x=100.,y=60.,width=300.,height=360.,z_index=0)
@@ -385,6 +400,27 @@ class QwenPipelineTests(unittest.TestCase):
         payload={'elements':[dict(id='e-1',box=[0,0,1,1])]}
         self.assertEqual(decode_v2_completion(payload,source,canvas)['elements'],[])
 
+    def test_training_filters_pairs_that_change_unpredicted_rotation(self):
+        from scripts.prepare_qwen_training import pair_filter_reason
+        a=dict(canvas=dict(width=100,height=100),elements=[
+            dict(id='a',type='image',x=0,y=0,width=100,height=100,z_index=0,rotation=-90)])
+        b=dict(canvas=dict(width=100,height=100),elements=[
+            dict(id='b',type='image',x=0,y=0,width=100,height=100,z_index=0,rotation=0)])
+        pair={'matches':[{'a_index':0,'b_index':0}]}
+        self.assertEqual(pair_filter_reason(pair,a,b),'element_rotation_changed')
+        b['elements'][0]['rotation']=270
+        self.assertIsNone(pair_filter_reason(pair,a,b))
+
+    def test_centered_single_line_source_text_can_recover_from_proposal_wrap(self):
+        from engine.qwen_refine import font_variant
+        original=text('headline',content='WIDE HEADLINE',x=150.,y=100.,width=200.,height=25.,
+                      font_size=20.,text_align='center')
+        proposal=deepcopy(original);proposal.update(x=230.,width=40.,height=50.)
+        result,changed=font_variant([proposal],units([original]),500.,500.)
+        self.assertIn('headline',changed)
+        self.assertEqual(_text(result[0])[2],1)
+        self.assertGreater(result[0]['width'],proposal['width'])
+
     def test_partial_json_recovers_only_complete_objects(self):
         payload=_extract_json('{"elements":[{"id":"e000","box":[1,2,3,4]},{"id":"e001","box":[1,')
         self.assertEqual(len(payload['elements']),1)
@@ -427,6 +463,191 @@ class QwenPipelineTests(unittest.TestCase):
             cover,_=generate_seed(source,{'width':800,'height':200},source['elements'])
         self.assertEqual(cover[0]['fit'],'cover')
         self.assertAlmostEqual(cover[0]['width']/cover[0]['height'],4)
+
+    def test_rotated_element_uniform_scaling_and_bounds_clamping(self):
+        import torch
+        from engine.qwen_seed import generate_seed, _rotated_bounds
+        source = dict(canvas=dict(width=500, height=500), elements=[
+            dict(id='badge', type='image', asset_id='badge.png', x=100., y=100.,
+                 width=100., height=100., rotation=45.0)
+        ])
+        # Propose non-uniform scaling (width=200, height=150)
+        payload = json.dumps({'elements': [
+            {'id': 'e000', 'box': [0, 0, 400, 300]}  # 200w x 150h on 500x500 canvas
+        ]})
+        class Tokenizer:
+            eos_token_id = 0
+            def apply_chat_template(self, *args, **kwargs): return 'prompt'
+            def __call__(self, s, **kwargs):
+                return {'input_ids': torch.tensor([[1]])} if kwargs.get('return_tensors') else {'input_ids': list(s)}
+            def decode(self, *args, **kwargs): return payload
+        class Model:
+            config = SimpleNamespace(max_position_embeddings=8192)
+            def generate(self, **kwargs): return torch.tensor([[1, 2, 3]])
+
+        with patch('engine.qwen_seed._load', return_value=(Model(), Tokenizer(), torch, 'cpu', 2)):
+            result, _ = generate_seed(source, {'width': 500, 'height': 500}, source['elements'])
+
+        badge = result[0]
+        # Must maintain rotation
+        self.assertAlmostEqual(badge['rotation'], 45.0)
+        # Center-pivot uniform scaling: width and height must scale uniformly
+        self.assertAlmostEqual(badge['width'], badge['height'])
+        # Rotated bounds must stay inside canvas [0, 500] x [0, 500]
+        rb = _rotated_bounds(badge)
+        self.assertGreaterEqual(rb[0], -1e-4)
+        self.assertGreaterEqual(rb[1], -1e-4)
+        self.assertLessEqual(rb[2], 500.0 + 1e-4)
+        self.assertLessEqual(rb[3], 500.0 + 1e-4)
+
+    def test_rotated_bleed_backdrop_keeps_source_side_anchor(self):
+        import torch
+        from engine.qwen_seed import generate_seed
+        source=dict(canvas=dict(width=1200,height=628),elements=[
+            dict(id='bleed',type='image',asset_id='backdrop.png',fit='contain',
+                 x=-447.5,y=-95.9,width=1267.5,height=846.2,z_index=0,rotation=-90.)
+        ])
+        payload=json.dumps({'elements':[{'id':'e000','box':[0,0,1000,1000]}]})
+        class Tokenizer:
+            eos_token_id=0
+            def apply_chat_template(self,*args,**kwargs):return 'prompt'
+            def __call__(self,s,**kwargs):
+                return {'input_ids':torch.tensor([[1]])} if kwargs.get('return_tensors') else {'input_ids':list(s)}
+            def decode(self,*args,**kwargs):return payload
+        class Model:
+            config=SimpleNamespace(max_position_embeddings=8192)
+            def generate(self,**kwargs):return torch.tensor([[1,2,3]])
+        with patch('engine.qwen_seed._load',return_value=(Model(),Tokenizer(),torch,'cpu',2)):
+            result,_=generate_seed(source,{'width':940,'height':788},source['elements'])
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result[0]['x'],0.,places=4)
+        self.assertEqual(result[0]['rotation'],-90.)
+
+    def test_rotated_lockup_companions_grouping_and_repair(self):
+        from engine.qwen_refine import lockup_groups, repair_relationships
+        # Tilted frame and text companion with similar rotation
+        frame = dict(id='frame', type='shape', x=100., y=100., width=120., height=80., rotation=15.0)
+        label = text('label', x=120., y=125., width=80., height=30., rotation=15.0)
+        source = [frame, label]
+        unit = dict(items=source, bounds=(100., 100., 220., 180.), source_canvas=(500, 500))
+
+        # Check they are grouped as rotated companions
+        groups = lockup_groups([unit])
+        self.assertIn({'frame', 'label'}, groups)
+
+        # Distort the proposal (e.g. sheared/separated)
+        proposal = deepcopy(source)
+        proposal[0].update(x=200., y=150., width=150., height=100.)
+        proposal[1].update(x=350., y=300., width=100., height=40.)  # sheared away
+        repaired, notes = repair_relationships(proposal, [unit], 500, 500)
+        by_id = {e['id']: e for e in repaired}
+
+        # Verify uniform group scaling and preserved relative center distance
+        scale = by_id['frame']['width'] / frame['width']
+        self.assertAlmostEqual(by_id['frame']['height'] / frame['height'], scale, places=2)
+        # Frame and label must not shear apart
+        src_dx = label['x'] - frame['x']
+        src_dy = label['y'] - frame['y']
+        tgt_dx = by_id['label']['x'] - by_id['frame']['x']
+        tgt_dy = by_id['label']['y'] - by_id['frame']['y']
+        self.assertAlmostEqual(tgt_dx, src_dx * scale, places=1)
+        self.assertAlmostEqual(tgt_dy, src_dy * scale, places=1)
+        self.assertTrue(any(n.get('kind') == 'rigid-source-lockup' for n in notes))
+
+    def test_quiet_zone_2d_placement_moves_off_busy_horizontal_subject(self):
+        from PIL import Image, ImageDraw
+        # Create an under image: top half is calm white sky, bottom half is busy dark couch with dense edges
+        under = Image.new('RGB', (400, 400), (255, 255, 255))
+        draw = ImageDraw.Draw(under)
+        # Busy texture at bottom [200, 400]
+        for y in range(200, 400, 4):
+            for x in range(0, 400, 4):
+                val = 40 if (x + y) % 8 == 0 else 180
+                draw.rectangle((x, y, x + 3, y + 3), fill=(val, val, val))
+
+        # Full image has black text rendered on top
+        full = under.copy()
+        draw_full = ImageDraw.Draw(full)
+        # Black text on the busy bottom area
+        draw_full.text((100, 280), "BUSY TEXT", fill=(0, 0, 0))
+
+        copy_elem = text('busy_title', x=100., y=280., width=200., height=40.,
+                         color='rgb(0,0,0)', font_size=24.)
+        unit = dict(items=[copy_elem], bounds=(100., 280., 300., 320.), source_canvas=(400, 400))
+        elements = [copy_elem]
+
+        repairs, _ = contrast_variant(elements, [unit], 400, 400, ['busy_title'], under, full,
+                                      return_alternatives=True)
+        # Should contain a 2D repositioning candidate moving to quiet upper zone
+        quiet_repairs = [c for c, changes in repairs
+                         if any(ch.get('repair_type') == 'lockup-repositioned-2d' for ch in changes)]
+        self.assertTrue(len(quiet_repairs) > 0)
+        best_cand, best_changes = next((c, changes) for c, changes in repairs
+                                       if any(ch.get('repair_type') == 'lockup-repositioned-2d' for ch in changes))
+        # dy should move text up into calm sky (dy < 0)
+        change = best_changes[0]
+        self.assertLess(change['dy'], 0)
+        self.assertEqual(change['placement'], 'quiet-zone-2d')
+
+    def test_layer_stack_anchors_to_largest_visual_element_when_anchor_ids_empty(self):
+        # Case 01 pattern: unit with a backing image (96x96) and two text elements
+        bg_image = dict(id='img_004', type='image', asset_id='img.png', x=156., y=472.,
+                        width=96., height=96., fit='contain', z_index=0)
+        title = text('txt_011', x=80., y=580., width=248., height=20., font_size=18., z_index=1)
+        subtitle = text('txt_012', x=80., y=605., width=248., height=16., font_size=14., z_index=2)
+        source_items = [bg_image, title, subtitle]
+        unit = dict(items=source_items, bounds=(80., 472., 328., 621.), preserve_layer_stack=True,
+                    source_canvas=(1024, 1024))
+
+        proposal = deepcopy(source_items)
+        # Model proposes repositioning the visual anchor at x=400, y=200 with 1.5x scale
+        proposal[0].update(x=400., y=200., width=144., height=144.)
+        # Model proposes distorted/misaligned text
+        proposal[1].update(x=100., y=100., width=500., height=50.)
+        proposal[2].update(x=120., y=160., width=500., height=40.)
+
+        preserved, anchor_ids = _preserve_layered_proposals(proposal, [unit], return_anchor_ids=True)
+        # Largest visual element must be the anchor ID
+        self.assertEqual(anchor_ids, ['img_004'])
+        by_id = {e['id']: e for e in preserved}
+        # Scaled by 1.5x around anchor
+        self.assertAlmostEqual(by_id['img_004']['width'], 144.)
+        self.assertAlmostEqual(by_id['img_004']['height'], 144.)
+        # Text must be refitted relative to the visual anchor
+        factor = 144. / 96.
+        src_offset_y = title['y'] - bg_image['y']
+        tgt_offset_y = by_id['txt_011']['y'] - by_id['img_004']['y']
+        self.assertAlmostEqual(tgt_offset_y, src_offset_y * factor, places=1)
+
+    def test_qwen_early_stopping_criteria_stops_repetition_and_closes_json(self):
+        import torch
+        from engine.qwen_seed import QwenEarlyStoppingCriteria, generate_seed
+
+        expected = {'e000', 'e001', 'e002'}
+        class MockTokenizer:
+            def decode(self, tokens, skip_special_tokens=True):
+                return self.current_text
+
+        tok = MockTokenizer()
+        criteria = QwenEarlyStoppingCriteria(tok, prompt_len=0, expected_ids=expected)
+
+        # Incomplete text: should not stop
+        tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]}'
+        criteria._counter = 3
+        self.assertFalse(criteria(torch.tensor([[1, 2, 3]])))
+
+        # All IDs present and closed with ]}: should stop
+        tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]},{"id":"e002","box":[20,20,30,30]}]}'
+        criteria._counter = 3
+        self.assertTrue(criteria(torch.tensor([[1, 2, 3]])))
+        self.assertTrue(criteria.stopped_early)
+
+        # Repetition loop: duplicate element begins: should stop
+        criteria2 = QwenEarlyStoppingCriteria(tok, prompt_len=0, expected_ids=expected)
+        tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]},{"id":"e002","box":[20,20,30,30]},{"id":"e001"'
+        criteria2._counter = 3
+        self.assertTrue(criteria2(torch.tensor([[1, 2, 3]])))
+        self.assertTrue(criteria2.stopped_early)
 
 
 if __name__=='__main__':unittest.main()

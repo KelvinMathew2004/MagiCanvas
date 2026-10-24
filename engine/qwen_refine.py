@@ -4,7 +4,25 @@ These helpers never consult a target design or change content/asset pixels.
 The original proposal remains available to the candidate ranker.
 """
 from copy import deepcopy
+from math import cos, radians, sin
 from statistics import median
+
+
+def _rotated_bounds(element):
+    """Compute visual bounds for a rotated element around its center pivot."""
+    x = float(element.get('x', 0.0))
+    y = float(element.get('y', 0.0))
+    w = float(element.get('width', 1.0))
+    h = float(element.get('height', 1.0))
+    rad = radians(float(element.get('rotation', 0.0)))
+    cx, cy = x + w / 2.0, y + h / 2.0
+    rw = w * abs(cos(rad)) + h * abs(sin(rad))
+    rh = w * abs(sin(rad)) + h * abs(cos(rad))
+    return (cx - rw / 2.0, cy - rh / 2.0, cx + rw / 2.0, cy + rh / 2.0)
+
+
+def _overlap(a, b):
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
 def _merge_groups(groups):
@@ -177,6 +195,40 @@ def lockup_groups(units):
                         choices.append((gap+ta,t))
         if choices:
             join(e['id'],min(choices,key=lambda item:item[0])[1]['id'])
+    # Rotated Lockup Companions: If a text element and a backing/frame element
+    # share a similar non-zero rotation (abs(rot_a - rot_b) <= 5.0) or one is
+    # inside the other's rotated bounds in the source design, lock them into a
+    # rigid-source-lockup so tilted text/badges never shear apart.
+    source_items = list(source.values())
+    for i, a in enumerate(source_items):
+        rot_a = float(a.get('rotation', 0.0)) % 360.0
+        is_rot_a = (0.5 < rot_a < 359.5) and abs(rot_a - 180.0) > 0.5
+        for b in source_items[i + 1:]:
+            rot_b = float(b.get('rotation', 0.0)) % 360.0
+            is_rot_b = (0.5 < rot_b < 359.5) and abs(rot_b - 180.0) > 0.5
+            if not (is_rot_a or is_rot_b):
+                continue
+            has_text = a['type'] == 'text' or b['type'] == 'text'
+            has_frame = a['type'] in ('image', 'shape') or b['type'] in ('image', 'shape')
+            if not (has_text and has_frame):
+                continue
+            box_a = _rotated_bounds(a)
+            box_b = _rotated_bounds(b)
+            area_a = max(1.0, (box_a[2] - box_a[0]) * (box_a[3] - box_a[1]))
+            area_b = max(1.0, (box_b[2] - box_b[0]) * (box_b[3] - box_b[1]))
+            diff = abs(rot_a - rot_b) % 360.0
+            angle_diff = min(diff, 360.0 - diff)
+            similar_rotation = is_rot_a and is_rot_b and angle_diff <= 5.0
+            ov = _overlap(box_a, box_b)
+            inside = (ov / min(area_a, area_b) >= 0.25) or (
+                box_b[0] <= a['x'] + a['width']/2 <= box_b[2] and
+                box_b[1] <= a['y'] + a['height']/2 <= box_b[3]
+            ) or (
+                box_a[0] <= b['x'] + b['width']/2 <= box_a[2] and
+                box_a[1] <= b['y'] + b['height']/2 <= box_a[3]
+            )
+            if (similar_rotation and ov > 0) or inside:
+                join(a['id'], b['id'])
     groups={}
     for eid in source:groups.setdefault(find(eid),set()).add(eid)
     return _merge_groups([ids for ids in groups.values() if len(ids)>1]
@@ -200,6 +252,79 @@ def repair_relationships(elements,units,width,height):
         sb=(min(e['x'] for e in originals),min(e['y'] for e in originals),
             max(e['x']+e['width'] for e in originals),max(e['y']+e['height'] for e in originals))
         sx,sy=(sb[0]+sb[2])/2,(sb[1]+sb[3])/2
+        has_rotated = any(
+            (0.5 < (float(e.get('rotation', 0.0)) % 360.0) < 359.5 and
+             abs((float(e.get('rotation', 0.0)) % 360.0) - 180.0) > 0.5)
+            for e in originals
+        )
+        if has_rotated:
+            scales = [
+                by_id[e['id']][k] / max(1.0, e[k])
+                for e in originals for k in ('width', 'height')
+                if e['id'] in by_id and e[k] > 0
+            ]
+            scale = max(0.01, median(scales)) if scales else 1.0
+            src_group_cx = (sb[0] + sb[2]) / 2.0
+            src_group_cy = (sb[1] + sb[3]) / 2.0
+            group_cx = median(
+                by_id[e['id']]['x'] + by_id[e['id']]['width'] / 2.0 -
+                (e['x'] + e['width'] / 2.0 - src_group_cx) * scale
+                for e in originals if e['id'] in by_id
+            )
+            group_cy = median(
+                by_id[e['id']]['y'] + by_id[e['id']]['height'] / 2.0 -
+                (e['y'] + e['height'] / 2.0 - src_group_cy) * scale
+                for e in originals if e['id'] in by_id
+            )
+            def _group_reach(s):
+                min_x = min_y = float('inf')
+                max_x = max_y = float('-inf')
+                for e in originals:
+                    rad = radians(float(e.get('rotation', 0.0)))
+                    w = e['width'] * s; h = e['height'] * s
+                    rw = w * abs(cos(rad)) + h * abs(sin(rad))
+                    rh = w * abs(sin(rad)) + h * abs(cos(rad))
+                    eff_half_w = max(w, rw) / 2.0
+                    eff_half_h = max(h, rh) / 2.0
+                    ecx = (e['x'] + e['width'] / 2.0 - src_group_cx) * s
+                    ecy = (e['y'] + e['height'] / 2.0 - src_group_cy) * s
+                    min_x = min(min_x, ecx - eff_half_w)
+                    max_x = max(max_x, ecx + eff_half_w)
+                    min_y = min(min_y, ecy - eff_half_h)
+                    max_y = max(max_y, ecy + eff_half_h)
+                return max_x - min_x, max_y - min_y, -min_x, max_x, -min_y, max_y
+
+            gw, gh, left_reach, right_reach, top_reach, bottom_reach = _group_reach(scale)
+            if gw > width or gh > height:
+                downscale = min(width / max(1e-6, gw), height / max(1e-6, gh))
+                scale *= downscale
+                gw, gh, left_reach, right_reach, top_reach, bottom_reach = _group_reach(scale)
+            group_cx = min(width - right_reach, max(left_reach, group_cx))
+            group_cy = min(height - bottom_reach, max(top_reach, group_cy))
+            trial = deepcopy(result)
+            trial_by = {e['id']: e for e in trial}
+            for e in originals:
+                out = trial_by[e['id']]
+                src_cx = e['x'] + e['width'] / 2.0
+                src_cy = e['y'] + e['height'] / 2.0
+                tgt_cx = group_cx + (src_cx - src_group_cx) * scale
+                tgt_cy = group_cy + (src_cy - src_group_cy) * scale
+                w = e['width'] * scale
+                h = e['height'] * scale
+                out['width'] = w
+                out['height'] = h
+                out['x'] = tgt_cx - w / 2.0
+                out['y'] = tgt_cy - h / 2.0
+                out['rotation'] = e.get('rotation', 0.0)
+                if e['type'] == 'text':
+                    source_font = max(1.0, float(e.get('font_size', 1.0)))
+                    out['font_size'] = max(1.0, source_font * scale)
+                    out['letter_spacing'] = float(e.get('letter_spacing', 0.0)) * scale
+            if not (set(_unintended_text_overlaps(trial, units)) - set(_unintended_text_overlaps(result, units))):
+                result = trial
+                by_id = trial_by
+                notes.append(dict(kind='rigid-source-lockup', element_ids=sorted(ids)))
+                continue
         # Text font ratios are reliable scale anchors for compact lockups;
         # explicit artwork groups use robust box ratios instead.
         scales=[by_id[e['id']].get('font_size',1)/max(1,e.get('font_size',1))
@@ -224,8 +349,22 @@ def repair_relationships(elements,units,width,height):
                   -(e['y']+e['height']/2-sy)*scale for e in originals)
         if emblem and abs(sx-sw/2)<=.04*sw:cx=width/2
         # Whole-group clamping preserves internal offsets and image proportions.
+        # If the authored lockup deliberately bleeds across a canvas edge,
+        # retain that edge anchor instead of translating the whole group inward
+        # until it fits. The previous clamp centered a large right-edge frame
+        # when resizing to a narrower canvas, breaking its registration with
+        # the model-proposed text and adjacent artwork.
         gw,gh=(sb[2]-sb[0])*scale,(sb[3]-sb[1])*scale
-        cx=min(width-gw/2,max(gw/2,cx));cy=min(height-gh/2,max(gh/2,cy))
+        def _clamp_group_axis(center, group_size, canvas_size, source_min, source_max, source_size):
+            bleed_left=source_min < -max(1.,source_size*.01)
+            bleed_right=source_max > source_size+max(1.,source_size*.01)
+            min_center=group_size*.25 if bleed_left else group_size/2
+            max_center=canvas_size-group_size*.25 if bleed_right else canvas_size-group_size/2
+            if min_center>max_center:
+                min_center,max_center=canvas_size*.25,canvas_size*.75
+            return min(max_center,max(min_center,center))
+        cx=_clamp_group_axis(cx,gw,width,sb[0],sb[2],sw)
+        cy=_clamp_group_axis(cy,gh,height,sb[1],sb[3],sh)
         trial=deepcopy(result);trial_by={e['id']:e for e in trial}
         cover_strips=[]
         for e in originals:
@@ -625,12 +764,17 @@ def anchor_superscripts(elements,units):
         anchor_vis_right=_text_visible_bounds(anchor)[2]
         source_gap=src_sat['x']-(src_anchor['x']+source_glyph_w)
         scaled_gap=source_gap*(anchor['font_size']/max(1.,src_anchor.get('font_size',1)))
+        source_vertical_offset=float(src_sat['y'])-float(src_anchor['y'])
+        scaled_vertical_offset=source_vertical_offset*(
+            anchor['font_size']/max(1.,src_anchor.get('font_size',1)))
         # Keep at least four pixels between visible glyph bounds, even when
         # the source gap scales down or Qwen's proposed frames overlap.
         new_x=max(anchor_vis_right+4.,anchor_vis_right+scaled_gap)
+        new_y=max(0.,anchor['y']+scaled_vertical_offset)
         sat_moved=abs(new_x-sat['x'])>.01
-        if sat_moved:
-            sat['x']=new_x
+        sat_moved_y=abs(new_y-sat['y'])>.01
+        if sat_moved or sat_moved_y:
+            sat['x']=new_x;sat['y']=new_y
         # Keep the raw layout frames disjoint as well as the measured glyphs.
         # The visible advance is a lower bound so tightening cannot clip ink.
         anchor_vis=_text_visible_bounds(anchor)
@@ -640,7 +784,7 @@ def anchor_superscripts(elements,units):
         if max_frame_w<anchor['width']-1e-4:
             anchor['width']=max_frame_w
             anchor_tightened=True
-        if anchor_tightened or sat_moved:
+        if anchor_tightened or sat_moved or sat_moved_y:
             changes.extend((anchor['id'],sat['id']))
     if set(_unintended_text_overlaps(result,units))-set(_unintended_text_overlaps(elements,units)):
         return deepcopy(elements),[]
@@ -651,6 +795,28 @@ def font_variant(elements,units,width,height):
     """Measure font alternatives in fixed model boxes; never rewrite target labels."""
     from engine.resize import _text, _text_info, _text_visible_bounds, _unintended_text_overlaps
     result=deepcopy(elements);source={e['id']:e for u in units for e in u['items']};changes=[]
+    source_canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),
+                       (width,height))
+    source_w=float(source_canvas[0])
+    # If an authored single-line centered label only wrapped because Qwen
+    # proposed a narrow frame, offer a centered wider-frame repair. Keep this
+    # bounded and source-evidenced; the global overlap check can reject it.
+    for e in result:
+        original=source.get(e['id'])
+        if (not original or e['type']!='text' or '\n' in original.get('content','')
+                or original.get('text_align')!='center'
+                or abs((original['x']+original['width']/2)/max(1.,source_w)-.5)>.08
+                or _text(original)[2]!=1 or _text(e)[2]<=1):
+            continue
+        natural_width=_text(e,1e9,e.get('font_size',1))[1]+max(1.,e.get('font_size',1))*.12
+        max_width=min(width*.90,max(e['width'],natural_width))
+        if natural_width>max_width+1e-5:continue
+        old=deepcopy(e);center=e['x']+e['width']/2
+        e['width']=max_width;e['x']=min(width-max_width,max(0.,center-max_width/2))
+        if set(_unintended_text_overlaps(result,units))-set(_unintended_text_overlaps(elements,units)):
+            e.update(old)
+        else:
+            changes.append(e['id'])
     for e in result:
         if e['type']!='text' or not e.get('content','').strip() or e['id'] not in source:continue
         original=source[e['id']];base=max(1,float(e.get('font_size',1)))
@@ -819,7 +985,11 @@ def _background_column_variants(elements,units,width,height,weak_ids,under,sourc
         for x0,x1 in runs:
             if x1-x0<.10*width or (((x0+x1)/2<width/2)!=(source_cx<.5)):continue
             overlap=max(0.,min(right,x1)-max(left,x0))/max(1.,right-left)
-            if not .15<overlap<.99 or (x1-x0-2*pad)/(right-left)<.55:continue
+            # A poor proposal can place the whole copy column outside its
+            # authored clean-color run. That is still a useful repair case;
+            # only reject candidates that already occupy essentially all of
+            # that run or cannot fit within it.
+            if overlap>=.99 or (x1-x0-2*pad)/(right-left)<.55:continue
             candidate=_fit_column(elements,ids,x0+pad,x1-pad,width,height)
             if not _feasible(candidate,units,width,height,strict_margins=False,
                              gap_factor=.004,allow_text_visual_overlap=True):continue
@@ -831,7 +1001,7 @@ def _background_column_variants(elements,units,width,height,weak_ids,under,sourc
 
 
 def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alternatives=False,
-                     source_under=None):
+                     source_under=None,source_elements=None):
     """Propose bounded text-unit moves using actual backing pixels at glyphs."""
     from PIL import ImageChops
     from engine.resize import (_rgba, _luminance, _feasible,
@@ -839,6 +1009,9 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
     result=deepcopy(elements);by_id={e['id']:e for e in result};changes=[];alternatives=[]
     ink=ImageChops.difference(full,under).convert('L')
     source={e['id']:e for u in units for e in u['items']}
+    source.update({e['id']:e for e in (source_elements or [])})
+    source_canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),
+                       (width,height))
     groups=lockup_groups(units)
     for u in units:
         ids={e['id'] for e in u['items']}
@@ -850,6 +1023,31 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
         alternatives.extend(column_repairs)
         groups=_merge_groups(groups+[set(change['element_ids'])
                                      for _,changes in column_repairs for change in changes])
+        # A rotated, bleeding source backdrop may need to change orientation
+        # when the target aspect ratio crosses portrait/landscape. Keep the
+        # model's proposed frame and offer an unrotated sibling; the full
+        # renderer and contrast/objective reranker decide whether it helps.
+        sw,sh=map(float,source_canvas)
+        source_ratio=sw/max(1.,sh);target_ratio=width/max(1.,height)
+        if max(target_ratio/max(source_ratio,1e-6),source_ratio/max(target_ratio,1e-6))>=1.2:
+            for eid,src in source.items():
+                if src.get('type')!='image' or int(src.get('z_index',0) or 0)!=0:
+                    continue
+                try:rotation=float(src.get('rotation',0.))
+                except (TypeError,ValueError):continue
+                cardinal=abs((abs(rotation)%180.)-90.)<=1.
+                bleed=(src.get('x',0.)<-.05*sw or src.get('y',0.)<-.05*sh
+                       or src.get('x',0.)+src.get('width',0.)>1.05*sw
+                       or src.get('y',0.)+src.get('height',0.)>1.05*sh)
+                if not cardinal or not bleed or eid not in {e['id'] for e in elements}:
+                    continue
+                candidate=deepcopy(elements)
+                bg=next(e for e in candidate if e['id']==eid)
+                if abs(float(bg.get('rotation',0.)))<1.:continue
+                from_rotation=float(bg.get('rotation',rotation))
+                bg['rotation']=0.
+                alternatives.append((candidate,[dict(repair_type='backdrop-rotation-variant',
+                    element_ids=[eid],from_rotation=from_rotation,to_rotation=0.)]))
     text_elements=[e for e in result if e['type']=='text' and e.get('content','').strip()]
 
     def gap_ok(trial,ids):
@@ -978,6 +1176,126 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                     alternatives.append((candidate,[dict(repair_type='backing-strip-expanded',element_ids=sorted(ids),
                         backing_for=sorted(e['id'] for e in white),dx=target['x']-strip['x'],dy=0.,
                         width=target['width'],text_span=list(text_span))]))
+        # 2D Quiet-Zone Placement (lockup-repositioned-2d)
+        # Search a 2D grid of candidate anchor positions (dx, dy)
+        # to place the lockup/copy group into low-busyness negative space on background
+        from PIL import ImageFilter
+        edges_under = under.convert('L').filter(ImageFilter.FIND_EDGES)
+        for ids in groups:
+            if not (set(weak_ids) & ids):
+                continue
+            members = [by_id[eid] for eid in ids if eid in by_id]
+            if not any(e['type'] == 'text' for e in members):
+                continue
+            left = min(e['x'] for e in members); right = max(e['x'] + e['width'] for e in members)
+            top = min(e['y'] for e in members); bottom = max(e['y'] + e['height'] for e in members)
+            span_w = right - left; span_h = bottom - top
+            if span_w >= 0.90 * width and span_h >= 0.90 * height:
+                continue
+
+            h_targets = [
+                (width - span_w) / 2.0,                  # centered
+                max(16.0, 0.05 * width),                 # left margin
+                min(width - span_w - 16.0, 0.95 * width - span_w), # right margin
+                left                                     # current x
+            ]
+            for frac in (0.08, 0.15, 0.22, 0.35, 0.50):
+                h_targets.append(frac * width)
+                h_targets.append(width - span_w - frac * width)
+
+            v_targets = [
+                max(16.0, 0.05 * height),                # top-third / upper wall zone
+                0.08 * height,
+                0.12 * height,
+                0.18 * height,
+                (height - span_h) / 2.0,                 # middle / center
+                max(16.0, height - span_h - 0.12 * height), # bottom-third
+                max(16.0, height - span_h - 0.08 * height),
+                max(16.0, height - span_h - 0.05 * height),
+                top                                      # current y
+            ]
+            for v_step in (-0.35, -0.25, -0.15, 0.15, 0.25, 0.35):
+                v_targets.append(top + v_step * height)
+
+            quiet_2d_options = []
+            seen_shifts = set()
+            for t_left in sorted(set(h_targets)):
+                if t_left < 0 or t_left + span_w > width:
+                    continue
+                dx = t_left - left
+                for t_top in sorted(set(v_targets)):
+                    if t_top < 0 or t_top + span_h > height:
+                        continue
+                    dy = t_top - top
+                    shift_key = (round(dx, 1), round(dy, 1))
+                    if shift_key in seen_shifts or (abs(dx) < 2 and abs(dy) < 2):
+                        continue
+                    seen_shifts.add(shift_key)
+
+                    candidate = deepcopy(elements)
+                    for e in candidate:
+                        if e['id'] in ids:
+                            e['x'] += dx
+                            e['y'] += dy
+
+                    if not _feasible(candidate, units, width, height, strict_margins=False,
+                                     gap_factor=0.004, allow_text_visual_overlap=True):
+                        continue
+                    if set(_unintended_text_overlaps(candidate, units)) - set(_unintended_text_overlaps(elements, units)):
+                        continue
+
+                    # Check zero collisions with foreground visuals (non-background images/shapes)
+                    collides_fg = False
+                    for mid in ids:
+                        me = {e['id']: e for e in candidate}[mid]
+                        mb = (me['x'], me['y'], me['x'] + me['width'], me['y'] + me['height'])
+                        for e in candidate:
+                            if e['id'] in ids or e['type'] not in ('image', 'shape'):
+                                continue
+                            full = (e['x'] <= width * 0.02 and e['y'] <= height * 0.02 and
+                                    e['x'] + e['width'] >= width * 0.98 and e['y'] + e['height'] >= height * 0.98)
+                            if full or e.get('fit') == 'cover':
+                                continue
+                            eb = (e['x'], e['y'], e['x'] + e['width'], e['y'] + e['height'])
+                            if _overlap(mb, eb) > 1.0:
+                                collides_fg = True
+                                break
+                        if collides_fg:
+                            break
+                    if collides_fg:
+                        continue
+
+                    text_min_contrast, text_lower = score(dx, dy, ids)
+                    edge_densities = []
+                    for e in members:
+                        if e['type'] != 'text':
+                            continue
+                        nl = max(0, int((e['x'] + dx) / width * under.width))
+                        nr = min(under.width, max(nl + 1, int((e['x'] + dx + e['width']) / width * under.width)))
+                        nt = max(0, int((e['y'] + dy) / height * under.height))
+                        nb = min(under.height, max(nt + 1, int((e['y'] + dy + e['height']) / height * under.height)))
+                        if nr > nl and nb > nt:
+                            ec = edges_under.crop((nl, nt, nr, nb))
+                            ed = sum(ec.getdata()) / (255.0 * max(1, ec.width * ec.height))
+                            edge_densities.append(ed)
+
+                    mean_edge = sum(edge_densities) / len(edge_densities) if edge_densities else 0.0
+                    low_contrast_pen = max(0.0, 3.0 - text_min_contrast)
+                    tot_score = mean_edge * 10.0 + low_contrast_pen * 25.0 + (abs(dx) / width + abs(dy) / height) * 0.5
+                    if text_min_contrast >= 2.5:
+                        quiet_2d_options.append((tot_score, candidate, dx, dy, text_min_contrast, mean_edge))
+
+            quiet_2d_options.sort(key=lambda item: item[0])
+            for tot_score, cand_2d, best_dx, best_dy, best_c, best_ed in quiet_2d_options[:3]:
+                alternatives.append((cand_2d, [dict(
+                    repair_type='lockup-repositioned-2d',
+                    element_ids=sorted(ids),
+                    dx=round(best_dx, 2),
+                    dy=round(best_dy, 2),
+                    placement='quiet-zone-2d',
+                    estimated_minimum=round(best_c, 3),
+                    background_edge_density=round(best_ed, 3)
+                )]))
         # Translate a full rigid lockup as a unit when local movement or a
         # wider strip cannot clear the background. Also move visually attached
         # non-text layers that are represented in the same source-evidenced
@@ -989,6 +1307,7 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
             left=min(e['x'] for e in members);right=max(e['x']+e['width'] for e in members)
             top=min(e['y'] for e in members);bottom=max(e['y']+e['height'] for e in members)
             span=right-left
+            baseline_min,baseline_lower=score(0.,0.,set(weak_ids)&ids)
             for fraction in (.12,.17,.18,.21,.22,.25,.35,.50):
                 for target_left in (fraction*width,width-right+left):
                     dx=target_left-left
@@ -1000,6 +1319,8 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                     if not _feasible(candidate,units,width,height,strict_margins=False,
                                      gap_factor=.004,allow_text_visual_overlap=True):continue
                     if set(_unintended_text_overlaps(candidate,units))-set(_unintended_text_overlaps(elements,units)):continue
+                    candidate_min,candidate_lower=score(dx,0.,set(weak_ids)&ids)
+                    if candidate_min<=baseline_min+1e-4 or candidate_lower<=baseline_lower+1e-4:continue
                     alternatives.append((candidate,[dict(repair_type='lockup-repositioned',element_ids=sorted(ids),dx=dx,dy=0.,
                         placement='horizontal-lockup-reflow')]))
         # Deduplicate by rounded geometry so equivalent nudges from overlapping
@@ -1010,7 +1331,9 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                       for e in candidate)
             if key in seen:continue
             seen.add(key);unique.append((candidate,change))
-        priority={'background-column-fit':0,'backing-strip-expanded':1,'lockup-repositioned':2,'local-nudge':3}
+        priority={'backdrop-rotation-variant':0,'background-column-fit':1,
+                  'backing-strip-expanded':2,'lockup-repositioned-2d':3,
+                  'lockup-repositioned':4,'local-nudge':5}
         unique.sort(key=lambda item:(priority.get(item[1][0].get('repair_type'),3),
                                      item[0][0]['x'],item[0][0]['y']))
         return unique[:18],[]
