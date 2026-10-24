@@ -28,6 +28,140 @@ def units(items):
 
 
 class QwenPipelineTests(unittest.TestCase):
+    def test_source_backdrop_overlap_does_not_trigger_hero_clearance(self):
+        from engine.qwen_refine import _repair_hero_clearance
+        dome=dict(id='dome',type='image',x=100.,y=60.,width=300.,height=360.,z_index=0)
+        title=text('title',x=150.,y=100.,width=200.,height=40.,z_index=1)
+        source=[dome,title];proposal=deepcopy(source)
+        result,notes=_repair_hero_clearance(proposal,units(source),500,500,[])
+        self.assertEqual(result,proposal)
+        self.assertEqual(notes,[])
+
+    def test_top_header_does_not_prevent_a_side_callout_clearing_hero(self):
+        from engine.qwen_refine import _repair_hero_clearance
+        hero=dict(id='hero',type='image',x=150.,y=150.,width=200.,height=350.)
+        header=text('header',x=140.,y=20.,width=220.,height=35.)
+        callout=text('callout',x=30.,y=250.,width=100.,height=40.)
+        source=[hero,header,callout];proposal=deepcopy(source);proposal[2]['x']=130.
+        result,notes=_repair_hero_clearance(proposal,units(source),500,500,[])
+        by_id={e['id']:e for e in result}
+        self.assertLessEqual(by_id['callout']['x']+by_id['callout']['width'],hero['x']-18.)
+        self.assertEqual(by_id['header']['x'],header['x'])
+        self.assertTrue(any(n['kind']=='hero-column-clearance' for n in notes))
+
+    def test_side_callout_can_shrink_as_a_group_into_a_narrow_hero_column(self):
+        from engine.qwen_refine import _repair_hero_clearance
+        hero=dict(id='hero',type='image',x=150.,y=150.,width=200.,height=350.)
+        callout=text('callout',x=30.,y=250.,width=100.,height=40.)
+        proposal=deepcopy([hero,callout]);proposal[0].update(x=130.,width=240.);proposal[1]['x']=100.
+        result,notes=_repair_hero_clearance(proposal,units([hero,callout]),500,500,[])
+        self.assertLess(result[1]['width'],100.)
+        self.assertLessEqual(result[1]['x']+result[1]['width'],112.+1e-5)
+        self.assertTrue(any(n.get('scale',1.)<1. for n in notes))
+
+    def test_transparent_hero_margin_is_not_evidence_of_intentional_overlap(self):
+        from PIL import Image,ImageDraw
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from engine.qwen_refine import _repair_hero_clearance
+        with TemporaryDirectory() as directory:
+            asset=Path(directory)/'hero.png'
+            image=Image.new('RGBA',(100,100),(0,0,0,0))
+            paint=ImageDraw.Draw(image)
+            paint.rectangle((50,0,99,99),fill='red');paint.rectangle((0,0,49,3),fill='red')
+            image.save(asset)
+            hero=dict(id='hero',type='image',asset_id=str(asset),fit='contain',
+                      x=150.,y=150.,width=200.,height=350.)
+            callout=text('callout',x=100.,y=270.,width=80.,height=30.)
+            proposal=deepcopy([hero,callout]);proposal[1]['x']=140.
+            result,notes=_repair_hero_clearance(proposal,units([hero,callout]),500,500,[])
+            self.assertLess(result[1]['x'],proposal[1]['x'])
+            self.assertTrue(any(n['kind']=='hero-column-clearance' for n in notes))
+
+    def test_centered_emblem_keeps_separated_icons_and_copy_in_one_lockup(self):
+        from engine.qwen_refine import lockup_groups,source_emblem_error
+        source=[text('price',x=180.,y=80.,width=140.,height=60.,font_size=48.,content='$49'),
+                text('caption',x=180.,y=210.,width=140.,height=30.,font_size=18.),
+                dict(id='left',type='shape',x=160.,y=155.,width=25.,height=45.),
+                dict(id='right',type='shape',x=315.,y=155.,width=25.,height=45.),
+                dict(id='rule',type='shape',x=190.,y=260.,width=120.,height=2.)]
+        # Local proximity links connect the complete emblem through the caption.
+        source[1]['y']=200.;source[1]['height']=40.
+        groups=lockup_groups(units(source))
+        ids={e['id'] for e in source}
+        self.assertIn(ids,groups)
+        proposed=deepcopy(source)
+        proposed[0]['x']+=55.;proposed[1]['x']-=40.;proposed[3]['y']+=20.
+        result,notes=repair_relationships(proposed,units(source),500,500)
+        by_id={e['id']:e for e in result};scale=by_id['left']['width']/25.
+        self.assertAlmostEqual(by_id['right']['x']-by_id['left']['x'],155.*scale)
+        self.assertAlmostEqual(by_id['rule']['y']-by_id['left']['y'],105.*scale)
+        self.assertTrue(any(set(n.get('element_ids',[]))==ids for n in notes))
+        self.assertLess(source_emblem_error(result,units(source)),.025)
+        broken=deepcopy(result)
+        next(e for e in broken if e['id']=='rule')['y']+=100.
+        self.assertGreater(source_emblem_error(broken,units(source)),.10)
+
+    def test_ranker_prefers_safe_complete_emblem_over_detached_ornament(self):
+        entries=[dict(candidate=dict(name='qwen-original'),cost=0.,low_contrast=[],
+                      source_lockup_error=.25,has_layout_defects=False),
+                 dict(candidate=dict(name='qwen-proposal'),cost=0.,low_contrast=[],
+                      source_lockup_error=.01,has_layout_defects=False)]
+        result=_select_visual_candidate(entries,[0.,0.],[.99,.4],True,True)
+        self.assertEqual(result['selected_index'],1)
+        self.assertEqual(result['source_lockup_rejected_names'],['qwen-original'])
+
+    def test_bottom_hero_preserves_height_share_and_bottom_anchor(self):
+        from engine.qwen_refine import _repair_edge_heroes
+        hero=dict(id='hero',type='image',x=150.,y=100.,width=200.,height=400.,fit='contain')
+        proposal=[dict(hero,x=220.,y=220.,width=100.,height=200.)]
+        result,notes=_repair_edge_heroes(proposal,units([hero]),600,600)
+        repaired=result[0]
+        self.assertAlmostEqual(repaired['y']+repaired['height'],600.)
+        self.assertAlmostEqual(repaired['x']+repaired['width']/2,300.)
+        self.assertGreaterEqual(repaired['height'],.85*400./500.*600.)
+        self.assertAlmostEqual(repaired['width']/repaired['height'],.5)
+        self.assertTrue(notes)
+
+    def test_clean_base_proposal_is_not_replaced_by_contrast_only_sibling(self):
+        entries=[dict(candidate=dict(name='qwen-proposal'),cost=.5,low_contrast=[],layout_defect_cost=.5,
+                      has_layout_defects=False),
+                 dict(candidate=dict(name='qwen-original'),cost=4.,low_contrast=['label'],layout_defect_cost=0.),
+                 dict(candidate=dict(name='qwen-original-contrast-repaired-01'),cost=.6,
+                      low_contrast=[],layout_defect_cost=0.)]
+        result=_select_visual_candidate(entries,[.5,4.,.6],[.4,.2,.99],True,True)
+        self.assertEqual(result['selected_index'],0)
+        self.assertIn('qwen-original-contrast-repaired-01',result['contrast_repair_suppressed_names'])
+        # A tiny threshold miss is still reported, but must not trigger a
+        # destructive relocation of an otherwise readable authored badge.
+        entries[0]['candidate']['elements']=[dict(id='label',font_size=12.)]
+        entries[0]['low_contrast']=['label']
+        entries[0]['contrast_by_text']={'label':dict(minimum=4.1,lower_quintile=4.36)}
+        result=_select_visual_candidate(entries,[.5,4.,.6],[.4,.2,.99],True,True)
+        self.assertEqual(result['selected_index'],0)
+
+    def test_baked_photo_border_repair_moves_copy_and_button_together(self):
+        from PIL import Image, ImageDraw
+        from engine.qwen_refine import _background_column_variants,lockup_groups
+        headline=text('headline',x=40.,y=80.,width=140.,height=60.,font_size=24.)
+        pill=dict(id='pill',type='shape',x=40.,y=180.,width=130.,height=30.,z_index=0)
+        button=text('button',x=48.,y=185.,width=110.,height=20.,font_size=12.,z_index=1)
+        source=[headline,pill,button];proposal=deepcopy(source)
+        for e in proposal:e['x']+=60.
+        source_image=Image.new('RGB',(500,500),'white');target_image=source_image.copy()
+        ImageDraw.Draw(source_image).rectangle((0,0,250,499),fill='#df497f')
+        ImageDraw.Draw(target_image).rectangle((0,0,150,499),fill='#df497f')
+        with patch('engine.resize._feasible',return_value=True), \
+             patch('engine.resize._unintended_text_overlaps',return_value=[]):
+            candidates=_background_column_variants(proposal,units(source),500,500,
+                ['headline'],target_image,source_image,lockup_groups(units(source)))
+        self.assertTrue(candidates)
+        fixed,changes=candidates[0];by_id={e['id']:e for e in fixed}
+        self.assertEqual(set(changes[0]['element_ids']),{'headline','pill','button'})
+        self.assertLessEqual(max(e['x']+e['width'] for e in fixed),146.)
+        self.assertAlmostEqual(by_id['button']['x']-by_id['pill']['x'],8.)
+        self.assertEqual(proposal[0]['x'],100.)
+
     def test_relative_contrast_uses_all_alternatives_and_invisible_stays_unsafe(self):
         q=dict(cost=7.5,low_contrast=['a','b'],invisible_text=[])
         alternatives=[dict(cost=1.,low_contrast=['x','y','z']),dict(cost=8.7,low_contrast=['p','q','r'])]

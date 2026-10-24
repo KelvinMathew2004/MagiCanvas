@@ -52,3 +52,6 @@ models/*
 /data/gemini_siglip_audit_tmp/
 /data/gemini_crello_conversion_audit/
 /data/gemini_crello_conversion_audit.zip
+/data/qwen_lora_v2_restored_review
+/data/gemini_qwen_expanded_v2_review_tmp
+/data/qwen_lora_expanded_v2

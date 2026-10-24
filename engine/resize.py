@@ -3267,6 +3267,20 @@ def _qwen_contrast_safe(candidate, baseline, qwen_primary=False):
             or candidate.get('cost',0.)<=cost+1.25)
 
 
+def _needs_contrast_repair(entry):
+    """Do not relocate authored groups for a marginal contrast threshold miss."""
+    elements={e['id']:e for e in entry.get('candidate',{}).get('elements',[])}
+    measured=entry.get('contrast_by_text',{})
+    for eid in entry.get('low_contrast',[]):
+        values=measured.get(eid,{})
+        minimum,lower=values.get('minimum'),values.get('lower_quintile')
+        if minimum is None or lower is None:return True
+        e=elements.get(eid,{})
+        target=3. if e.get('font_size',0)>=24 or e.get('font_weight')=='bold' and e.get('font_size',0)>=18 else 4.5
+        if minimum<3.0 or lower<target*.90:return True
+    return bool(entry.get('invisible_text'))
+
+
 def _visual_rerank(candidates, backgrounds, units, source, width, height, desired):
     """Rendered diagnostics plus an optional learned SigLIP perceptual judge.
 
@@ -3324,12 +3338,18 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     shortlist.extend(qwen_candidates[:6])
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
-        reference_image=None
+        reference_image=None;source_under=None
         try:
             reference_path=Path(directory)/'source.png'
             render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
             with Image.open(reference_path) as image:
                 reference_image=image.convert('RGB')
+            if qwen_candidates:
+                source_backing=dict(canvas=source['canvas'],elements=[e for e in source['elements'] if e['type']!='text'])
+                source_backing_path=Path(directory)/'source-backing.png'
+                render_diagnostic(source_backing,diagnostic_assets,source_backing_path,max_size=640)
+                with Image.open(source_backing_path) as image:
+                    source_under=image.convert('RGB')
         except Exception:
             # Identity continuity is a soft cue; candidate diagnostics remain
             # useful if the source render fails for an unrelated renderer issue.
@@ -3394,12 +3414,16 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 cost=cost/max(1,checked)+(8.0 if invisible else 0.0)+(4.0 if weak else 0.0)
                 entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,warnings=warnings,image=full.copy()))
                 if (candidate['name'].startswith('qwen-') and weak and not invisible
+                        and _needs_contrast_repair(entries[-1])
                         and 'contrast-repaired' not in candidate['name']
-                        and sum('contrast-repaired' in c['name'] for c in shortlist)<4):
+                        and sum('contrast-repaired' in c['name'] for c in shortlist)<10):
                     from engine.qwen_refine import contrast_variant
                     repairs,_=contrast_variant(candidate['elements'],units,width,height,weak,under,full,
-                                               return_alternatives=True)
-                    for repair_index,(repaired,changes) in enumerate(repairs,1):
+                                               return_alternatives=True,source_under=source_under)
+                    # Share the render budget across parent proposals. A first
+                    # parent's many nudges must not crowd out a sound raw-layout
+                    # column repair from a later sibling.
+                    for repair_index,(repaired,changes) in enumerate(repairs[:3],1):
                         if sum('contrast-repaired' in c['name'] for c in shortlist)>=10:break
                         shortlist.append(dict(name=f"{candidate['name']}-contrast-repaired-{repair_index:02d}",
                             elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
@@ -3434,10 +3458,20 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                   and after[eid]['lower_quintile']+1e-4<before[eid]['lower_quintile']]
         before_count=len(parent.get('low_contrast',[])) if parent else 0
         after_count=len(entry.get('low_contrast',[]))
+        zone_floors={eid:floor for change in candidate.get('contrast_repairs',[])
+                     if change.get('repair_type')=='background-column-fit'
+                     for eid,floor in change.get('source_contrast_floor',{}).items()}
+        restored_zone=bool(zone_floors) and after_count<=before_count and all(
+            eid in before and eid in after and before[eid].get('minimum') is not None
+            and after[eid].get('minimum') is not None
+            and after[eid]['minimum']>=floor
+            and after[eid]['minimum']>=before[eid]['minimum']+.5
+            for eid,floor in zone_floors.items())
         failed_minimum=[eid for eid in moved if eid in before and eid in after
             and before[eid].get('minimum') is not None and before[eid]['minimum']<3.0
-            and (after[eid].get('minimum') is None or after[eid]['minimum']<3.0)]
-        if (parent is None or after_count>=before_count or worsened or failed_minimum):
+            and (after[eid].get('minimum') is None
+                 or after[eid]['minimum']<zone_floors.get(eid,3.0))]
+        if (parent is None or after_count>=before_count and not restored_zone or worsened or failed_minimum):
             rejected_contrast.append(dict(name=name,parent=parent['candidate']['name'] if parent else None,
                 reason='low-contrast count did not decrease' if parent and after_count>=before_count
                        else 'moved text minimum contrast stayed below 3.0' if failed_minimum
@@ -3447,8 +3481,10 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     objective_layout_costs=[_objective_layout_cost(e['candidate']['elements'],units,source,
                 width,height,desired,allow_text_visual_overlap=e['candidate']['name'].startswith('qwen-'))
                 for e in valid]
+    from engine.qwen_refine import source_emblem_error
     for entry,layout_cost in zip(valid,objective_layout_costs):
         entry['layout_defect_cost']=layout_cost
+        entry['source_lockup_error']=source_emblem_error(entry['candidate']['elements'],units)
         entry['has_layout_defects']=(not _feasible(entry['candidate']['elements'],units,width,height,
                 strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
                 or bool(_unintended_text_overlaps(entry['candidate']['elements'],units))
@@ -3584,6 +3620,20 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
                for i in qwen}
     safe=[i for i in qwen if feasible(i) and
           (_qwen_contrast_safe(valid[i],baselines,qwen_primary) or bool(tolerated[i]))]
+    coherent=[i for i in safe if valid[i].get('source_lockup_error',0.)<=.025
+              and not valid[i].get('has_layout_defects',False)]
+    fractured=[]
+    if coherent:
+        fractured=[valid[i]['candidate']['name'] for i in safe if valid[i].get('source_lockup_error',0.)>.10]
+        safe=[i for i in safe if valid[i].get('source_lockup_error',0.)<=.10]
+    clean_base=[i for i in safe if valid[i]['candidate']['name'] in ('qwen-original','qwen-proposal','qwen-font-fitted')
+                and not _needs_contrast_repair(valid[i]) and not valid[i].get('invisible_text')
+                and not valid[i].get('has_layout_defects',False)]
+    suppressed=[]
+    if clean_base:
+        suppressed=[valid[i]['candidate']['name'] for i in safe
+                    if '-contrast-repaired-' in valid[i]['candidate']['name']]
+        safe=[i for i in safe if '-contrast-repaired-' not in valid[i]['candidate']['name']]
     best=min(range(len(costs)),key=costs.__getitem__)
     tolerance=max(1.25,abs(costs[best])*.20)
     selection_costs=list(costs)
@@ -3636,6 +3686,8 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
         chosen=(veto if ranker_trained and veto is not None and scores[veto]>scores[qchoice]+.15 else qchoice)
     checked=qchoice if qchoice is not None else (qwen[0] if qwen else None)
     return dict(selected_index=chosen,objective_costs=[round(c,4) for c in costs],
+        source_lockup_rejected_names=fractured,
+        contrast_repair_suppressed_names=suppressed,
         selection_costs=[round(c,4) for c in selection_costs],
         busy_background_tolerated_names=[valid[i]['candidate']['name'] for i in qwen if tolerated[i]],
         tie_band=global_band,qwen_family_band=family_band,tolerance=round(tolerance,4),

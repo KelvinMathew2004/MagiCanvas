@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
+import re
 import sys
 
 from PIL import Image
@@ -25,7 +27,37 @@ def _index(folder):
     return result
 
 
-def _select(records,limit):
+def _select(records,limit,unique_families=True):
+    if unique_families:
+        # Pair directions that share design IDs belong to one review family.
+        # Keep one direction per connected component so the review measures
+        # generalization across designs instead of repeating alternate sizes.
+        parent={}
+        def find(item):
+            parent.setdefault(item,item)
+            if parent[item]!=item:parent[item]=find(parent[item])
+            return parent[item]
+        def union(a,b):
+            a,b=find(a),find(b)
+            if a!=b:parent[b]=a
+        for row in records:
+            source,target=row["pair_id"].split("__to__",1)
+            union(source,target)
+        families={}
+        for row in records:
+            source=row["pair_id"].split("__to__",1)[0]
+            families.setdefault(find(source),[]).append(row)
+        unique=[]
+        for rows in families.values():
+            def ranking(row):
+                prompt=row["messages"][1]["content"]
+                match=re.search(r"Source aspect ratio:\s*([0-9.]+)",prompt)
+                source_ratio=float(match.group(1)) if match else 1.0
+                target=row["target_canvas"]["width"]/row["target_canvas"]["height"]
+                aspect_change=abs(math.log(max(1e-6,target)/max(1e-6,source_ratio)))
+                return aspect_change,row["pair_id"]
+            unique.append(max(rows,key=ranking))
+        records=unique
     buckets={"banner":[],"landscape":[],"square":[],"portrait":[]}
     for row in records:
         canvas=row["target_canvas"];ratio=canvas["width"]/canvas["height"]
@@ -129,6 +161,8 @@ def main():
     parser.add_argument("--input",type=Path,default=ROOT/"data"/"qwen_lora"/"test.jsonl")
     parser.add_argument("--output",type=Path,default=OUT_DIR)
     parser.add_argument("--limit",type=int,default=8)
+    parser.add_argument("--include-family-repeats",action="store_true",
+                        help="Allow multiple resize directions from the same connected design family")
     parser.add_argument("--raw-starter-renderer",action="store_true",
                         help="Skip the dataset-only text-width tolerance for every review render")
     args=parser.parse_args()
@@ -150,7 +184,7 @@ def main():
             if adapter_version!=prompt_version:
                 raise SystemExit(f"Held-out JSONL requires prompt v{prompt_version}, but installed adapter is v{adapter_version}. Train/install the v2 adapter before building this comparison.")
         os.environ["MAGICANVAS_QWEN_PROMPT_VERSION"]=str(prompt_version)
-    selected=_select(records,args.limit)
+    selected=_select(records,args.limit,unique_families=not args.include_family_repeats)
     args.output.mkdir(parents=True,exist_ok=True)
     entries=[]
     for number,row in enumerate(selected,1):
@@ -257,7 +291,9 @@ def main():
         siglip_report.update({k:visual_report[k] for k in
                               ("objective_cost_components","rejected_contrast_variants")
                               if k in visual_report})
-        diagnostics=(f"Qwen status: {qdiag.get('status','not reported')}\n"
+        from engine.qwen_seed import ADAPTER_DIR
+        diagnostics=(f"Adapter: {ADAPTER_DIR.resolve()}\n"
+                     f"Qwen status: {qdiag.get('status','not reported')}\n"
                      f"Proposal received: {qdiag.get('proposal_received',False)} · "
                      f"constraints accepted: {qdiag.get('constraint_feasible',False)} · "
                      f"optimized: {qdiag.get('optimized',False)}\n"
@@ -285,7 +321,8 @@ def main():
             decoder_checked=raw_qwen,relationship_repaired=micro_qwen,
             layer_preserved=layer_qwen,qwen_off=off,qwen_on=on,
             winner=on_report.get('winner')),ensure_ascii=False,indent=2)+"\n")
-        entries.append({"candidate_output":str(output_file.relative_to(args.output)),"pair_id":row["pair_id"],"canvas":target_canvas,
+        entries.append({"adapter_dir":str(ADAPTER_DIR.resolve()),
+                        "candidate_output":str(output_file.relative_to(args.output)),"pair_id":row["pair_id"],"canvas":target_canvas,
                         "element_count":len(source["elements"]),
                         "renderer_mode":renderer_mode,
                         "preview":os.path.relpath(preview_path,args.output),
@@ -307,10 +344,12 @@ def main():
                                                        "objective_costs","selection_costs","objective_cost_components",
                                                        "busy_background_tolerated_names",
                                                        "qwen_family_band","eligible_qwen_names",
+                                                       "contrast_repair_suppressed_names",
+                                                       "source_lockup_rejected_names",
                                                        "rejected_contrast_variants")},
                         "visual_candidate_diagnostics":[
-                            {k:c.get(k) for k in ("name","cost","layout_defect_cost","checked","low_contrast",
-                                "invisible_text","contrast_by_text","busy_background","warnings","error")
+                            {k:c.get(k) for k in ("name","cost","layout_defect_cost","source_lockup_error","has_layout_defects","checked","low_contrast",
+                                "invisible_text","contrast_by_text","contrast_repairs","busy_background","warnings","error")
                              if k in c}
                             for c in visual_report.get("candidates",[])],
                         "target_geometry_mae":{"raw_qwen":raw_metrics,"after_constraints":constrained_metrics,

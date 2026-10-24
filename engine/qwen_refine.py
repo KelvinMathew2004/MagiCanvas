@@ -7,6 +7,111 @@ from copy import deepcopy
 from statistics import median
 
 
+def _merge_groups(groups):
+    """Return disjoint groups so no repair can move half of a lockup."""
+    merged=[]
+    for group in groups:
+        group=set(group)
+        if not group:continue
+        changed=True
+        while changed:
+            changed=False
+            for other in merged[:]:
+                if group & other:
+                    group.update(other);merged.remove(other);changed=True
+        merged.append(group)
+    return merged
+
+
+def _emblem_groups(source,sw,sh):
+    """Find centered, compact source emblems without absorbing separate photos."""
+    from engine.resize import _overlap, _text_visible_bounds
+    texts=[e for e in source.values() if e['type']=='text' and e.get('content','').strip()]
+    def box(e):return (e['x'],e['y'],e['x']+e['width'],e['y']+e['height'])
+    eligible=[]
+    for e in source.values():
+        share=e['width']*e['height']/max(1.,sw*sh)
+        if e['type'] not in ('image','shape','text') or share>=.85:continue
+        if e['type']!='text' and share>=.15:
+            backed=sum(_overlap(box(e),_text_visible_bounds(t))/max(1.,
+                (_text_visible_bounds(t)[2]-_text_visible_bounds(t)[0])*
+                (_text_visible_bounds(t)[3]-_text_visible_bounds(t)[1]))>=.8
+                and e.get('z_index',0)<t.get('z_index',0) for t in texts)
+            if backed<2:continue
+        eligible.append(e)
+    links=[];radius=.06*min(sw,sh)
+    for i,a in enumerate(eligible):
+        ab=box(a)
+        for b in eligible[i+1:]:
+            bb=box(b)
+            dx=max(0.,ab[0]-bb[2],bb[0]-ab[2]);dy=max(0.,ab[1]-bb[3],bb[1]-ab[3])
+            if dx*dx+dy*dy<=radius*radius:links.append({a['id'],b['id']})
+    result=[]
+    for ids in _merge_groups(links):
+        members=[source[eid] for eid in sorted(ids)]
+        labels=[e for e in members if e['type']=='text' and e.get('content','').strip()]
+        if len(labels)<2 or sum(e['type']!='text' for e in members)<2:continue
+        left=min(e['x'] for e in members);right=max(e['x']+e['width'] for e in members)
+        top=min(e['y'] for e in members);bottom=max(e['y']+e['height'] for e in members)
+        center=(left+right)/2
+        if (right-left)*(bottom-top)>.50*sw*sh or abs(center-sw/2)>.08*sw:continue
+        largest=max(e.get('font_size',1.) for e in labels)
+        main=[e for e in labels if not (len(e.get('content','').strip())<=3
+                                       and e.get('font_size',1.)<.35*largest)]
+        if any(abs(e['x']+e['width']/2-center)>.18*sw for e in main):continue
+        result.append(ids)
+    return result
+
+
+def _copy_columns(source,sw,sh,lockups):
+    """Source-aligned copy and its button form one column during border repair."""
+    from engine.resize import _text_visible_bounds
+    texts=[e for e in source.values() if e['type']=='text' and e.get('content','').strip()]
+    links=[]
+    for i,a in enumerate(texts):
+        ab=_text_visible_bounds(a)
+        for b in texts[i+1:]:
+            bb=_text_visible_bounds(b)
+            gap=max(0.,ab[1]-bb[3],bb[1]-ab[3])
+            horizontal=max(0.,min(ab[2],bb[2])-max(ab[0],bb[0]))/max(1.,min(ab[2]-ab[0],bb[2]-bb[0]))
+            aligned=min(abs(ab[0]-bb[0]),abs((ab[0]+ab[2]-bb[0]-bb[2])/2))<.08*sw
+            if aligned and horizontal>=.6 and gap<=.18*sh:links.append({a['id'],b['id']})
+    columns=[]
+    for ids in _merge_groups(links):
+        for group in lockups:
+            if ids & group:ids.update(group)
+        columns.append(ids)
+    return _merge_groups(columns)
+
+
+def source_emblem_error(elements,units):
+    """Measure broken source emblem offsets and non-text scale hierarchy."""
+    source={e['id']:e for u in units for e in u['items']}
+    out={e['id']:e for e in elements}
+    canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
+    if not canvas:return 0.
+    sw,sh=canvas;error=0.
+    for ids in _emblem_groups(source,sw,sh):
+        if not ids<=out.keys():return 1.
+        originals=[source[eid] for eid in sorted(ids)]
+        left=min(e['x'] for e in originals);right=max(e['x']+e['width'] for e in originals)
+        top=min(e['y'] for e in originals);bottom=max(e['y']+e['height'] for e in originals)
+        sx,sy=(left+right)/2,(top+bottom)/2
+        major=[e for e in originals if min(e['width'],e['height'])>=.025*min(sw,sh)]
+        if not major:continue
+        factor=max(.01,median(min(out[e['id']]['width']/max(1.,e['width']),
+                                  out[e['id']]['height']/max(1.,e['height'])) for e in major))
+        cx=median(out[e['id']]['x']+out[e['id']]['width']/2-(e['x']+e['width']/2-sx)*factor for e in originals)
+        cy=median(out[e['id']]['y']+out[e['id']]['height']/2-(e['y']+e['height']/2-sy)*factor for e in originals)
+        for e in originals:
+            target=out[e['id']]
+            error=max(error,abs(target['x']+target['width']/2-(cx+(e['x']+e['width']/2-sx)*factor))/max(1.,(right-left)*factor),
+                      abs(target['y']+target['height']/2-(cy+(e['y']+e['height']/2-sy)*factor))/max(1.,(bottom-top)*factor))
+            if e['type']!='text' and e.get('fit')!='cover':
+                error=max(error,*(.5*abs(target[k]-e[k]*factor)/max(1.,e[k]*factor) for k in ('width','height')))
+    return error
+
+
 def lockup_groups(units):
     """Explicit groups and compact backed labels/superscripts, not nearest art."""
     from engine.resize import _bounds, _overlap, _text_visible_bounds
@@ -74,7 +179,8 @@ def lockup_groups(units):
             join(e['id'],min(choices,key=lambda item:item[0])[1]['id'])
     groups={}
     for eid in source:groups.setdefault(find(eid),set()).add(eid)
-    return [ids for ids in groups.values() if len(ids)>1]
+    return _merge_groups([ids for ids in groups.values() if len(ids)>1]
+                         +_emblem_groups(source,sw,sh))
 
 
 def repair_relationships(elements,units,width,height):
@@ -83,10 +189,13 @@ def repair_relationships(elements,units,width,height):
     result=deepcopy(elements);by_id={e['id']:e for e in result}
     source={e['id']:e for u in units for e in u['items']}
     groups=lockup_groups(units);notes=[]
+    source_canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
+    sw,sh=source_canvas or (width,height)
+    emblems={frozenset(g) for g in _emblem_groups(source,sw,sh)}
     for ids in groups:
         ids=ids & set(by_id)
         if len(ids)<2:continue
-        originals=[source[eid] for eid in ids];proposed=[by_id[eid] for eid in ids]
+        originals=[source[eid] for eid in sorted(ids)];proposed=[by_id[eid] for eid in sorted(ids)]
         # Clamp the raw PNG frames too, including transparent margins.
         sb=(min(e['x'] for e in originals),min(e['y'] for e in originals),
             max(e['x']+e['width'] for e in originals),max(e['y']+e['height'] for e in originals))
@@ -98,11 +207,22 @@ def repair_relationships(elements,units,width,height):
         if not scales:
             scales=[by_id[e['id']][k]/max(1,e[k]) for e in originals for k in ('width','height')]
         scale=max(.01,median(scales))
+        emblem=any(group<=ids for group in emblems)
+        if emblem:
+            # Decoder font fitting can shrink a font while leaving a sound
+            # predicted box. Use the major boxes to size the entire emblem.
+            major=[e for e in originals if min(e['width'],e['height'])>=.025*min(sw,sh)]
+            if major:
+                scale=median(min(by_id[e['id']]['width']/max(1.,e['width']),
+                                 by_id[e['id']]['height']/max(1.,e['height'])) for e in major)
+            short_scale=min(width,height)/max(1.,min(sw,sh))
+            scale=min(short_scale*1.25,max(short_scale*.85,scale))
         scale=min(scale,width/max(1,sb[2]-sb[0]),height/max(1,sb[3]-sb[1]))
         cx=median(by_id[e['id']]['x']+by_id[e['id']]['width']/2
                   -(e['x']+e['width']/2-sx)*scale for e in originals)
         cy=median(by_id[e['id']]['y']+by_id[e['id']]['height']/2
                   -(e['y']+e['height']/2-sy)*scale for e in originals)
+        if emblem and abs(sx-sw/2)<=.04*sw:cx=width/2
         # Whole-group clamping preserves internal offsets and image proportions.
         gw,gh=(sb[2]-sb[0])*scale,(sb[3]-sb[1])*scale
         cx=min(width-gw/2,max(gw/2,cx));cy=min(height-gh/2,max(gh/2,cy))
@@ -171,14 +291,88 @@ def repair_relationships(elements,units,width,height):
             continue
         result=trial;by_id=trial_by
         notes.append(dict(kind='rigid-source-lockup',element_ids=sorted(ids)))
+    result,anchor_notes=_repair_edge_heroes(result,units,width,height)
     result,chain_notes=_repair_column_chains(result,units,width,height,groups)
     result,clearance_notes=_repair_hero_clearance(result,units,width,height,groups)
-    return result,notes+chain_notes+clearance_notes
+    result,column_notes=_repair_photo_columns(result,units,width,height,groups)
+    return result,notes+anchor_notes+chain_notes+clearance_notes+column_notes
+
+
+def _repair_edge_heroes(elements,units,width,height):
+    """Preserve a centered primary visual's authored bottom anchor and height."""
+    result=deepcopy(elements);out={e['id']:e for e in result};notes=[]
+    canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
+    sw,sh=canvas or (width,height)
+    for unit in units:
+        for src in unit['items']:
+            if src['type']!='image' or src['id'] not in out:continue
+            share=src['width']*src['height']/max(1.,sw*sh)
+            if (not .15<=share<.85 or not .98*sh<=src['y']+src['height']<=1.02*sh
+                    or abs(src['x']+src['width']/2-sw/2)>.06*sw):continue
+            dst=out[src['id']];aspect=src['width']/max(1.,src['height'])
+            wanted=min(height,width/max(1e-6,aspect),max(dst['height'],src['height']/sh*height))
+            before=tuple(dst.get(k) for k in ('x','y','width','height'))
+            dst.update(width=wanted*aspect,height=wanted,x=(width-wanted*aspect)/2,y=height-wanted)
+            if before!=tuple(dst.get(k) for k in ('x','y','width','height')):
+                notes.append(dict(kind='source-edge-hero-anchor',element_ids=[src['id']],edge='bottom'))
+    return result,notes
+
+
+def _repair_photo_columns(elements,units,width,height,groups):
+    """Keep a source-disjoint copy/button column beside a foreground visual."""
+    from engine.resize import _overlap, _unintended_text_overlaps
+    source={e['id']:e for u in units for e in u['items']}
+    canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
+    sw,sh=canvas or (width,height)
+    result=deepcopy(elements);notes=[]
+    def bounds(items):return (min(e['x'] for e in items),min(e['y'] for e in items),
+                             max(e['x']+e['width'] for e in items),max(e['y']+e['height'] for e in items))
+    for ids in _copy_columns(source,sw,sh,groups):
+        originals=[source[eid] for eid in ids];sb=bounds(originals)
+        for visual in source.values():
+            if visual['id'] in ids or visual['type'] not in ('image','shape'):continue
+            share=visual['width']*visual['height']/max(1.,sw*sh)
+            if not .15<=share<.85:continue
+            vb=bounds([visual])
+            if _overlap(sb,vb)>0 or min(sb[3],vb[3])-max(sb[1],vb[1])<.25*(sb[3]-sb[1]):continue
+            by_id={e['id']:e for e in result}
+            if visual['id'] not in by_id:continue
+            members=[by_id[eid] for eid in ids if eid in by_id];tb=bounds(members);target=bounds([by_id[visual['id']]])
+            overlap=_overlap(tb,target)/max(1.,(tb[2]-tb[0])*(tb[3]-tb[1]))
+            if not 0.<overlap<.65:continue
+            margin=.035*width;gap=max(8.,.02*width)
+            left,right=(margin,target[0]-gap) if sb[2]<=vb[0] else (target[2]+gap,width-margin)
+            factor=min(1.,(right-left)/max(1.,tb[2]-tb[0]))
+            if factor<.55:continue
+            trial=_fit_column(result,ids,left,right,width,height)
+            if set(_unintended_text_overlaps(trial,units))-set(_unintended_text_overlaps(result,units)):continue
+            result=trial;notes.append(dict(kind='source-photo-column',element_ids=sorted(ids)))
+    return result,notes
+
+
+def _fit_column(elements,ids,left,right,width,height):
+    """Uniformly fit a whole column, preserving image proportions and tracking."""
+    from engine.resize import _fit_text
+    result=deepcopy(elements);members=[e for e in result if e['id'] in ids]
+    x0=min(e['x'] for e in members);x1=max(e['x']+e['width'] for e in members)
+    y0=min(e['y'] for e in members);y1=max(e['y']+e['height'] for e in members)
+    factor=min(1.,(right-left)/max(1.,x1-x0));cy=(y0+y1)/2
+    target_left=max(left,min(x0,right-(x1-x0)*factor))
+    for e in members:
+        e.update(x=target_left+(e['x']-x0)*factor,y=cy+(e['y']-cy)*factor,
+                 width=e['width']*factor,height=e['height']*factor)
+        if e['type']=='text':
+            e['font_size']=max(1.,e['font_size']*factor)
+            e['letter_spacing']=e.get('letter_spacing',0.)*factor
+            size=_fit_text(e,e['width'],e['height'],e['font_size'])
+            e['letter_spacing']*=size/max(1.,e['font_size']);e['font_size']=size
+    return result
 
 
 def _repair_hero_clearance(elements,units,width,height,groups):
     """Keep source-side copy columns and top headers clear of a central hero."""
-    from engine.resize import _text_visible_bounds, _unintended_text_overlaps
+    from engine.resize import (_bounds, _overlap, _text_visible_bounds,
+                               _unintended_text_overlaps, _asset_root)
     source={e['id']:e for u in units for e in u['items']}
     by_id={e['id']:e for e in elements}
     canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
@@ -189,44 +383,75 @@ def _repair_hero_clearance(elements,units,width,height,groups):
         area=e['width']*e['height']/max(1.,sw*sh)
         center=(e['x']+e['width']/2)/max(1.,sw)
         if area>=.15 and abs(center-.5)<=.08 and e['id'] in by_id:
+            if any(e['id'] in group and any(source[eid]['type']=='text' for eid in group)
+                   for group in groups):continue
             heroes.append(e)
     if not heroes:return deepcopy(elements),[]
     hero=max(heroes,key=lambda e:e['width']*e['height'])
     target_hero=by_id[hero['id']]
+    hero_alpha=None
+    if hero['type']=='image' and hero.get('asset_id') and abs(hero.get('rotation',0.))<=1.:
+        try:
+            from PIL import Image
+            with Image.open(_asset_root(hero)/hero['asset_id']) as image:
+                hero_alpha=image.convert('RGBA').getchannel('A')
+            resize=min if hero.get('fit','contain')=='contain' else max
+            pixel_scale=resize(hero['width']/hero_alpha.width,hero['height']/hero_alpha.height)
+            image_x=hero['x']+(hero['width']-hero_alpha.width*pixel_scale)/2
+            image_y=hero['y']+(hero['height']-hero_alpha.height*pixel_scale)/2
+        except (ImportError,OSError,ValueError):hero_alpha=None
     gap=max(18.,.025*height);margin=.035*width
     block_for={eid:set((eid,)) for eid in by_id}
     for group in groups:
         group=group&set(by_id)
         for eid in group:block_for[eid]=group
+    def source_layered(e):
+        for eid in block_for[e['id']]:
+            member=source[eid]
+            if eid==hero['id']:return True
+            if member['type']!='text':continue
+            box=_text_visible_bounds(member)
+            area=max(1.,(box[2]-box[0])*(box[3]-box[1]))
+            ratio=_overlap(box,_bounds([hero]))/area
+            if ratio>.10 and hero_alpha is not None:
+                from PIL import ImageStat
+                left=max(0.,(box[0]-image_x)/pixel_scale);right=min(hero_alpha.width,(box[2]-image_x)/pixel_scale)
+                top=max(0.,(box[1]-image_y)/pixel_scale);bottom=min(hero_alpha.height,(box[3]-image_y)/pixel_scale)
+                if right>left and bottom>top:
+                    crop=hero_alpha.crop((int(left),int(top),max(int(left)+1,int(right)),max(int(top)+1,int(bottom))))
+                    ratio=ImageStat.Stat(crop).mean[0]/255.*(right-left)*(bottom-top)*pixel_scale**2/area
+                else:ratio=0.
+            if ratio>.10:return True
+        return False
     trial=deepcopy(elements);out={e['id']:e for e in trial};notes=[]
     # Move source-left/right text clusters as units when their predicted boxes
     # collide with the central visual. The source side is structural evidence.
     for side in ('left','right'):
         texts=[e for e in source.values() if e['type']=='text' and e['id'] in out and e.get('content','').strip()
+               and not source_layered(e)
+               and min(e['y']+e['height'],hero['y']+hero['height'])>max(e['y'],hero['y'])
                and ((e['x']+e['width']/2 < hero['x']+hero['width']/2) if side=='left'
                     else (e['x']+e['width']/2 > hero['x']+hero['width']/2))]
         if not texts:continue
-        rightmost=max(out[e['id']]['x']+out[e['id']]['width'] for e in texts)
-        leftmost=min(out[e['id']]['x'] for e in texts)
-        dx=0.
-        if side=='left' and rightmost>target_hero['x']-gap:
-            dx=target_hero['x']-gap-rightmost
-            if leftmost+dx<margin:continue
-        if side=='right' and leftmost<target_hero['x']+target_hero['width']+gap:
-            dx=target_hero['x']+target_hero['width']+gap-leftmost
-            if rightmost+dx>width-margin:continue
-        if abs(dx)<1.:continue
         ids=set()
         for e in texts:ids.update(block_for[e['id']])
+        members=[out[eid] for eid in ids]
+        rightmost=max(e['x']+e['width'] for e in members);leftmost=min(e['x'] for e in members)
+        slot_left,slot_right=((margin,target_hero['x']-gap) if side=='left' else
+                              (target_hero['x']+target_hero['width']+gap,width-margin))
+        if slot_left<=leftmost and rightmost<=slot_right:continue
+        factor=min(1.,(slot_right-slot_left)/max(1.,rightmost-leftmost))
+        if factor<.55:continue
         before=deepcopy(trial)
-        for e in trial:
-            if e['id'] in ids:e['x']+=dx
+        trial=_fit_column(trial,ids,slot_left,slot_right,width,height)
         if set(_unintended_text_overlaps(trial,units))-set(_unintended_text_overlaps(before,units)):
             trial=before;continue
         out={e['id']:e for e in trial}
-        notes.append(dict(kind='hero-column-clearance',side=side,dx=dx,element_ids=sorted(ids)))
+        dx=min(out[eid]['x'] for eid in ids)-leftmost
+        notes.append(dict(kind='hero-column-clearance',side=side,dx=dx,scale=factor,element_ids=sorted(ids)))
     # Raise a centered source header only if the source left a real gap above H.
     header=[e for e in source.values() if e['type']=='text' and e['id'] in out and e.get('content','').strip()
+            and not source_layered(e)
             and e['y']<.22*sh and abs((e['x']+e['width']/2)/max(1.,sw)-.5)<=.08
             and e['y']+e['height']<=hero['y']+2]
     if header:
@@ -529,7 +754,84 @@ def polish_variant(elements,units,source,width,height,desired,iterations=24):
     return current,dict(before=before,after=best,accepted=accepted,iterations=iterations if groups else 0)
 
 
-def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alternatives=False):
+def _background_column_variants(elements,units,width,height,weak_ids,under,source_under,groups):
+    """Use an authored clean color zone to keep copy off a baked photo border."""
+    if source_under is None:return []
+    from engine.resize import (_text_visible_bounds, _feasible, _unintended_text_overlaps,
+                               _overlap, _rgba, _luminance)
+    source={e['id']:e for u in units for e in u['items']}
+    canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),None)
+    sw,sh=canvas or (width,height)
+    by_id={e['id']:e for e in elements};options=[]
+    for ids in _copy_columns(source,sw,sh,groups):
+        if not ids & set(weak_ids):continue
+        members=[by_id[eid] for eid in ids if eid in by_id]
+        labels=[source[eid] for eid in ids if source[eid]['type']=='text']
+        if len(labels)<2 or len(members)!=len(ids):continue
+        plain=[]
+        for label in labels:
+            box=_text_visible_bounds(label);area=max(1.,(box[2]-box[0])*(box[3]-box[1]))
+            if not any(source[eid]['type'] in ('image','shape')
+                       and source[eid].get('z_index',0)<label.get('z_index',0)
+                       and _overlap(box,(source[eid]['x'],source[eid]['y'],
+                           source[eid]['x']+source[eid]['width'],source[eid]['y']+source[eid]['height']))/area>=.8
+                       for eid in ids):plain.append(label)
+        if not plain:continue
+        focus=max(labels,key=lambda e:e['width']*e['height'])
+        source_cx=median(e['x']+e['width']/2 for e in labels)/max(1.,sw)
+        if .35<source_cx<.65:continue
+        box=_text_visible_bounds(focus)
+        sx0=max(0,int(box[0]/sw*source_under.width));sx1=min(source_under.width,int(box[2]/sw*source_under.width))
+        sy0=max(0,int(box[1]/sh*source_under.height));sy1=min(source_under.height,int(box[3]/sh*source_under.height))
+        pixels=[source_under.getpixel((x,y)) for y in range(sy0,sy1,max(1,(sy1-sy0)//20))
+                for x in range(sx0,sx1,max(1,(sx1-sx0)//24))]
+        if len(pixels)<12:continue
+        color=tuple(median(p[k] for p in pixels) for k in range(3))
+        distances=sorted(sum((p[k]-color[k])**2 for k in range(3))**.5 for p in pixels)
+        spread=distances[int(.8*(len(distances)-1))]
+        if spread>45.:continue
+        tolerance=min(85.,max(45.,spread+25.))
+        source_floors={}
+        for label in plain:
+            rgba=_rgba(label.get('color',''))
+            if not rgba:continue
+            alpha=rgba[3]*label.get('opacity',1.)
+            foreground=tuple(rgba[k]*alpha+color[k]*(1-alpha) for k in range(3))
+            a,b=_luminance(foreground),_luminance(color)
+            source_floors[label['id']]=round(max(2.5,min(3.,.9*(max(a,b)+.05)/(min(a,b)+.05))),3)
+        target_focus=by_id[focus['id']]
+        tb=_text_visible_bounds(target_focus)
+        y0=max(0,int(tb[1]/height*under.height));y1=min(under.height,int(tb[3]/height*under.height))
+        sample_y=list(range(y0,y1,max(1,(y1-y0)//24)))
+        if len(sample_y)<3:continue
+        matching=[]
+        for x in range(under.width):
+            good=sum(sum((under.getpixel((x,y))[k]-color[k])**2 for k in range(3))<=tolerance**2
+                     for y in sample_y)
+            matching.append(good/len(sample_y)>=.8)
+        runs=[];start=None
+        for x,ok in enumerate(matching+[False]):
+            if ok and start is None:start=x
+            if not ok and start is not None:
+                runs.append((start/under.width*width,x/under.width*width));start=None
+        left=min(e['x'] for e in members);right=max(e['x']+e['width'] for e in members)
+        pad=max(4.,.01*width)
+        for x0,x1 in runs:
+            if x1-x0<.10*width or (((x0+x1)/2<width/2)!=(source_cx<.5)):continue
+            overlap=max(0.,min(right,x1)-max(left,x0))/max(1.,right-left)
+            if not .15<overlap<.99 or (x1-x0-2*pad)/(right-left)<.55:continue
+            candidate=_fit_column(elements,ids,x0+pad,x1-pad,width,height)
+            if not _feasible(candidate,units,width,height,strict_margins=False,
+                             gap_factor=.004,allow_text_visual_overlap=True):continue
+            if set(_unintended_text_overlaps(candidate,units))-set(_unintended_text_overlaps(elements,units)):continue
+            options.append((candidate,[dict(repair_type='background-column-fit',element_ids=sorted(ids),
+                source_color_spread=round(spread,2),source_contrast_floor=source_floors,
+                column=[round(x0+pad,2),round(x1-pad,2)])]))
+    return options
+
+
+def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alternatives=False,
+                     source_under=None):
     """Propose bounded text-unit moves using actual backing pixels at glyphs."""
     from PIL import ImageChops
     from engine.resize import (_rgba, _luminance, _feasible,
@@ -541,7 +843,13 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
     for u in units:
         ids={e['id'] for e in u['items']}
         if not any(ids & g for g in groups):groups.append(ids)
-    groups=list({frozenset(g):set(g) for g in groups}.values())
+    groups=_merge_groups(groups)
+    if return_alternatives:
+        column_repairs=_background_column_variants(elements,units,width,height,weak_ids,
+                                                   under,source_under,groups)
+        alternatives.extend(column_repairs)
+        groups=_merge_groups(groups+[set(change['element_ids'])
+                                     for _,changes in column_repairs for change in changes])
     text_elements=[e for e in result if e['type']=='text' and e.get('content','').strip()]
 
     def gap_ok(trial,ids):
@@ -702,7 +1010,7 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                       for e in candidate)
             if key in seen:continue
             seen.add(key);unique.append((candidate,change))
-        priority={'backing-strip-expanded':0,'lockup-repositioned':1,'local-nudge':2}
+        priority={'background-column-fit':0,'backing-strip-expanded':1,'lockup-repositioned':2,'local-nudge':3}
         unique.sort(key=lambda item:(priority.get(item[1][0].get('repair_type'),3),
                                      item[0][0]['x'],item[0][0]['y']))
         return unique[:18],[]

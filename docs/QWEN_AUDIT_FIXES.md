@@ -206,3 +206,56 @@ visual review before being used as training labels or claimed as improvements.
   eight-case batch does not trigger the stack-preservation sibling, so its real
   visual effect is covered by targeted tests but not demonstrated by this
   review sample.
+
+## October 23: v12 source relationships and contrast repairs
+
+- The active local adapter remains `models/qwen3-layout-lora-v2`. These fixes
+  change inference only; prepared training JSONL and adapter weights are unchanged.
+- Hero clearance excludes authored text/backdrop lockups and meaningful source
+  overlap. Transparent image margins are checked against alpha pixels, so a
+  bounding-box intersection alone cannot establish intentional layering. Top
+  headers are excluded from side-column collision tests.
+- Compact centered emblems can connect separated text, rules, ribbons, and
+  icons through source proximity. Eligible groups occupy at most half the source
+  canvas and exclude independent large visuals. One uniform transform preserves
+  offsets and image proportions; major proposed boxes provide a robust scale,
+  bounded to 0.85–1.25 times the change in canvas short side. The raw Qwen
+  candidate remains available for genuine reflow. When a safe cohesive emblem
+  candidate exists, ranking excludes severely fractured Qwen siblings using
+  source-relative member offsets and non-text scale consistency.
+- A centered primary illustration that was flush with the source bottom edge
+  retains that anchor and source-relative height. Surrounding copy groups use
+  source-side clearance without moving an isolated label out of its group.
+  A narrow side slot can uniformly reduce the full callout column; merely
+  refusing a shift must not leave copy overlapping a newly enlarged hero.
+- Copy/button columns can fit beside a separate foreground image. For borders
+  baked into a background photo, a text-free source render establishes a clean
+  source color zone; target raster pixels locate a corresponding column. The
+  entire copy/button column moves and scales together, including tracking.
+- Contrast moves merge overlapping source groups. Marginal threshold misses
+  remain diagnostic warnings but do not justify large group relocation. Safe,
+  readable base Qwen candidates suppress contrast-only siblings. Repair render
+  slots are shared across parents instead of being exhausted by one parent.
+- A source-color column repair must improve each affected plain text's measured
+  minimum contrast by at least 0.5, meet its source-derived floor (never below
+  2.5), introduce no contrast regression, and add no weak text. This accommodates
+  authored white-on-pink text whose contrast stays below the general threshold
+  while removing the much worse white-on-photo-border collision. Warnings are
+  retained; this is not a claim of accessibility compliance.
+- The eight-case before/after viewer is
+  `data/qwen_lora/engine_review_v12_source_relationships/comparison.html`.
+  Saved pre-change candidates are rendered with the same unadjusted starter
+  renderer and dataset fonts as current candidates. `before_after.json` records
+  every case's geometry/font errors, unchanged raw proposals, and hard checks.
+  No official `renderer/converter/` source is modified.
+- The final controlled comparison replays the same verified v2 decoder proposals
+  through the completed engine. Mean geometry MAE changed from 0.05663 to 0.04359;
+  relative font error changed from 0.17360 to 0.13504. Seven cases improved in
+  geometry MAE. The square illustration changed from 0.09844 to 0.10210 while
+  gaining a bottom anchor and clear side columns. This repeatedly reviewed sample
+  is insufficient to establish generalization. All eight preserve IDs and have
+  zero unintended text overlaps and zero renderer warnings.
+- All 27 focused pipeline tests pass. The full suite ran 64 tests: 61 passed,
+  with the same two failures and one error in existing layout-mechanics tests
+  (logo gutter balance, peer-button row repair, supporting-copy classification).
+  The 22 viewer theme checks also pass.
