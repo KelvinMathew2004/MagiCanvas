@@ -3458,12 +3458,17 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     qwen_feasible={e['candidate']['name']:_feasible(e['candidate']['elements'],units,width,height,
                     strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
                    for e in valid if e['candidate']['name'].startswith('qwen-')}
+    display_text_ids={e['id'] for unit in units
+                      if unit.get('semantic') in ('headline','kicker')
+                      for e in unit['items'] if e.get('type')=='text'}
     qwen_primary=abs(log(state['delta']))>=.12
     perceptual=_siglip_rerank(valid,objective_cost,reference_image,relationship_context,
-                              qwen_feasible=qwen_feasible,qwen_primary=qwen_primary)
+                              qwen_feasible=qwen_feasible,qwen_primary=qwen_primary,
+                              display_text_ids=display_text_ids)
     if perceptual.get('selected_index') is None:
         fallback=_select_visual_candidate(valid,[objective_cost(e) for e in valid],[0.]*len(valid),
-                                           qwen_feasible,qwen_primary,False)
+                                           qwen_feasible,qwen_primary,False,
+                                           display_text_ids=display_text_ids)
         perceptual.update(fallback,used=False)
     selected=valid[perceptual['selected_index']]
     report=dict(used=True,
@@ -3507,24 +3512,93 @@ def _visual_relationship_context(units,source,width,height):
                 callout_quadrants=sorted(set(quadrants)))
 
 
+def _busy_background_font_shrink_only(candidate, baselines, display_text_ids):
+    """Find a strong Qwen layout penalized only for display text on busy pixels.
+
+    The exception is deliberately narrow: the Qwen render must have no measured
+    text/layout defects, all checked text must have strong contrast, and a
+    cheaper heuristic must remove busyness on a display element while keeping
+    that element's box fixed and shrinking only display fonts.
+    """
+    if (candidate.get('low_contrast') or candidate.get('invisible_text')
+            or abs(float(candidate.get('layout_defect_cost',float('inf'))))>1e-8):
+        return []
+    contrast=candidate.get('contrast_by_text') or {}
+    if not contrast or any(value.get('lower_quintile') is None
+                           or value['lower_quintile']<4.5
+                           for value in contrast.values()):
+        return []
+    q_elements={e.get('id'):e for e in candidate.get('candidate',{}).get('elements',[])}
+    if not q_elements:return []
+    display_text_ids=set(display_text_ids or ())
+    q_busy=set(candidate.get('busy_background',[]))
+    qualifying=[]
+    for index,baseline in enumerate(baselines):
+        if (baseline.get('invisible_text') or baseline.get('error')
+                or baseline.get('cost',0.)>=candidate.get('cost',0.)):
+            continue
+        h_elements={e.get('id'):e for e in baseline.get('candidate',{}).get('elements',[])}
+        if q_elements.keys()!=h_elements.keys():
+            continue
+        h_busy=set(baseline.get('busy_background',[]))
+        changed_display=False
+        only_display_fonts_shrank=True
+        for eid,q in q_elements.items():
+            h=h_elements[eid]
+            if q.get('type')!=h.get('type') or any(
+                    abs(float(q.get(k,0.))-float(h.get(k,0.)))>1.0
+                    for k in ('x','y','width','height')):
+                only_display_fonts_shrank=False
+                break
+            if q.get('type')!='text':
+                continue
+            if q.get('content')!=h.get('content'):
+                only_display_fonts_shrank=False
+                break
+            q_size=float(q.get('font_size',0.));h_size=float(h.get('font_size',0.))
+            if q_size>0 and abs(h_size-q_size)>max(1.,q_size*.05):
+                if eid not in display_text_ids or h_size>=.92*q_size:
+                    only_display_fonts_shrank=False
+                    break
+                q_spacing=float(q.get('letter_spacing',0.))/q_size
+                h_spacing=float(h.get('letter_spacing',0.))/max(1.,h_size)
+                if abs(q_spacing-h_spacing)>max(.25,abs(q_spacing)*.05):
+                    only_display_fonts_shrank=False
+                    break
+                if eid in q_busy-h_busy:
+                    changed_display=True
+        if changed_display and only_display_fonts_shrank:
+            qualifying.append(index)
+    return qualifying
+
+
 def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary=False,
-                             ranker_trained=False):
+                             ranker_trained=False,display_text_ids=None):
     """Rank safe Qwen siblings; keep objective and contrast bands explicit."""
     qwen=[i for i,e in enumerate(valid) if e['candidate']['name'].startswith('qwen-')]
     heur=[i for i in range(len(valid)) if i not in qwen]
     baselines=[valid[i] for i in heur]
     feasible=lambda i:(qwen_feasible.get(valid[i]['candidate']['name'],False)
                        if isinstance(qwen_feasible,dict) else bool(qwen_feasible))
-    safe=[i for i in qwen if feasible(i) and _qwen_contrast_safe(valid[i],baselines,qwen_primary)]
+    tolerated={i:_busy_background_font_shrink_only(valid[i],baselines,display_text_ids)
+               for i in qwen}
+    safe=[i for i in qwen if feasible(i) and
+          (_qwen_contrast_safe(valid[i],baselines,qwen_primary) or bool(tolerated[i]))]
     best=min(range(len(costs)),key=costs.__getitem__)
     tolerance=max(1.25,abs(costs[best])*.20)
-    global_band=[i for i,c in enumerate(costs) if c<=costs[best]+tolerance]
+    selection_costs=list(costs)
+    for i in qwen:
+        if tolerated[i]:
+            # Keep raw diagnostics intact while treating this specific display
+            # font shrink penalty as inside the same objective tolerance band.
+            selection_costs[i]=min(selection_costs[i],costs[best]+tolerance)
+    global_band=[i for i,c in enumerate(selection_costs) if c<=selection_costs[best]+tolerance]
     best_heuristic=min(heur,key=lambda i:costs[i]) if heur else None
     family_band=[]
     if safe:
-        family_best=min(costs[i] for i in safe)
+        family_best=min(selection_costs[i] for i in safe)
         family_tol=max(1.25,abs(family_best)*.20)
-        family_band=[i for i in safe if costs[i]<=family_best+family_tol]
+        family_band=[i for i in safe if selection_costs[i]<=family_best+family_tol]
         # First minimize the number of weak text elements across safe family
         # candidates. Compare rendered/objective cost next, with SigLIP only a
         # tie-break among candidates with the same contrast result.
@@ -3532,7 +3606,7 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
         contrast_band=[i for i in family_band
                        if len(valid[i].get('low_contrast',[]))==contrast_best]
         qchoice=max(contrast_band,key=lambda i:scores[i]
-                    -.15*(costs[i]-family_best)/max(family_tol,1e-9))
+                    -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
         # When a rendered contrast repair is a safe member of the same family
         # band and fixes more weak text, prefer it over its un-repaired parent.
         by_name={valid[i]['candidate']['name']:i for i in family_band}
@@ -3549,11 +3623,11 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
             # safe repair within the minimum-contrast family band.
             repaired=[i for i in repaired if i in contrast_band]
             if repaired:qchoice=max(repaired,key=lambda i:scores[i]
-                                    -.15*(costs[i]-family_best)/max(family_tol,1e-9))
+                                    -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
     else:qchoice=None
     eligible=[i for i in global_band if i not in qwen or i in safe]
     if not eligible:eligible=heur or safe or [best]
-    chosen=max(eligible,key=lambda i:scores[i]-.10*(costs[i]-costs[best])/tolerance)
+    chosen=max(eligible,key=lambda i:scores[i]-.10*(selection_costs[i]-selection_costs[best])/tolerance)
     if qchoice is not None and qwen_primary:
         # A trained domain judge can veto the family with a strong preference;
         # unvalidated zero-shot scores select within Qwen's local trust region.
@@ -3562,20 +3636,24 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
         chosen=(veto if ranker_trained and veto is not None and scores[veto]>scores[qchoice]+.15 else qchoice)
     checked=qchoice if qchoice is not None else (qwen[0] if qwen else None)
     return dict(selected_index=chosen,objective_costs=[round(c,4) for c in costs],
+        selection_costs=[round(c,4) for c in selection_costs],
+        busy_background_tolerated_names=[valid[i]['candidate']['name'] for i in qwen if tolerated[i]],
         tie_band=global_band,qwen_family_band=family_band,tolerance=round(tolerance,4),
         qwen_eligible=bool(safe),eligible_qwen_names=[valid[i]['candidate']['name'] for i in safe],
         trained_ranker_loaded=ranker_trained,
         qwen_safety_checks=dict(feasible=bool(checked is not None and feasible(checked)),
             no_invisible_text=bool(checked is not None and not valid[checked].get('invisible_text')),
-            contrast_within_tolerance=bool(checked is not None and _qwen_contrast_safe(valid[checked],baselines,qwen_primary)),
+            contrast_within_tolerance=bool(checked is not None and
+                (_qwen_contrast_safe(valid[checked],baselines,qwen_primary) or bool(tolerated.get(checked)))),
             qwen_primary=qwen_primary,objective_within_band=checked in family_band,
             objective_within_global_band=checked in global_band,
-            siglip_margin=bool(checked is not None and best_heuristic is not None and scores[checked]>scores[best_heuristic]+.03)),
+            siglip_margin=bool(checked is not None and best_heuristic is not None and scores[checked]>scores[best_heuristic]+.03),
+            busy_background_tolerated=bool(checked is not None and tolerated.get(checked))),
         overrode_heuristic=chosen!=best_heuristic)
 
 
 def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=None,
-                   qwen_feasible=False, qwen_primary=False):
+                   qwen_feasible=False, qwen_primary=False,display_text_ids=None):
     """Optional visual scoring with a deterministic family-aware fallback."""
     if len(valid)<2:
         return dict(used=False,selected_index=None,reason='Fewer than two candidates to compare')
@@ -3591,7 +3669,8 @@ def _siglip_rerank(valid, objective_cost, reference_image=None, layout_context=N
     used=scores is not None and len(scores)==len(valid)
     if not used:return dict(used=False,selected_index=None,reason=note)
     report=_select_visual_candidate(valid,[objective_cost(e) for e in valid],scores,
-                                    qwen_feasible,qwen_primary,ranker_trained)
+                                    qwen_feasible,qwen_primary,ranker_trained,
+                                    display_text_ids=display_text_ids)
     return dict(report,used=used,note=note,scores=[round(s,4) for s in scores])
 
 
@@ -3603,6 +3682,45 @@ def _assemble(elements,backgrounds,source,width,height):
             e['fit']='cover'
         by_id[e['id']]=e
     return dict(canvas=dict(width=int(width),height=int(height)),elements=[by_id[e['id']] for e in source['elements']])
+
+
+def _broken_source_stack_units(proposal, units):
+    """Find source-evidenced stacks that Qwen has separated in its proposal.
+
+    The stack analyzer already groups substantial overlaps with a clear paint
+    order. Keep this check narrow: an alternative is needed only when at least
+    one such source relationship falls below the same overlap threshold in the
+    proposed geometry. Other Qwen placements remain untouched.
+    """
+    proposed_by_id={e['id']:e for e in proposal}
+    def visible_box(element):
+        return (_text_visible_bounds(element) if element['type']=='text'
+                else _bounds([element]))
+
+    broken=[]
+    for unit in units:
+        if not unit.get('preserve_layer_stack') or len(unit['items'])<2:
+            continue
+        source_items=unit['items']
+        stack_broken=False
+        for i,a in enumerate(source_items):
+            pa=proposed_by_id.get(a['id'])
+            if pa is None:
+                continue
+            for b in source_items[:i]:
+                pb=proposed_by_id.get(b['id'])
+                if pb is None:
+                    continue
+                if not _intentional_stack_pair(a,b,visible_box(a),visible_box(b)):
+                    continue
+                if not _intentional_stack_pair(pa,pb,visible_box(pa),visible_box(pb)):
+                    stack_broken=True
+                    break
+            if stack_broken:
+                break
+        if stack_broken:
+            broken.append(unit)
+    return broken
 
 
 def _preserve_layered_proposals(proposal, units):
@@ -3627,9 +3745,10 @@ def _preserve_layered_proposals(proposal, units):
         suggested_box=_bounds(suggested)
         suggested_w=max(1e-6,suggested_box[2]-suggested_box[0])
         suggested_h=max(1e-6,suggested_box[3]-suggested_box[1])
-        factor=max(.35,min(1.8,suggested_w/source_w,suggested_h/source_h))
-        # Fit the shared source transform inside the model's proposed envelope.
-        factor=min(factor,suggested_w/source_w,suggested_h/source_h)
+        # One scale factor preserves source aspect ratios (notably contain-fit
+        # images) while fitting the complete stack inside Qwen's envelope.
+        env_w=max(1.,suggested_w);env_h=max(1.,suggested_h)
+        factor=min(env_w/max(1.,source_w),env_h/max(1.,source_h))
         block=_scale(unit['items'],factor)
         box=_bounds(block)
         target_x=(suggested_box[0]+suggested_box[2]-box[2]+box[0])/2
@@ -3637,6 +3756,12 @@ def _preserve_layered_proposals(proposal, units):
         _move(block,target_x,target_y)
         for item in block:
             target=proposed_by_id[item['id']]
+            if item['type']=='text':
+                scaled_size=max(1.,item.get('font_size',1.))
+                fitted_size=_fit_text(item,item['width'],item['height'],scaled_size)
+                if fitted_size<scaled_size:
+                    item['letter_spacing']=item.get('letter_spacing',0.)*(fitted_size/scaled_size)
+                item['font_size']=fitted_size
             for key in geometry_keys:
                 if key in item:
                     target[key]=item[key]
@@ -3693,6 +3818,29 @@ def _adapt_with_diagnostics(source,target_canvas):
                 qwen_diagnostics['micro_snapped_labels']=snapped_labels
                 qwen_diagnostics['superscript_anchored_ids']=anchor_changes
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
+                # Preserve a source-evidenced overlapping artwork stack only
+                # when Qwen separated one of its layers. Keep the model layout
+                # above as a sibling so the renderer/ranker can still prefer
+                # an intentional reflow when it renders better.
+                broken_stack_units=_broken_source_stack_units(proposal,units)
+                if broken_stack_units:
+                    stacked=_preserve_layered_proposals(proposal,broken_stack_units)
+                    stacked,stack_anchor_changes=anchor_superscripts(stacked,units)
+                    raw_stack_cost=_objective_layout_cost(
+                        proposal,units,source,width,height,desired,
+                        allow_text_visual_overlap=True)
+                    preserved_stack_cost=_objective_layout_cost(
+                        stacked,units,source,width,height,desired,
+                        allow_text_visual_overlap=True)
+                    if stacked!=proposal and preserved_stack_cost<=raw_stack_cost+1e-7:
+                        seeds.append(dict(name='qwen-layer-preserved',elements=stacked))
+                        qwen_diagnostics['layer_preserved_elements']=deepcopy(stacked)
+                        qwen_diagnostics['layer_stack_repaired_ids']=sorted({
+                            e['id'] for unit in broken_stack_units for e in unit['items']})
+                        qwen_diagnostics['layer_stack_anchor_ids']=stack_anchor_changes
+                        qwen_diagnostics['layer_stack_defect_cost']={
+                            'proposal':round(raw_stack_cost,6),
+                            'preserved':round(preserved_stack_cost,6)}
                 if original_proposal!=proposal:
                     seeds.append(dict(name='qwen-original',elements=original_proposal))
                 calibrated,font_changes=font_variant(proposal,units,width,height)

@@ -164,3 +164,45 @@ visual review before being used as training labels or claimed as improvements.
   discovery: 44 passed and the same three layout-mechanics failures remain
   (logo gutter balance, peer-button row repair, supporting-copy role). The 16
   focused Qwen/ranking/panel checks pass.
+
+## October 23: conditional source-stack candidate
+
+- The analyzer already identifies artwork layers whose source boxes overlap
+  substantially and have an explicit z-order. Qwen may still separate those
+  layers while predicting target boxes. The runtime now detects that specific
+  relationship break and adds a sibling that applies one source-proportional
+  transform to only the broken stack, centered within Qwen's proposed envelope.
+- The raw Qwen and normal repaired proposals remain candidates. The new sibling
+  uses the standard geometry, text-overlap, rendering, contrast, and candidate
+  ranking checks, and its measured layout-defect cost must be no higher than
+  the ordinary Qwen proposal. Intact stacks do not trigger it. This is a
+  conservative safeguard inspired by preserve-first approaches, not a claim
+  that locking a collage is always the best reflow.
+- The review builder adds a separate “Source-stack-preserved Qwen candidate”
+  panel when the rule triggers. Focused Qwen pipeline tests cover a broken
+  stack, an already-intact stack, and emission of the sibling from the runtime.
+
+## October 23: v11 promotion and final training preflight
+
+- The v11 source-stack sibling is now part of the active resize engine. The
+  shared stack transform uses one uniform scale, preserving contain-image
+  proportions; scaled text tracking follows its fitted font size.
+- Superscript anchoring now tightens the hero text frame after moving the
+  satellite, leaving a two-pixel raw-box gap while keeping measured glyph width.
+- SigLIP may treat a Qwen busy-background penalty as within tolerance only when
+  the Qwen candidate has no weak/invisible text, zero layout-defect cost, and
+  strong contrast on every checked text. The lower-cost heuristic must have the
+  same element geometry and reduce busyness only by shrinking display text.
+- Contrast repair includes padded full-lockup text spans for source-backed
+  cover strips and horizontal lockup placements at 17% and 21% of canvas width.
+- The review builder now records renderer mode and displays it accurately. The
+  final v11 review uses the unadjusted starter-renderer path for comparisons.
+- These are inference-time changes. They do not alter the v2 JSONL prompt,
+  answer schema, pair filters, or supervised target boxes, so existing prepared
+  v2 train/validation/test files do not need regeneration for this engine update.
+  The Colab response-only mask inspection remains in `QWEN_LORA_COLAB.md`.
+- All 18 focused Qwen pipeline tests pass; see the final v11 Gemini review
+  bundle for the regenerated visual evidence and current code snapshot. The
+  eight-case batch does not trigger the stack-preservation sibling, so its real
+  visual effect is covered by targeted tests but not demonstrated by this
+  review sample.

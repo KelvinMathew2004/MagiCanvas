@@ -69,8 +69,10 @@ def _render_candidate(source,target_canvas,enabled):
             resize_module._micro_snap_qwen_proposal=original_snap
     else:
         design,report=resize_module._adapt_with_diagnostics(source,target_canvas)
-    return design,report,(captured[-1] if captured else None),(
-        captured_micro[-1] if captured_micro else None)
+    layer=report.get("qwen_diagnostics",{}).get("layer_preserved_elements")
+    return (design,report,(captured[-1] if captured else None),
+            (captured_micro[-1] if captured_micro else None),
+            layer)
 
 
 def _geometry_metrics(elements,target_elements,canvas):
@@ -91,8 +93,11 @@ def _geometry_metrics(elements,target_elements,canvas):
             "font_relative_mae":round(sum(font_errors)/len(font_errors),5) if font_errors else None}
 
 
-def _html(rows):
+def _html(rows,renderer_mode):
     data=json.dumps(rows,ensure_ascii=False).replace("</","<\\/")
+    renderer_note=("starter renderer; dataset-only tight-text-width adjustment disabled"
+                   if renderer_mode=='starter_renderer_unadjusted' else
+                   "dataset renderer with tight-text-width adjustment enabled")
     return '''<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Qwen held-out engine comparison</title>
 <style>
@@ -112,10 +117,11 @@ figcaption{font-weight:650;margin-bottom:8px}img{display:block;width:100%;height
 <figure><figcaption>Local target JSON render (unadjusted)</figcaption><img id="target"></figure>
 <figure><figcaption>Qwen proposal after decoder checks</figcaption><img id="raw"></figure>
 <figure><figcaption>Micro-repaired Qwen proposal</figcaption><img id="micro"></figure>
+<figure id="layerFigure"><figcaption>Source-stack-preserved Qwen candidate</figcaption><img id="layer"></figure>
 <figure><figcaption>Engine, Qwen off</figcaption><img id="base"></figure>
 <figure><figcaption>Engine, Qwen on</figcaption><img id="adapter"></figure></main>
-<section id="diag"></section><p>Use arrow keys or buttons to compare. This review uses the starter renderer without the dataset-only tight-text-width adjustment. The micro-repaired image shows Qwen geometry after source-evidenced local repairs; the engine output also applies its standard constraints and ranking.</p>
-<script>const rows=__ROWS__;let i=0;function show(){const r=rows[i];for(const key of ['preview','target','raw','micro','base','adapter'])document.getElementById(key).src=r[key]||'';document.getElementById('meta').textContent=`${r.pair_id} · ${r.canvas.width}×${r.canvas.height} · ${r.element_count} elements · off: ${r.off_status} · on: ${r.on_status}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${i+1} / ${rows.length}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}function move(d){i=Math.max(0,Math.min(rows.length-1,i+d));show()}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)});show();</script></body></html>'''.replace('__ROWS__',data)
+<section id="diag"></section><p>Use arrow keys or buttons to compare. Renderer mode: __RENDERER_NOTE__. The micro-repaired image shows Qwen geometry after source-evidenced local repairs; the engine output also applies its standard constraints and ranking.</p>
+<script>const rows=__ROWS__;let i=0;function show(){const r=rows[i];for(const key of ['preview','target','raw','micro','layer','base','adapter'])document.getElementById(key).src=r[key]||'';document.getElementById('layerFigure').hidden=!r.layer;document.getElementById('meta').textContent=`${r.pair_id} · ${r.canvas.width}×${r.canvas.height} · ${r.element_count} elements · off: ${r.off_status} · on: ${r.on_status}`;document.getElementById('diag').textContent=r.diagnostics;document.getElementById('count').textContent=`${i+1} / ${rows.length}`;document.getElementById('prev').disabled=i===0;document.getElementById('next').disabled=i===rows.length-1}function move(d){i=Math.max(0,Math.min(rows.length-1,i+d));show()}document.getElementById('prev').onclick=()=>move(-1);document.getElementById('next').onclick=()=>move(1);document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')move(-1);if(e.key==='ArrowRight')move(1)});show();</script></body></html>'''.replace('__ROWS__',data).replace('__RENDERER_NOTE__',renderer_note)
 
 
 def main():
@@ -127,6 +133,8 @@ def main():
                         help="Skip the dataset-only text-width tolerance for every review render")
     args=parser.parse_args()
     if args.limit<1:parser.error("--limit must be positive")
+    renderer_mode=('starter_renderer_unadjusted' if args.raw_starter_renderer
+                   else 'dataset_tight_text_adjusted')
     os.environ["MAGICANVAS_DATASET_RENDERING"]="1"
     from scripts.dataset_renderer import render_design_to_png
     from engine.qwen_prompt import decode_v2_completion, record_prompt_version
@@ -161,11 +169,12 @@ def main():
                              adjust_tight_text_widths=not args.raw_starter_renderer)
         with Image.open(target_path) as image:
             if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(target_path)
-        off,off_report,_,_=_render_candidate(source,target_canvas,False)
-        on,on_report,raw_qwen,micro_qwen=_render_candidate(source,target_canvas,True)
+        off,off_report,_,_,_=_render_candidate(source,target_canvas,False)
+        on,on_report,raw_qwen,micro_qwen,layer_qwen=_render_candidate(source,target_canvas,True)
         off_path=args.output/f"{prefix}_qwen_off.png";on_path=args.output/f"{prefix}_qwen_on.png"
         raw_path=args.output/f"{prefix}_raw_qwen.png"
         micro_path=args.output/f"{prefix}_micro_qwen.png"
+        layer_path=args.output/f"{prefix}_layer_preserved_qwen.png"
         if raw_qwen is not None:
             import engine.resize as resize_module
             backgrounds,_=resize_module._analyze(source)
@@ -190,6 +199,18 @@ def main():
                 if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(micro_path)
         else:
             micro_warnings=["No Qwen proposal to micro-repair"]
+        if layer_qwen is not None:
+            import engine.resize as resize_module
+            backgrounds,_=resize_module._analyze(source)
+            layer_design=resize_module._assemble(layer_qwen,backgrounds,source,
+                                                target_canvas["width"],target_canvas["height"])
+            layer_warnings=render_design_to_png(layer_design,SPLIT_DIRS[source_split],layer_path,
+                                                ROOT/"data"/"crello_fonts.pickle",
+                                                adjust_tight_text_widths=not args.raw_starter_renderer)
+            with Image.open(layer_path) as image:
+                if image.size!=preview_size:image.convert("RGB").resize(preview_size,Image.Resampling.LANCZOS).save(layer_path)
+        else:
+            layer_warnings=["No broken source artwork stack detected"]
         off_warnings=render_design_to_png(off,SPLIT_DIRS[source_split],off_path,
                                           ROOT/"data"/"crello_fonts.pickle",
                                           adjust_tight_text_widths=not args.raw_starter_renderer)
@@ -240,6 +261,7 @@ def main():
                      f"Proposal received: {qdiag.get('proposal_received',False)} · "
                      f"constraints accepted: {qdiag.get('constraint_feasible',False)} · "
                      f"optimized: {qdiag.get('optimized',False)}\n"
+                     f"Source-stack candidate IDs: {qdiag.get('layer_stack_repaired_ids',[])}\n"
                      f"Qwen candidate energy: {qdiag.get('optimized_energy',qdiag.get('constrained_energy','n/a'))} · "
                      f"engine winner: {on_report.get('winner','unknown')} · "
                      f"Qwen win: {on_report.get('winner','').startswith('qwen-')}\n"
@@ -261,35 +283,40 @@ def main():
         output_file.write_text(json.dumps(dict(pair_id=row['pair_id'],source=source,
             target_canvas=target_canvas,decoded_model=qdiag.get('model_elements'),
             decoder_checked=raw_qwen,relationship_repaired=micro_qwen,
-            qwen_off=off,qwen_on=on,winner=on_report.get('winner')),ensure_ascii=False,indent=2)+"\n")
+            layer_preserved=layer_qwen,qwen_off=off,qwen_on=on,
+            winner=on_report.get('winner')),ensure_ascii=False,indent=2)+"\n")
         entries.append({"candidate_output":str(output_file.relative_to(args.output)),"pair_id":row["pair_id"],"canvas":target_canvas,
                         "element_count":len(source["elements"]),
+                        "renderer_mode":renderer_mode,
                         "preview":os.path.relpath(preview_path,args.output),
                         "target":target_path.name,"raw":raw_path.name if raw_qwen is not None else "",
                         "micro":micro_path.name if micro_qwen is not None else "",
+                        "layer":layer_path.name if layer_qwen is not None else "",
                         "base":off_path.name,"adapter":on_path.name,
                         "off_status":"render warnings" if off_warnings else "rendered",
                         "on_status":"render warnings" if on_warnings else "rendered",
                         "off_warnings":off_warnings,"on_warnings":on_warnings,
                         "raw_warnings":raw_warnings,
+                        "layer_warnings":layer_warnings,
                         "hard_checks":hard_checks,
                         "diagnostics":diagnostics,
                         "qwen_diagnostics":{k:v for k,v in qdiag.items() if not k.endswith('_elements')},
                         "siglip_diagnostics":{k:v for k,v in siglip_report.items()
                                               if k in ("used","note","reason","qwen_eligible",
                                                        "qwen_safety_checks","trained_ranker_loaded","tie_band","scores",
-                                                       "objective_costs","objective_cost_components",
+                                                       "objective_costs","selection_costs","objective_cost_components",
+                                                       "busy_background_tolerated_names",
                                                        "qwen_family_band","eligible_qwen_names",
                                                        "rejected_contrast_variants")},
                         "visual_candidate_diagnostics":[
-                            {k:c.get(k) for k in ("name","cost","checked","low_contrast",
+                            {k:c.get(k) for k in ("name","cost","layout_defect_cost","checked","low_contrast",
                                 "invisible_text","contrast_by_text","busy_background","warnings","error")
                              if k in c}
                             for c in visual_report.get("candidates",[])],
                         "target_geometry_mae":{"raw_qwen":raw_metrics,"after_constraints":constrained_metrics,
                                                 "qwen_on_final":final_metrics,"qwen_off_final":off_metrics}})
         print(f"Rendered {number}/{len(selected)}: {row['pair_id']}",flush=True)
-    (args.output/"review.html").write_text(_html(entries),encoding="utf-8")
+    (args.output/"review.html").write_text(_html(entries,renderer_mode),encoding="utf-8")
     (args.output/"manifest.json").write_text(json.dumps(entries,indent=2)+"\n")
     print(json.dumps({"review_page":str((args.output/"review.html").resolve()),
                       "examples":len(entries),"output":str(args.output.resolve())},indent=2))

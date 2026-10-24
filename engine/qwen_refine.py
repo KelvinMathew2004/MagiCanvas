@@ -406,6 +406,15 @@ def anchor_superscripts(elements,units):
         sat_moved=abs(new_x-sat['x'])>.01
         if sat_moved:
             sat['x']=new_x
+        # Keep the raw layout frames disjoint as well as the measured glyphs.
+        # The visible advance is a lower bound so tightening cannot clip ink.
+        anchor_vis=_text_visible_bounds(anchor)
+        anchor_vis_w=max(0.,anchor_vis[2]-anchor_vis[0])
+        max_frame_w=max(anchor_vis_w,
+                        min(anchor['width'],sat['x']-anchor['x']-2.0))
+        if max_frame_w<anchor['width']-1e-4:
+            anchor['width']=max_frame_w
+            anchor_tightened=True
         if anchor_tightened or sat_moved:
             changes.extend((anchor['id'],sat['id']))
     if set(_unintended_text_overlaps(result,units))-set(_unintended_text_overlaps(elements,units)):
@@ -592,7 +601,7 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
         if len(members)>1:
             left=min(e['x'] for e in members);right=max(e['x']+e['width'] for e in members)
             span=right-left
-            for fraction in (.12,.17,.18,.22,.25,.35,.50):
+            for fraction in (.12,.17,.18,.21,.22,.25,.35,.50):
                 for target_left in (fraction*width,width-right+left):
                     dx=target_left-left
                     if abs(dx)>2:moves.add((dx,0.))
@@ -637,21 +646,30 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
             if not white:continue
             strip=max(strips,key=lambda e:e['width']*e['height'])
             tx0=min(e['x'] for e in texts);tx1=max(e['x']+e['width'] for e in texts)
-            pad=max(4.,.01*width);left=min(strip['x'],tx0-pad);right=max(strip['x']+strip['width'],tx1+pad)
+            pad=max(4.,.01*width)
+            text_span=(tx0-pad,tx1+pad)
+            left=min(strip['x'],text_span[0]);right=max(strip['x']+strip['width'],text_span[1])
             # Keep the source strip's proportional lockup span, but ensure all
             # low-contrast white copy has opaque backing beneath its glyph box.
             if left>=strip['x'] and right<=strip['x']+strip['width'] and by_id[strip['id']].get('fit')=='cover':continue
-            for fraction in (1.,1.08,1.16):
-                candidate=deepcopy(elements);target={e['id']:e for e in candidate}[strip['id']]
-                center=(left+right)/2;new_width=(right-left)*fraction
-                target['x']=center-new_width/2;target['width']=new_width;target['fit']='cover'
-                if target['x']<0 or target['x']+target['width']>width:continue
-                if not _feasible(candidate,units,width,height,strict_margins=False,
-                                 gap_factor=.004,allow_text_visual_overlap=True):continue
-                if set(_unintended_text_overlaps(candidate,units))-set(_unintended_text_overlaps(elements,units)):continue
-                alternatives.append((candidate,[dict(repair_type='backing-strip-expanded',element_ids=sorted(ids),
-                    backing_for=sorted(e['id'] for e in white),dx=target['x']-strip['x'],dy=0.,
-                    width=target['width'])]))
+            # The base candidate expands/alines the authored cover strip to
+            # span all text in this source-evidenced lockup. Wider siblings
+            # leave the renderer to verify any extra padding.
+            spans=[(left,right)]
+            if 0.<=text_span[0] and text_span[1]<=width and text_span!=(left,right):
+                spans.append(text_span)
+            for span_left,span_right in spans:
+                for fraction in (1.,1.08,1.16):
+                    candidate=deepcopy(elements);target={e['id']:e for e in candidate}[strip['id']]
+                    center=(span_left+span_right)/2;new_width=(span_right-span_left)*fraction
+                    target['x']=center-new_width/2;target['width']=new_width;target['fit']='cover'
+                    if target['x']<0 or target['x']+target['width']>width:continue
+                    if not _feasible(candidate,units,width,height,strict_margins=False,
+                                     gap_factor=.004,allow_text_visual_overlap=True):continue
+                    if set(_unintended_text_overlaps(candidate,units))-set(_unintended_text_overlaps(elements,units)):continue
+                    alternatives.append((candidate,[dict(repair_type='backing-strip-expanded',element_ids=sorted(ids),
+                        backing_for=sorted(e['id'] for e in white),dx=target['x']-strip['x'],dy=0.,
+                        width=target['width'],text_span=list(text_span))]))
         # Translate a full rigid lockup as a unit when local movement or a
         # wider strip cannot clear the background. Also move visually attached
         # non-text layers that are represented in the same source-evidenced
@@ -663,7 +681,7 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
             left=min(e['x'] for e in members);right=max(e['x']+e['width'] for e in members)
             top=min(e['y'] for e in members);bottom=max(e['y']+e['height'] for e in members)
             span=right-left
-            for fraction in (.12,.17,.18,.22,.25,.35,.50):
+            for fraction in (.12,.17,.18,.21,.22,.25,.35,.50):
                 for target_left in (fraction*width,width-right+left):
                     dx=target_left-left
                     if abs(dx)<2 or target_left<0 or target_left+span>width:continue

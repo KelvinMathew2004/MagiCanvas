@@ -7,48 +7,32 @@ Hugging Face. Training may still be subject to Crello/VistaCreate terms; check
 adapter. Qwen3 fine-tuning with Unsloth is supported in Colab in the [Qwen
 training guide](https://github.com/QwenLM/Qwen3/blob/main/docs/source/training/unsloth.md).
 
-## 1. Create the exact-only files locally
+The current v11 engine changes are inference-time candidate selection and
+geometry repairs. They do not change the Qwen prompt, target JSON, coordinates,
+or text labels, so they do not require regenerating the prepared JSONL or
+changing the response-only masking code below. Rebuild the dataset only after
+changing `scripts/prepare_qwen_training.py` or its source pair manifest.
+
+## 1. Prepare the training data
 
 From the repository root, with the full pair scan and converted splits already
-present:
+present, create the selected exact-pair training set. It preserves target font
+sizes and isolates connected template families across train, validation, and
+test.
 
 ```bash
-python3 scripts/prepare_qwen_training.py
+python3 scripts/prepare_qwen_training.py \
+  --output data/qwen_lora_expanded_v2 \
+  --train-source-cap 4 \
+  --train-family-cap 40 \
+  --stratify-aspect-transitions
 ```
 
-This creates exact-only chat JSONL with source/reference font sizes preserved.
-Text labels are never shrunk through the engine's font fitter. Connected exact
-and core template families stay together in a stable 80/10/10 split; core pairs
-remain review-only. Each row records its `family_id`, `source_template_id`, and
-`prompt_version`.
-
-The new defaults cap each *source template* at **2 outgoing directions** in each
-split. Connected components still define train/validation/test isolation, but a
-large component no longer loses nearly all its examples to one family-wide cap.
-This retains more resize variety while limiting repeated-source domination.
-`--train-source-cap 0 --eval-source-cap 0` disables caps. Evaluate the cap with
-the held-out split; it is a sampling choice, not evidence of higher model quality.
-
-To prepare the next experiment without replacing the installed adapter's data:
-
-```bash
-python3 scripts/prepare_qwen_training.py --output data/qwen_lora_source_capped_v2
-```
-
-This dataset uses the existing v2 contract (0..1000 boxes and font size relative
-to the short side). An optional v3 experiment changes only font normalization:
-
-```bash
-python3 scripts/prepare_qwen_training.py --prompt-version 3 --output data/qwen_lora_v3_source_capped
-```
-
-V3 uses `sqrt(width * height)` as the font reference. Both normalizations are
-reversible, and the old short-side encoding does **not** inherently amplify pixel
-quantization error on banners. V3 is an experiment requiring a new adapter,
-not a demonstrated correction to v2. Never use a v2 adapter to decode v3 tokens.
-Keep training/validation/test from one prepared directory together. Existing
-`data/qwen_lora/` and its 90-case review remain the historical baseline; do not
-claim that repeatedly inspected cases are a fresh blind test.
+The current manifest provides **2,706** expanded training directions from
+4,242 eligible exact directions. The 309 validation and 89 test rows remain
+byte-for-byte identical to the current capped-v2 evaluation split. The
+stratified cap prioritizes portrait, square, landscape, and wide transitions,
+then balances directions across sources and families.
 
 Upload only `train.jsonl` and `validation.jsonl` in Colab for training. Keep
 `test.jsonl` for the final local evaluation. These files contain design text and
@@ -57,23 +41,15 @@ data.
 
 ## 2. Start a GPU Colab notebook
 
-In Colab choose **Runtime → Change runtime type → T4 GPU** (or another available
-CUDA GPU). Run these cells in order. If the install reports a version conflict,
-restart the runtime and follow the current install cell in the linked Qwen guide.
+In Colab choose **Runtime → Change runtime type → T4 GPU**. Run these cells in
+order.
 
 ```python
-!pip -q install unsloth datasets trl
-```
-
-If the response-mask helper reports a marker or masking error, upgrade the
-training packages and restart the Colab runtime before rerunning the notebook:
-
-```python
-!pip -q install --upgrade unsloth unsloth_zoo trl
+!pip -q install --upgrade unsloth unsloth_zoo datasets trl
 ```
 
 Upload `train.jsonl` and `validation.jsonl` from
-`data/qwen_lora_source_capped_v2/` when prompted:
+`data/qwen_lora_expanded_v2/`. Keep `test.jsonl` local for final evaluation.
 
 ```python
 from google.colab import files
@@ -112,10 +88,10 @@ raw = load_dataset("json", data_files={
 })
 
 PROMPT_VERSION = int(raw["train"][0].get("prompt_version", 2))
-assert PROMPT_VERSION in (2, 3)
+assert PROMPT_VERSION == 2
 assert all(int(row.get("prompt_version", 2)) == PROMPT_VERSION
            for split in raw.values() for row in split)
-ADAPTER_NAME = f"qwen3-layout-lora-v{PROMPT_VERSION}"
+ADAPTER_NAME = "qwen3-layout-lora-v2-expanded"
 
 def format_chat(row):
     prompt = tokenizer.apply_chat_template(
@@ -256,19 +232,39 @@ files.download(archive)
 
 Do not choose a checkpoint only because its training loss fell. Evaluate held-out
 test prompts for valid JSON, exactly the expected IDs, numeric/in-canvas
-coordinates, preserved image proportions, and no content edits. Then feed the
-adapter's proposals through the engine and compare rendered PNGs with the
-non-Qwen baseline. Inspect several examples, including dense and unusual target
-ratios. A malformed/incomplete response is rejected by the runtime wrapper; the
-deterministic candidate path remains available.
+coordinates, preserved image proportions, and no content edits. The A/B command
+below then compares raw proposals and engine-selected layouts against the
+currently installed v2 adapter. Inspect the per-case results and renders before
+switching adapters. A malformed or incomplete response is rejected by the
+runtime wrapper; the deterministic candidate path remains available.
 
-The installed v2 adapter continues to load from `models/qwen3-layout-lora-v2/`.
-For a v3 experiment, install the new adapter into `models/qwen3-layout-lora-v3/`
-and set `MAGICANVAS_QWEN_ADAPTER_DIR` to that directory. The version marker must
-match the evaluation JSONL. Run with `MAGICANVAS_QWEN_ENABLED=1` to enable model
-candidates. The Dockerfile supports build-time public adapter fetching through
-`QWEN_ADAPTER_REPO` and `QWEN_ADAPTER_REVISION`; the training cells do not upload
-anything publicly.
+Keep the new adapter in `models/qwen3-layout-lora-v2-expanded/` so the current
+v2 adapter remains available. Evaluate it on the expanded export's held-out
+89-row test split and compare against the current adapter:
+
+```bash
+MAGICANVAS_QWEN_ENABLED=1 python3 scripts/evaluate_qwen_adapter.py \
+  --input data/qwen_lora_expanded_v2/test.jsonl \
+  --adapter-dir models/qwen3-layout-lora-v2-expanded \
+  --compare-adapter-dir models/qwen3-layout-lora-v2 \
+  --engine \
+  --output data/qwen_lora_expanded_v2/adapter_comparison.json
+```
+
+The report includes raw model JSON completion and valid-proposal rates, raw
+geometry and relative font MAE, post-constraint geometry and relative font MAE,
+Qwen-family winner counts, and hard-check pass rates for both adapters. The
+`candidate_beats_both_comparison_metrics` flag is true only when the new adapter
+has lower post-constraint geometry and font MAE, more Qwen-family wins, complete
+valid layouts, and a 100% hard-check pass rate. Review per-example results and
+renders before changing the installed adapter. This full-engine comparison
+renders the held-out cases for both adapters, so it takes longer than raw JSON
+evaluation.
+
+The existing baseline remains at `models/qwen3-layout-lora-v2/`. Run with
+`MAGICANVAS_QWEN_ENABLED=1` to enable model candidates. The Dockerfile supports
+build-time public adapter fetching through `QWEN_ADAPTER_REPO` and
+`QWEN_ADAPTER_REVISION`; the training cells do not upload anything publicly.
 
 Runtime now compares the decoder-checked proposal with source-lockup/column,
 measured-font, bounded local-search, and contrast-repair alternatives. Font

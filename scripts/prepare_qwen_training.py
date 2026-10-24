@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 import sys
 
@@ -26,6 +26,105 @@ SPLIT_DIRS = {
 }
 DEFAULT_TRAIN_SOURCE_CAP = 2
 DEFAULT_EVAL_SOURCE_CAP = 2
+
+
+def aspect_bucket(canvas):
+    """Coarse layout orientation class used only to diversify training picks."""
+    ratio = float(canvas["width"]) / max(1.0, float(canvas["height"]))
+    if ratio <= 0.85:
+        return "portrait"
+    if ratio <= 1.15:
+        return "square"
+    if ratio <= 1.80:
+        return "landscape"
+    return "wide"
+
+
+def select_directions(records, cap, stratified=False):
+    """Select a deterministic set of outgoing directions from one source."""
+    ordered = sorted(records, key=lambda r: (
+        r["target_canvas"]["width"] / r["target_canvas"]["height"], r["pair_id"]))
+    if not cap or len(ordered) <= cap:
+        return ordered
+    if not stratified:
+        picks = sorted({round(i * (len(ordered) - 1) / max(1, cap - 1))
+                        for i in range(cap)})
+        return [ordered[i] for i in picks]
+
+    # Greedy coverage first gives each source as many distinct orientation
+    # transitions as the cap allows; repeated transitions are then spread
+    # across target aspect ratios.
+    selected = []
+    transition_counts = Counter()
+    selected_ratios = []
+    remaining = list(ordered)
+    while remaining and len(selected) < cap:
+        def score(record):
+            transition = record["_aspect_transition"]
+            ratio = record["_target_aspect_ratio"]
+            novelty = min((abs(ratio - old) for old in selected_ratios), default=0.0)
+            return (transition_counts[transition], -novelty, record["pair_id"])
+        chosen = min(remaining, key=score)
+        remaining.remove(chosen)
+        selected.append(chosen)
+        transition_counts[chosen["_aspect_transition"]] += 1
+        selected_ratios.append(chosen["_target_aspect_ratio"])
+    return selected
+
+
+def select_family_directions(records, cap, stratified=False):
+    """Cap one family while covering transitions and source templates evenly."""
+    if not cap or len(records) <= cap:
+        return list(records)
+    if not stratified:
+        return sorted(records, key=lambda r: r["pair_id"])[:cap]
+    selected = []
+    transition_counts = Counter()
+    source_counts = Counter()
+    remaining = list(records)
+    while remaining and len(selected) < cap:
+        def score(record):
+            return (transition_counts[record["_aspect_transition"]],
+                    source_counts[record["source_template_id"]],
+                    record["pair_id"])
+        chosen = min(remaining, key=score)
+        remaining.remove(chosen)
+        selected.append(chosen)
+        transition_counts[chosen["_aspect_transition"]] += 1
+        source_counts[chosen["source_template_id"]] += 1
+    return selected
+
+
+def choose_split_records(records_by_family, split, source_cap,
+                         family_cap=0, stratified=False):
+    selected = []
+    # Keep insertion order for legacy exports so the existing capped-v2
+    # validation/test JSONL remains byte-for-byte reproducible.
+    for family, split_records in records_by_family.items():
+        records = split_records.get(split, [])
+        if not records:
+            continue
+        by_source = defaultdict(list)
+        for record in records:
+            by_source[record["source_template_id"]].append(record)
+        family_records = []
+        for source_id, directions in by_source.items():
+            family_records.extend(select_directions(directions,
+                                                   source_cap,
+                                                   stratified=stratified))
+        family_records = select_family_directions(family_records, family_cap,
+                                                  stratified=stratified)
+        selected.extend(family_records)
+    return selected
+
+
+def distribution(values):
+    values = sorted(values)
+    if not values:
+        return {"count": 0, "min": 0, "median": 0, "p90": 0, "max": 0}
+    return {"count": len(values), "min": values[0],
+            "median": values[(len(values) - 1) // 2],
+            "p90": values[int((len(values) - 1) * 0.90)], "max": values[-1]}
 
 
 def manifest_index(root):
@@ -101,6 +200,8 @@ def build_example(pair, a_design, b_design, reverse=False, prompt_version=2):
         "messages": messages_for(source,target["canvas"],completion,version=prompt_version),
         "pair_id": f"{source_info['id']}__to__{target_info['id']}",
         "source_template_id":source_info["id"],
+        "_aspect_transition": f"{aspect_bucket(source['canvas'])}->{aspect_bucket(target['canvas'])}",
+        "_target_aspect_ratio": float(target["canvas"]["width"])/max(1.0,float(target["canvas"]["height"])),
         "prompt_version":prompt_version,
         "source_split": source_info["split"], "target_split": target_info["split"],
         "target_canvas": target["canvas"],
@@ -141,6 +242,10 @@ def main():
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--train-source-cap",type=int,default=DEFAULT_TRAIN_SOURCE_CAP,
                         help="Maximum directed training examples per source template; 0 keeps all eligible directions")
+    parser.add_argument("--train-family-cap",type=int,default=0,
+                        help="Optional maximum training directions per connected template family; 0 keeps all")
+    parser.add_argument("--stratify-aspect-transitions",action="store_true",
+                        help="Prioritize distinct portrait/square/landscape/wide source-to-target transitions under caps")
     parser.add_argument("--eval-source-cap",type=int,default=DEFAULT_EVAL_SOURCE_CAP,
                         help="Maximum validation/test directions per source template; 0 keeps all")
     parser.add_argument("--prompt-version",type=int,choices=(2,3),default=2,
@@ -152,6 +257,8 @@ def main():
     if args.eval_source_cap<0:parser.error("--eval-source-cap must be nonnegative")
     if args.train_source_cap < 0:
         parser.error("--train-source-cap must be zero (unlimited) or positive")
+    if args.train_family_cap < 0:
+        parser.error("--train-family-cap must be zero (unlimited) or positive")
     pair_doc = json.loads(args.pairs.read_text())
     indexes = {split: manifest_index(root) for split, root in SPLIT_DIRS.items()}
     designs = {}
@@ -238,24 +345,60 @@ def main():
             record["family_id"]=family
             records_by_family[family][assigned_split].append(record)
 
-    capped_train=0
-    capped_eval=0
-    for family,split_records in records_by_family.items():
-        for split,records in split_records.items():
-            cap=args.train_source_cap if split=="train" else args.eval_source_cap
-            by_source=defaultdict(list)
-            for record in records:by_source[record["source_template_id"]].append(record)
-            retained=[]
-            for source_id,directions in by_source.items():
-                directions.sort(key=lambda r:(r["target_canvas"]["width"]/r["target_canvas"]["height"],r["pair_id"]))
-                if cap and len(directions)>cap:
-                    n=cap
-                    picks=sorted({round(i*(len(directions)-1)/max(1,n-1)) for i in range(n)})
-                    if split=="train":capped_train+=len(directions)-len(picks)
-                    else:capped_eval+=len(directions)-len(picks)
-                    directions=[directions[i] for i in picks]
-                retained.extend(directions)
-            exact_by_split[split].extend(retained)
+    # Preserve legacy evenly-spaced cap behavior unless stratification is
+    # explicitly requested. Eval files always use the same deterministic
+    # direction cap so experiments can share identical held-out rows.
+    exact_by_split["train"] = choose_split_records(
+        records_by_family, "train", args.train_source_cap,
+        family_cap=args.train_family_cap,
+        stratified=args.stratify_aspect_transitions)
+    for split in ("validation", "test"):
+        exact_by_split[split] = choose_split_records(
+            records_by_family, split, args.eval_source_cap, stratified=False)
+    uncapped_by_split = {
+        split: sum(len(split_records.get(split, []))
+                   for split_records in records_by_family.values())
+        for split in ("train", "validation", "test")}
+    capped_train = uncapped_by_split["train"] - len(exact_by_split["train"])
+    capped_eval = sum(uncapped_by_split[split] - len(exact_by_split[split])
+                      for split in ("validation", "test"))
+
+    # Include actual counts for comparable expansion policies and the uncapped
+    # ceiling, all over the exact same family assignment and eligible examples.
+    scenario_counts = {
+        "current_source_cap_2_legacy": len(choose_split_records(
+            records_by_family, "train", 2, stratified=False)),
+        "source_cap_4_stratified": len(choose_split_records(
+            records_by_family, "train", 4, stratified=True)),
+        "source_cap_4_family_cap_16_stratified": len(choose_split_records(
+            records_by_family, "train", 4, family_cap=16, stratified=True)),
+        "source_cap_4_family_cap_20_stratified": len(choose_split_records(
+            records_by_family, "train", 4, family_cap=20, stratified=True)),
+        "source_cap_4_family_cap_32_stratified": len(choose_split_records(
+            records_by_family, "train", 4, family_cap=32, stratified=True)),
+        "source_cap_4_family_cap_40_stratified": len(choose_split_records(
+            records_by_family, "train", 4, family_cap=40, stratified=True)),
+        "uncapped_exact_directions": uncapped_by_split["train"],
+    }
+    after_source_cap = choose_split_records(records_by_family, "train", 4,
+                                            stratified=True)
+    by_capped_family = Counter(record["family_id"] for record in after_source_cap)
+    family_candidate_counts = [len(rows.get("train", []))
+                               for rows in records_by_family.values() if rows.get("train")]
+    # Count raw directions by source template across the isolated train split.
+    raw_by_source = defaultdict(int)
+    for rows in records_by_family.values():
+        for record in rows.get("train", []):
+            raw_by_source[record["source_template_id"]] += 1
+    source_candidate_counts = list(raw_by_source.values())
+    transition_counts = Counter(record["_aspect_transition"]
+                                for rows in records_by_family.values()
+                                for record in rows.get("train", []))
+
+    for split_records in exact_by_split.values():
+        for record in split_records:
+            record.pop("_aspect_transition", None)
+            record.pop("_target_aspect_ratio", None)
 
     write_jsonl(args.output / "train.jsonl", exact_by_split["train"])
     write_jsonl(args.output / "validation.jsonl", exact_by_split["validation"])
@@ -273,10 +416,18 @@ def main():
                "family_split_policy":"stable hash of exact+core connected component (80/10/10)",
                "family_graph_edges":"exact and core matches; core remains review-only",
                "train_source_direction_cap":args.train_source_cap or None,
+               "train_family_direction_cap":args.train_family_cap or None,
+               "aspect_transition_stratification":args.stratify_aspect_transitions,
                "train_directions_removed_by_cap": capped_train,
                "eval_source_direction_cap":args.eval_source_cap or None,
                "families_per_split":{split:len({r["family_id"] for r in rows}) for split,rows in exact_by_split.items()},
-               "validation_test_directions_removed_by_cap": capped_eval}
+               "validation_test_directions_removed_by_cap": capped_eval,
+               "uncapped_eligible_exact_directions": uncapped_by_split,
+               "train_family_direction_distribution": distribution(family_candidate_counts),
+               "train_family_distribution_after_source_cap_4": distribution(by_capped_family.values()),
+               "train_source_direction_distribution": distribution(source_candidate_counts),
+               "train_aspect_transition_distribution": dict(sorted(transition_counts.items())),
+               "train_cap_scenario_counts": scenario_counts}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
 
