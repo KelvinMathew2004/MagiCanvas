@@ -1286,10 +1286,43 @@ def _separate_qwen_unit_collisions(elements,units,width,height,gap=None):
     return repaired,changes
 
 
-def _micro_snap_qwen_proposal(elements, units, width, height):
+def _micro_snap_qwen_proposal(elements, units, width, height,source=None):
     """Repair source-supported lockups and small proposal-only text collisions."""
     from engine.qwen_refine import repair_relationships
     repaired,changes=repair_relationships(elements, units, width, height)
+    if source is not None:
+        line_aligned=_source_alignment_variant(
+            repaired,units,source,width,height,
+            align_text=False,align_lines=True,panel_inset=False)
+        if line_aligned is not None:
+            before={e['id']:e for e in repaired}
+            moved=[e for e in line_aligned if any(
+                abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
+                for k in ('x','y','width','height'))]
+            if (moved and all(e['x']>=0 and e['y']>=0
+                    and e['x']+e['width']<=width+1e-5
+                    and e['y']+e['height']<=height+1e-5 for e in moved)
+                    and not (set(_unintended_text_overlaps(line_aligned,units))-
+                             set(_unintended_text_overlaps(repaired,units)))):
+                repaired=line_aligned
+                changes.extend(dict(kind='source-rule-alignment',element_id=e['id'])
+                               for e in moved)
+        inset_aligned=_source_alignment_variant(
+            repaired,units,source,width,height,
+            align_text=False,align_lines=False,panel_inset=True)
+        if inset_aligned is not None:
+            before={e['id']:e for e in repaired}
+            moved=[e for e in inset_aligned if any(
+                abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
+                for k in ('x','y','width','height'))]
+            if (moved and all(e['x']>=0 and e['y']>=0
+                    and e['x']+e['width']<=width+1e-5
+                    and e['y']+e['height']<=height+1e-5 for e in moved)
+                    and not (set(_unintended_text_overlaps(inset_aligned,units))-
+                             set(_unintended_text_overlaps(repaired,units)))):
+                repaired=inset_aligned
+                changes.extend(dict(kind='source-frame-heading-clearance',element_id=e['id'])
+                               for e in moved)
     repaired,separation_changes=_separate_qwen_text_collisions(repaired,units,width,height)
     changes.extend(separation_changes)
     repaired,unit_changes=_separate_qwen_unit_collisions(repaired,units,width,height)
@@ -4123,6 +4156,149 @@ def _source_scaled_art_variant(elements,units,source,width,height):
     return result if changed else None
 
 
+def _source_alignment_variant(elements,units,source,width,height,*,align_text=True,
+                              align_lines=True,panel_inset=True):
+    """Restore source-evidenced horizontal alignment inside Qwen lockups.
+
+    A frequent proposal defect is that a visual anchor is resized/reflowed,
+    while a related text stack keeps stale x coordinates. Detect compact,
+    source-aligned text stacks and align them to the corresponding current
+    decorative-rule group, symmetric image pair, or hero art. Keep text sizes
+    and y positions intact. Backed text also retains its source inset when a
+    panel has been resized.
+    """
+    from statistics import median
+
+    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
+    scale=min(float(width)/max(1.,sw),float(height)/max(1.,sh))
+    src={e['id']:e for e in source.get('elements',())}
+    cur={e['id']:e for e in elements}
+    result=deepcopy(elements);out={e['id']:e for e in result}
+    texts=[e for e in src.values() if e.get('type')=='text' and e.get('content','').strip()
+           and e['id'] in out]
+    line_items=[e for e in src.values() if e.get('type') in ('image','shape')
+                and float(e.get('width',0))>=max(8.,float(e.get('height',0))*8)
+                and float(e.get('width',0))<=.5*sw and e['id'] in out]
+    if align_text and len(texts)>=2:
+        centers={e['id']:float(e['x'])+float(e['width'])/2 for e in texts}
+        groups=[]
+        for seed in texts:
+            members=[e for e in texts if abs(centers[e['id']]-centers[seed['id']])<=.07*sw]
+            ids=frozenset(e['id'] for e in members)
+            if len(ids)>=2 and ids not in groups:groups.append(ids)
+        image_units=[u for u in units if u.get('items') and
+                     all(e.get('type')=='image' for e in u['items']) and
+                     not u.get('backed_ids') and not u.get('backed_by_ids')]
+        for ids in groups:
+            members=[e for e in texts if e['id'] in ids]
+            stack_center=median(centers[e['id']] for e in members)
+            stack_top=min(float(e['y']) for e in members)
+            stack_bottom=max(float(e['y'])+float(e['height']) for e in members)
+            anchors=[]
+            # A cluster of horizontal rules is a strong source alignment cue.
+            nearby=[e for e in line_items if abs(
+                float(e['x'])+float(e['width'])/2-stack_center)<=.10*sw
+                and float(e['y'])>=stack_top-.22*sh
+                and float(e['y'])<=stack_bottom+.22*sh]
+            if len(nearby)>=2:
+                source_center=median(float(e['x'])+float(e['width'])/2 for e in nearby)
+                current_center=median(float(out[e['id']]['x'])+
+                                      float(out[e['id']]['width'])/2 for e in nearby)
+                anchors.append((abs(source_center-stack_center),source_center,current_center))
+            # A symmetric pair of small illustrations often brackets a title
+            # or price. Preserve the source offset from the pair's midpoint.
+            for i,a in enumerate(image_units):
+                ai=[src.get(e['id']) for e in a['items']]
+                ai=[e for e in ai if e]
+                if not ai:continue
+                ab=(min(e['x'] for e in ai),min(e['y'] for e in ai),
+                    max(e['x']+e['width'] for e in ai),max(e['y']+e['height'] for e in ai))
+                if (ab[2]-ab[0])>.22*sw or (ab[3]-ab[1])>.25*sh:continue
+                for b in image_units[i+1:]:
+                    bi=[src.get(e['id']) for e in b['items']];bi=[e for e in bi if e]
+                    if not bi:continue
+                    bb=(min(e['x'] for e in bi),min(e['y'] for e in bi),
+                        max(e['x']+e['width'] for e in bi),max(e['y']+e['height'] for e in bi))
+                    if abs((ab[1]+ab[3]-bb[1]-bb[3])/2)>.12*sh:continue
+                    pair_center=((ab[0]+ab[2])+(bb[0]+bb[2]))/4
+                    if abs(pair_center-stack_center)>.08*sw:continue
+                    out_ids=[e['id'] for e in a['items']+b['items'] if e['id'] in out]
+                    if not out_ids:continue
+                    current_boxes=[_bounds([out[eid]]) for eid in out_ids]
+                    current_center=(min(bx[0] for bx in current_boxes)+
+                                    max(bx[2] for bx in current_boxes))/2
+                    anchors.append((abs(pair_center-stack_center),pair_center,current_center))
+            # Large, unboxed artwork can anchor a centered title stack.
+            for unit in image_units:
+                si=[src.get(e['id']) for e in unit['items']];si=[e for e in si if e]
+                if not si:continue
+                sb=(min(e['x'] for e in si),min(e['y'] for e in si),
+                    max(e['x']+e['width'] for e in si),max(e['y']+e['height'] for e in si))
+                share=(sb[2]-sb[0])*(sb[3]-sb[1])/max(1.,sw*sh)
+                if share<.06 or abs((sb[0]+sb[2])/2-stack_center)>.065*sw:continue
+                out_ids=[e['id'] for e in unit['items'] if e['id'] in out]
+                if not out_ids:continue
+                cb=[_bounds([out[eid]]) for eid in out_ids]
+                current_center=(min(b[0] for b in cb)+max(b[2] for b in cb))/2
+                anchors.append((abs((sb[0]+sb[2])/2-stack_center),
+                                (sb[0]+sb[2])/2,current_center))
+            if anchors:
+                _,source_anchor,current_anchor=min(anchors,key=lambda a:a[0])
+                desired_center=current_anchor+(stack_center-source_anchor)*scale
+                for e in members:
+                    target=out[e['id']]
+                    desired=desired_center+(centers[e['id']]-stack_center)*scale
+                    dx=desired-(float(target['x'])+float(target['width'])/2)
+                    if abs(dx)<=.025*width or abs(dx)>.24*width:continue
+                    target['x']+=dx
+    # Preserve short rule-to-copy alignment as a separate relation. The rule
+    # is the lighter visual element, so a modest correction moves it toward
+    # the text rather than displacing an otherwise well placed text line.
+    for line in (line_items if align_lines and len(texts)>=2 else ()):
+        for text in texts:
+            old_line=src[line['id']];old_text=src[text['id']]
+            vertical_gap=max(0.,float(old_line['y'])-(float(old_text['y'])+float(old_text['height'])),
+                             float(old_text['y'])-(float(old_line['y'])+float(old_line['height'])))
+            if vertical_gap>.13*sh:continue
+            left_delta=float(old_text['x'])-float(old_line['x'])
+            center_delta=(float(old_text['x'])+float(old_text['width'])/2-
+                          float(old_line['x'])-float(old_line['width'])/2)
+            relation=('left' if abs(left_delta)<=abs(center_delta) else 'center')
+            source_error=abs(left_delta if relation=='left' else center_delta)
+            if source_error>.025*sw:continue
+            now_line=out[line['id']];now_text=out[text['id']]
+            desired=(float(now_text['x'])-left_delta*scale if relation=='left' else
+                     float(now_text['x'])+float(now_text['width'])/2-
+                     float(now_line['width'])/2-center_delta*scale)
+            dx=desired-float(now_line['x'])
+            if .004*width<abs(dx)<.08*width:
+                now_line['x']+=dx
+                break
+    # For text explicitly backed by a card/frame, preserve its authored inset
+    # from the panel when the panel changes size. Do not move text that still
+    # has that inset already.
+    for unit in (units if panel_inset else ()):
+        if not unit.get('backing_panel') or not unit.get('backed_ids'):continue
+        panel=next((e for e in unit.get('items',()) if e.get('type') in ('shape','image')),
+                   None)
+        if panel is None or panel['id'] not in out or panel['id'] not in src:continue
+        old,new=src[panel['id']],out[panel['id']]
+        sx=float(new['width'])/max(1.,float(old['width']))
+        sy=float(new['height'])/max(1.,float(old['height']))
+        backed=[eid for eid in unit['backed_ids'] if eid in src and eid in out
+                and src[eid].get('type')=='text' and src[eid].get('content','').strip()]
+        if not backed:continue
+        # The largest backed text is the heading; moving that row slightly
+        # clears the frame while leaving the other copy and its hierarchy put.
+        eid=max(backed,key=lambda key:float(src[key].get('font_size',1.)))
+        before,after=src[eid],out[eid]
+        expected_y=float(new['y'])+(float(before['y'])-float(old['y']))*sy
+        dy=expected_y-float(after['y'])
+        if abs(dy)<=.035*height:
+            after['y']+=.6*dy
+    return result if result!=elements else None
+
+
 def _rotation_candidate_variants(elements,units,width,height,limit=6):
     """Generate small rotation alternatives for canvas-registered backgrounds."""
     from engine.qwen_refine import _rotated_bounds
@@ -4294,6 +4470,20 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
                        and scores[i]>=scores[qchoice]-.05]
         if source_scaled:
             qchoice=max(source_scaled,key=lambda i:scores[i]
+                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
+        # Preserve a measured source alignment when its candidate is otherwise
+        # in the same safe cost/contrast band as the scaled-art sibling.
+        aligned=[i for i in contrast_band
+                 if valid[i]['candidate']['name'].startswith((
+                     'qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-',
+                     'qwen-source-frame-clearance-'))
+                 and not valid[i].get('has_layout_defects',False)
+                 and not valid[i].get('invisible_text')
+                 and len(valid[i].get('low_contrast',[]))==contrast_best
+                 and selection_costs[i]<=family_best+family_tol
+                 and scores[i]>=scores[qchoice]-.05]
+        if aligned:
+            qchoice=max(aligned,key=lambda i:scores[i]
                         -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
         # When a rendered contrast repair is a safe member of the same family
         # band and fixes more weak text, prefer it over its un-repaired parent.
@@ -4633,7 +4823,8 @@ def _adapt_with_diagnostics(source,target_canvas):
             if proposal is not None:
                 from engine.qwen_refine import anchor_superscripts, font_variant
                 original_proposal=deepcopy(proposal)
-                proposal,snapped_labels=_micro_snap_qwen_proposal(proposal,units,width,height)
+                proposal,snapped_labels=_micro_snap_qwen_proposal(
+                    proposal,units,width,height,source=source)
                 # Keep compact source-linked superscripts attached in the
                 # primary proposal as well as in the calibrated sibling.
                 proposal,anchor_changes=anchor_superscripts(proposal,units)
@@ -4655,6 +4846,21 @@ def _adapt_with_diagnostics(source,target_canvas):
                 qwen_diagnostics['post_anchor_text_separations']=post_anchor_changes
                 qwen_diagnostics['post_anchor_unit_separations']=post_anchor_unit_changes
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
+                rule_aligned=_source_alignment_variant(
+                    proposal,units,source,width,height,
+                    align_text=False,align_lines=True,panel_inset=False)
+                if rule_aligned is not None:
+                    before={e['id']:e for e in proposal}
+                    changed=[e for e in rule_aligned if any(
+                        abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
+                        for k in ('x','y','width','height'))]
+                    if (changed and all(e['x']>=0 and e['y']>=0
+                            and e['x']+e['width']<=width+1e-5
+                            and e['y']+e['height']<=height+1e-5 for e in changed)
+                            and not (set(_unintended_text_overlaps(rule_aligned,units))-
+                                     set(_unintended_text_overlaps(proposal,units)))):
+                        seeds.append(dict(name='qwen-rule-aligned-proposal',
+                                          elements=rule_aligned))
                 contained_candidate,contained_ids=_preserve_backed_containment(
                     proposal,units,width,height)
                 if (contained_ids and contained_candidate!=proposal
@@ -4890,7 +5096,60 @@ def _adapt_with_diagnostics(source,target_canvas):
                     energy=_energy(readable_candidate,units,source,width,height,desired),
                     variant_of=parent['name'],readability_floor=floor,
                     readability_floor_met=minimum_font>=floor-1e-4))
+                if is_qwen:
+                    frame_clearance=_source_alignment_variant(
+                        readable_candidate,units,source,width,height,
+                        align_text=False,align_lines=False,panel_inset=True)
+                    if (frame_clearance is not None and _feasible(
+                            frame_clearance,units,width,height,strict_margins=False,
+                            gap_factor=.004,allow_text_visual_overlap=True)
+                            and not set(_unintended_text_overlaps(frame_clearance,units))-
+                                       set(_unintended_text_overlaps(readable_candidate,units))):
+                        exploratory.append(dict(
+                            name='qwen-source-frame-clearance-'+label,
+                            elements=frame_clearance,
+                            energy=_energy(frame_clearance,units,source,width,height,desired),
+                            variant_of=name,readability_floor=floor,
+                            readability_floor_met=minimum_font>=floor-1e-4))
         if is_qwen:
+            aligned=_source_alignment_variant(parent['elements'],units,source,width,height)
+            if aligned is not None and _feasible(
+                    aligned,units,width,height,strict_margins=False,
+                    gap_factor=.004,allow_text_visual_overlap=True):
+                if not set(_unintended_text_overlaps(aligned,units))-set(
+                        _unintended_text_overlaps(parent['elements'],units)):
+                    name='qwen-source-aligned-'+label
+                    exploratory.append(dict(name=name,elements=aligned,
+                        energy=_energy(aligned,units,source,width,height,desired),
+                        variant_of=parent['name']))
+            rule_aligned=_source_alignment_variant(
+                parent['elements'],units,source,width,height,
+                align_text=False,align_lines=True,panel_inset=False)
+            if rule_aligned is not None:
+                before={e['id']:e for e in parent['elements']}
+                changed=[e for e in rule_aligned if any(
+                    abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
+                    for k in ('x','y','width','height'))]
+                changed_in_bounds=all(
+                    e['x']>=0 and e['y']>=0 and e['x']+e['width']<=width+1e-5
+                    and e['y']+e['height']<=height+1e-5 for e in changed)
+                no_new_text_overlaps=not (set(_unintended_text_overlaps(rule_aligned,units))-
+                                          set(_unintended_text_overlaps(parent['elements'],units)))
+                if changed and changed_in_bounds and no_new_text_overlaps:
+                    exploratory.append(dict(name='qwen-rule-aligned-'+label,
+                        elements=rule_aligned,
+                        energy=_energy(rule_aligned,units,source,width,height,desired),
+                        variant_of=parent['name']))
+            panel_inset=_source_alignment_variant(
+                parent['elements'],units,source,width,height,
+                align_text=False,align_lines=False,panel_inset=True)
+            if panel_inset is not None and _feasible(
+                    panel_inset,units,width,height,strict_margins=False,
+                    gap_factor=.004,allow_text_visual_overlap=True):
+                exploratory.append(dict(name='qwen-panel-inset-'+label,
+                    elements=panel_inset,
+                    energy=_energy(panel_inset,units,source,width,height,desired),
+                    variant_of=parent['name']))
             source_scaled=_source_scaled_art_variant(
                 parent['elements'],units,source,width,height)
             if source_scaled is not None and _feasible(
@@ -4902,6 +5161,18 @@ def _adapt_with_diagnostics(source,target_canvas):
                     exploratory.append(dict(name=name,elements=source_scaled,
                         energy=_energy(source_scaled,units,source,width,height,desired),
                         variant_of=parent['name']))
+                    aligned_scaled=_source_alignment_variant(
+                        source_scaled,units,source,width,height)
+                    if aligned_scaled is not None and _feasible(
+                            aligned_scaled,units,width,height,strict_margins=False,
+                            gap_factor=.004,allow_text_visual_overlap=True):
+                        if not set(_unintended_text_overlaps(aligned_scaled,units))-set(
+                                _unintended_text_overlaps(source_scaled,units)):
+                            exploratory.append(dict(
+                                name='qwen-source-aligned-source-scaled-art-'+label,
+                                elements=aligned_scaled,
+                                energy=_energy(aligned_scaled,units,source,width,height,desired),
+                                variant_of='qwen-source-scaled-art-'+label))
         # Generic rotation of foreground images tilts decorative lines and
         # ornaments. Rotation candidates are generated for the background only.
     # Limit total renderer work while ensuring at least one model-first source
@@ -4909,7 +5180,15 @@ def _adapt_with_diagnostics(source,target_canvas):
     if exploratory:
         qwen_exploratory=[c for c in exploratory if c['name'].startswith('qwen-')]
         other_exploratory=[c for c in exploratory if not c['name'].startswith('qwen-')]
-        feasible.extend(qwen_exploratory[:12]+other_exploratory[:12])
+        required=[c for c in qwen_exploratory if c['name'].startswith((
+            'qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-'))]
+        selected_qwen=qwen_exploratory[:12]
+        for prefix in ('qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-',
+                       'qwen-source-frame-clearance-'):
+            matches=[c for c in required if c['name'].startswith(prefix)]
+            if matches and not any(c['name'].startswith(prefix) for c in selected_qwen):
+                selected_qwen.append(matches[0])
+        feasible.extend(selected_qwen+other_exploratory[:12])
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
     optimize_candidates=feasible[:10]
