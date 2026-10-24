@@ -46,6 +46,18 @@ docker run --rm --network none \
   magicanvas
 ```
 
+To select the expanded v2 adapter for a local run, set its adapter directory:
+
+```bash
+MAGICANVAS_QWEN_ENABLED=1 \
+MAGICANVAS_QWEN_ADAPTER_DIR=models/qwen3-layout-lora-v2-expanded \
+python -m engine.main
+```
+
+The standard local default remains `models/qwen3-layout-lora-v2` until the
+expanded adapter passes the held-out A/B evaluation. The expanded adapter is
+kept at `models/qwen3-layout-lora-v2-expanded/` as a separate candidate.
+
 SigLIP reranks valid layout candidates when its build-time weights are present;
 otherwise the engine falls back to deterministic ranking. Qwen can use a
 configured Qwen checkpoint and optional public Hugging Face LoRA adapter. To

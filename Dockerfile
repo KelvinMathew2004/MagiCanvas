@@ -31,9 +31,9 @@ RUN python scripts/fetch_siglip.py
 COPY scripts/fetch_qwen.py ./scripts/fetch_qwen.py
 RUN python scripts/fetch_qwen.py
 
-# A trained adapter is fetched only when a reviewed public repository is
-# supplied at build time. No adapter exists yet, so the default image stays on
-# the base-model proposal path (which remains disabled unless opted in).
+# A public adapter is fetched only when its repository is supplied at build
+# time. The default image has no LoRA adapter and stays on the base-model
+# proposal path (which remains disabled unless opted in).
 ARG QWEN_ADAPTER_REPO=""
 ARG QWEN_ADAPTER_REVISION=""
 COPY scripts/fetch_qwen_lora.py ./scripts/fetch_qwen_lora.py

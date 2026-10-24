@@ -28,6 +28,8 @@ models/*
 !models/qwen3-layout-lora/**
 !models/qwen3-layout-lora-v2/
 !models/qwen3-layout-lora-v2/**
+!models/qwen3-layout-lora-v2-expanded/
+!models/qwen3-layout-lora-v2-expanded/**
 
 # Local Crello downloads/exports contain dataset previews, embedded artwork, and
 # fonts. Keep these generated local copies out of Git; other data/ files remain
