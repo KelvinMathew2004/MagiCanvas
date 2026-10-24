@@ -1,0 +1,10 @@
+Repository checks run 2026-10-23
+
+- `node tests/test_theme.mjs`: PASS (22 light/dark palette and contrast checks).
+- `.venv/bin/python -m unittest discover -s tests -v`: 55 tests ran; 52 passed, 2 failed, 1 errored.
+  - FAIL `test_dense_leaderboard_logo_balances_visible_gutters`: expected balanced logo/copy gutters; observed 0.9 vs 5.374 px.
+  - FAIL `test_peer_button_row_is_repaired_to_a_shared_vertical_axis`: `_constrain()` returned `None` after the test perturbed peer tag positions.
+  - ERROR `test_smaller_supporting_copy_keeps_subheading_relationship`: test could not find a unit classified as `subheading` (`StopIteration`).
+- `git diff --check` and `git diff --cached --check`: PASS.
+
+These three failures are in layout-mechanics tests. The viewer build itself completed for all eight selected cases with no Qwen-on renderer warnings, all IDs preserved, and no unintended text overlaps.

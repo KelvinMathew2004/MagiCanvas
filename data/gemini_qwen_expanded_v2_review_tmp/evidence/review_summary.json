@@ -1,0 +1,22 @@
+{
+  "candidate_adapter": "models/qwen3-layout-lora-v2-expanded",
+  "baseline": "Qwen disabled (heuristic engine path)",
+  "prompt_version": 2,
+  "held_out_test_examples_total": 89,
+  "reviewed_examples": 8,
+  "selection": "Eight examples selected across banner, landscape, square, and portrait aspect-ratio buckets.",
+  "qwen_family_wins": 8,
+  "qwen_family_win_rate": 1.0,
+  "mean_post_constraint_geometry_mae": {
+    "expanded_adapter": 0.06026125,
+    "qwen_off": 0.13495125
+  },
+  "mean_relative_font_size_mae": {
+    "expanded_adapter": 0.17355125,
+    "qwen_off": 0.19918750000000002
+  },
+  "all_qwen_on_preserved_ids": true,
+  "qwen_on_unintended_text_overlap_count": 0,
+  "qwen_on_renderer_warning_count": 0,
+  "scope_note": "Qualitative 8-case viewer only; this is not a full 89-example adapter A/B evaluation."
+}

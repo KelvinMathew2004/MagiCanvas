@@ -1,0 +1,152 @@
+{
+  "old_adapter": "models/qwen3-layout-lora-v2",
+  "rerun_adapter": "models/qwen3-layout-lora-v2",
+  "v11_case_count": 8,
+  "rerun_case_count": 8,
+  "matched_pairs": 8,
+  "exact_full_candidate_matches": 7,
+  "same_winner_count": 8,
+  "same_raw_model_output_count": 8,
+  "cases": [
+    {
+      "pair_id": "5914257f95a7a863ddcd7a55__to__5914261c95a7a863ddcd7b1a",
+      "winner_v11": "qwen-original-contrast-repaired-09",
+      "winner_rerun": "qwen-original-contrast-repaired-09",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.03648,
+      "rerun_qwen_mae": 0.03648,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5914261c95a7a863ddcd7b1a__to__5914257f95a7a863ddcd7a55",
+      "winner_v11": "qwen-font-fitted",
+      "winner_rerun": "qwen-font-fitted",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.02314,
+      "rerun_qwen_mae": 0.02314,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "59524ced95a7a863ddcde0b2__to__592d1c6995a7a863ddcd99c6",
+      "winner_v11": "qwen-local-refined-contrast-repaired-09",
+      "winner_rerun": "qwen-local-refined-contrast-repaired-09",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [
+        "relationship_repaired",
+        "qwen_on"
+      ],
+      "v11_qwen_mae": 0.02908,
+      "rerun_qwen_mae": 0.02899,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5a3781d25b3acffff7dbcfb6__to__5a3782245b3acffff7dbcfd6",
+      "winner_v11": "qwen-local-refined-font-fitted",
+      "winner_rerun": "qwen-local-refined-font-fitted",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.04128,
+      "rerun_qwen_mae": 0.04128,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5a3783865b3acffff7dbd02d__to__5a3783525b3acffff7dbd01b",
+      "winner_v11": "qwen-proposal",
+      "winner_rerun": "qwen-proposal",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.03737,
+      "rerun_qwen_mae": 0.03737,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5e202fd99fea0cc3744d32f5__to__5e872fc24b3890eb0713a98f",
+      "winner_v11": "qwen-font-fitted",
+      "winner_rerun": "qwen-font-fitted",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.07797,
+      "rerun_qwen_mae": 0.07797,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5e87623f4b3890eb0782a9f3__to__5e8d975c4b3890eb071d6099",
+      "winner_v11": "qwen-proposal",
+      "winner_rerun": "qwen-proposal",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.09844,
+      "rerun_qwen_mae": 0.09844,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    },
+    {
+      "pair_id": "5e8d975c4b3890eb071d6099__to__5e87623f4b3890eb0782a9f3",
+      "winner_v11": "qwen-local-refined",
+      "winner_rerun": "qwen-local-refined",
+      "qwen_win_v11": "True",
+      "qwen_win_rerun": "True",
+      "field_differences": [],
+      "v11_qwen_mae": 0.10934,
+      "rerun_qwen_mae": 0.10934,
+      "hard_checks": {
+        "all_source_ids_preserved": true,
+        "missing_ids": [],
+        "extra_ids": [],
+        "unintended_text_overlaps": []
+      },
+      "warnings": []
+    }
+  ],
+  "renderer_note": "Saved v11 viewer used starter_renderer_unadjusted; this rerun used current default dataset_tight_text_adjusted renderer. Candidate geometry/winner comparisons are separate from pixel image comparisons."
+}
