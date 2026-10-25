@@ -10,7 +10,7 @@ Crossing memberships are merged; strict subsets stay nested. Unrelated source re
 
 `project_container_tree` infers each root's proposed translation and scale from robust weighted medians of substantial source/proposal correspondences. Thin geometry does not estimate the transform. Every child receives the common source-to-target transform, including its source offsets, rotation, text alignment, font hierarchy, and proportional tracking. The resulting container box is recorded in diagnostics.
 
-Images always scale uniformly. Native shape backplates can absorb bounded extra horizontal room while the internal copy remains rigid. This is deliberately a limited semi-elastic mode; it does not distort a raster frame, stretch an image, invent a new font, or rewrite copy. A single source-centered root inherits the canvas parent axis. Boundaries are handled for the complete root rather than clamping each child separately.
+Images always scale uniformly. Native shape backplates can absorb bounded extra horizontal room while the internal copy remains rigid. This is deliberately a limited semi-elastic mode; it does not distort a raster frame, stretch an image, invent a new font, or rewrite copy. A single source-centered root inherits the canvas parent axis. Boundaries are handled for the complete root rather than clamping each child separately. Deliberate single-edge source crops on axis-aligned raster corner containers retain their crop fractions through the same shared transform.
 
 Candidate families can still offer different top-level reflows. Every final family passes through the shared structural projection before visual ranking. Raw model proposals remain diagnostic evidence; they cannot bypass the structural passes by winning a perceptual tie-break. If no projected candidate is feasible, the engine retains a complete projected layout with an explicit fallback reason instead of silently returning fragmented raw coordinates.
 
@@ -20,7 +20,7 @@ Candidate families can still offer different top-level reflows. Every final fami
 
 Clusters use bounded diameter, not transitive neighbor chaining. Elements on a clearly different reflowed row or column do not snap. An accepted target axis is the exact median of the proposed axes. Competing left/center/right constraints are resolved deterministically by support, source spread, and authored text alignment; a later conflicting constraint cannot repeatedly move an already assigned element. Rotated items can share a center axis, but their unrotated box edges are not treated as visible alignment edges.
 
-Each snap must remain on canvas and avoid introducing unintended rendered text overlap. A rejected or incompatible constraint is not advertised as a successful snap. This is a geometric constraint system, not a guarantee that every inferred group or every imperfect source design has a unique correct alignment.
+Each snap must remain on canvas, preserve positive source padding within inferred backings, and avoid introducing unintended rendered text overlap. A rejected or incompatible constraint is not advertised as a successful snap. This is a geometric constraint system, not a guarantee that every inferred group or every imperfect source design has a unique correct alignment.
 
 ## 3. Renderer-based font and box calibration
 
@@ -53,3 +53,7 @@ The productivity signature remains source-authored two-color text over a black/w
 - [Canva Design Editing API](https://www.canva.dev/docs/apps/design-editing/) and [positioning documentation](https://www.canva.dev/docs/apps/positioning-elements/) expose a document tree, groups, and box geometry. Their public documentation does not disclose the complete automatic resize optimizer or a universal snapping percentage.
 - [PLAYGROUND (October 2026)](https://arxiv.org/abs/2610.18865) uses progressive layout generation with render-grounded planning. It supports rendered feedback during generation rather than relying on a single flat prediction.
 - [DesignAsCode (February 2026; revised August 2026)](https://arxiv.org/abs/2602.17690) uses semantic hierarchy, HTML/CSS implementation, and visual reflection. It supports hierarchical planning and iterative verification, without prescribing this engine's exact two-level grouping or 4-pixel/3% snapping constants.
+
+## Follow-up deletion audit
+
+[The deletion audit](engine_deletion_audit.md) found and restored two omitted protections: source backing padding during snapping and deliberate corner crop fractions. The follow-up focused suite has 58 passing tests. The controlled replay evidence is distinct from the original V65 full model-and-ranker render.

@@ -86,6 +86,28 @@ class ContainerTreeTests(unittest.TestCase):
         self.assertEqual(out[0]['rotation'],352.)
         self.assertAlmostEqual(out[1]['y']-out[0]['y'],70.)
 
+    def test_snapping_cannot_erase_an_authored_panel_inset(self):
+        panel=dict(id='panel',type='shape',x=100.,y=100.,width=200.,height=100.,z_index=0)
+        label=text('label',102,130,150,30,text_align='left')
+        source=design([panel,label]);before=deepcopy(source)
+        out,_=snap_source_axes(deepcopy(source['elements']),source,500,500)
+        self.assertGreaterEqual(out[1]['x']-out[0]['x'],2.-1e-6)
+        self.assertEqual(source,before)
+
+    def test_source_corner_crop_is_preserved_by_the_whole_container(self):
+        corner=dict(id='corner',type='image',x=-20.,y=-10.,width=180.,height=120.,z_index=0)
+        label=text('label',20,30,100,30,text_align='left')
+        source=design([corner,label]);proposal=deepcopy(source['elements'])
+        for e in proposal:
+            for key in ('x','y','width','height'):e[key]*=1.5
+        out,_=project_container_tree(proposal,build_container_tree(source),750,750)
+        self.assertAlmostEqual(out[0]['x']/out[0]['width'],-20/180)
+        self.assertAlmostEqual(out[0]['y']/out[0]['height'],-10/120)
+        from engine.resize import _authored_image_bleed
+        self.assertTrue(_authored_image_bleed(out[0],corner,(500,500),750,750))
+        self.assertAlmostEqual(out[1]['x']-out[0]['x'],60.)
+        self.assertAlmostEqual(out[1]['y']-out[0]['y'],60.)
+
     def test_single_source_centered_container_inherits_the_canvas_axis(self):
         s=design([text('a',150,180,200),text('b',150,240,200)])
         q=deepcopy(s['elements'])

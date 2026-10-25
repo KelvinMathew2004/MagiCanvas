@@ -1453,6 +1453,24 @@ def project_container_tree(elements, tree, width, height):
             if abs(cy-sh/2)<=max(4.,sh*.02):ty=height/2
         hw=(sb[2]-sb[0])*scale/2;hh=(sb[3]-sb[1])*scale/2
         tx=min(width-gx-hw,max(gx+hw,tx));ty=min(height-gy-hh,max(gy+hh,ty))
+        # Deliberate single-edge raster crops are parent constraints too.
+        # Clamp the visible container while retaining its authored hidden part;
+        # shifting each image inward would expose artwork the source cropped.
+        for dimension,low,high,extent,half in (
+                ('x',sb[0],sb[2],sw,hw),('y',sb[1],sb[3],sh,hh)):
+            length='width' if dimension=='x' else 'height'
+            leaking=[e for e in original if e[dimension]<0 or e[dimension]+e[length]>extent]
+            if not leaking or any(e.get('type')!='image' or
+                                  min(e.get('rotation',0)%360,360-e.get('rotation',0)%360)>.5
+                                  for e in leaking):continue
+            target_extent=width if dimension=='x' else height
+            if low<0 and high<=extent:
+                center=low*scale+half
+            elif high>extent and low>=0:
+                center=target_extent+(high-extent)*scale-half
+            else:continue
+            if dimension=='x':tx=center
+            else:ty=center
         for eid in ids:
             e=src[eid];q=out[eid]
             q.update(x=tx+(e['x']-cx)*scale,y=ty+(e['y']-cy)*scale,
@@ -1488,6 +1506,8 @@ def snap_source_axes(elements, source, width, height, tree=None):
     tree=tree or build_container_tree(source)
     src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
     pairs={frozenset(r[1:3]) for r in tree['relationships'] if r[0] in ('same-column','same-row','backing','overlap')}
+    backings=[(r[1],r[2]) for r in tree['relationships'] if r[0]=='backing'
+              and r[1] in out and r[2] in out]
     candidates=[]
     for dimension in ('x','y'):
         limit=.03*(width if dimension=='x' else height)
@@ -1534,7 +1554,26 @@ def snap_source_axes(elements, source, width, height, tree=None):
         in_bounds=all(0<=_rotated_bounds(out[eid])[0] and 0<=_rotated_bounds(out[eid])[1]
                       and _rotated_bounds(out[eid])[2]<=width+1e-5
                       and _rotated_bounds(out[eid])[3]<=height+1e-5 for eid in ids)
-        if not in_bounds or set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))-old_overlaps:
+        # A near-equal parent/child edge can encode a small real inset.
+        # Snapping may align siblings, but cannot consume that source padding
+        # or worsen an existing containment defect. This applies to any backing.
+        padding_preserved=True
+        length='width' if dimension=='x' else 'height'
+        for pid,cid in backings:
+            if pid not in ids and cid not in ids:continue
+            p,c=src[pid],src[cid]
+            if any(min(e.get('rotation',0)%360,360-e.get('rotation',0)%360)>.5 for e in (p,c)):continue
+            p0=before.get(pid,out[pid][dimension]);c0=before.get(cid,out[cid][dimension])
+            source_gaps=(c[dimension]-p[dimension],p[dimension]+p[length]-c[dimension]-c[length])
+            before_gaps=(c0-p0,p0+out[pid][length]-c0-out[cid][length])
+            after_gaps=(out[cid][dimension]-out[pid][dimension],
+                        out[pid][dimension]+out[pid][length]-out[cid][dimension]-out[cid][length])
+            factor=out[pid][length]/max(1e-6,p[length])
+            if any(gap>0 and after<min(previous,gap*factor)-1e-6
+                   for gap,previous,after in zip(source_gaps,before_gaps,after_gaps)):
+                padding_preserved=False;break
+        if (not in_bounds or not padding_preserved
+                or set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))-old_overlaps):
             for eid,value in before.items():out[eid][dimension]=value
             continue
         for eid in ids:used[eid,dimension]=True
