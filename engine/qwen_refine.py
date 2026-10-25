@@ -25,6 +25,216 @@ def _overlap(a, b):
     return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
+def relationship_variant(elements, units, source, width, height):
+    """Restore high-confidence source attachments with shared transforms.
+
+    Containment alone cannot detect detached typography inside a large frame.
+    Keep panel children, cropped corner stacks, and aligned copy columns in
+    their authored local coordinates. No target design or asset edits are used.
+    """
+    from math import sqrt
+    from engine.resize import (_text_visible_bounds, _text_info,
+                               _flat_image_asset_stats, _asset_root)
+
+    result=deepcopy(elements);out={e['id']:e for e in result}
+    src={e['id']:e for e in source['elements'] if e['id'] in out}
+    sw,sh=map(float,(source['canvas']['width'],source['canvas']['height']))
+    area_scale=sqrt(width*height/(sw*sh));handled=set();changes=[]
+    def box(e):
+        return (_text_visible_bounds(e) if e.get('type')=='text' else
+                (e['x'],e['y'],e['x']+e['width'],e['y']+e['height']))
+    def union(items):
+        bs=[box(e) for e in items]
+        return (min(b[0] for b in bs),min(b[1] for b in bs),
+                max(b[2] for b in bs),max(b[3] for b in bs))
+    def transform(ids, anchor, x, y, factor, kind):
+        ids=sorted(set(ids)&src.keys())
+        for eid in ids:
+            old,e=src[eid],out[eid]
+            e.update(x=x+(old['x']-anchor['x'])*factor,
+                     y=y+(old['y']-anchor['y'])*factor,
+                     width=old['width']*factor,height=old['height']*factor)
+            if old.get('type')=='text':
+                e['font_size']=old['font_size']*factor
+                e['letter_spacing']=float(old.get('letter_spacing',0.))*factor
+                e['line_height']=old.get('line_height',1.2)
+                e['text_align']=old.get('text_align','left')
+                natural=_text_info(e,1e9,e['font_size'])[1]
+                e['width']=max(e['width']*1.015,natural+max(1.,e['font_size']*.02))
+                # Some dataset text frames extend past the canvas even though
+                # the glyphs fit. Tighten those frames without moving the ink.
+                ink=box(e)
+                if e['x']+e['width']>width and ink[2]<=width+1e-4:
+                    if e.get('text_align','left')=='left':
+                        e['width']=max(1.,width-e['x'])
+                    else:
+                        e.update(x=ink[0],width=max(1.,ink[2]-ink[0]))
+            handled.add(eid)
+        if kind=='cropped-corner-attachments':
+            labels=[out[eid] for eid in ids if out[eid].get('type')=='text']
+            floor=min(8.,min(width,height)*.03)
+            delta=max(0.,floor-min((e['font_size'] for e in labels),default=floor))
+            if delta<=2.5:
+                for e in labels:
+                    if e['font_size']>=floor:continue
+                    old_size=e['font_size'];e['font_size']+=delta
+                    e['letter_spacing']*=e['font_size']/old_size
+                    e['line_height']=max(1.,e['line_height']*old_size/e['font_size'])
+                    measured=_text_info(e,1e9,e['font_size'])
+                    e['width']=max(e['width'],measured[1]+1.)
+                    e['height']=max(e['height'],measured[0])
+        changes.append(dict(kind=kind,element_ids=ids))
+
+    # A centered panel is an explicit container, including tilted cards.
+    for unit in units:
+        if not unit.get('backing_panel'):continue
+        p=next((e for e in unit['items'] if e.get('type')=='image'),None)
+        if p is None or p['id'] not in out:continue
+        ids=[p['id']]+[eid for eid in unit.get('backed_ids',()) if eid in src]
+        if len(ids)<2:continue
+        now=out[p['id']]
+        factor=min(now['width']/p['width'],now['height']/p['height'])
+        centered=(abs(p['x']+p['width']/2-sw/2)<.03*sw
+                  and abs(p['y']+p['height']/2-sh/2)<.03*sh)
+        if not centered:continue
+        labels=[src[eid] for eid in ids if src[eid].get('type')=='text']
+        if len(labels)==1 or p['width']*p['height']>.5*sw*sh:
+            factor=min(area_scale,.90*width/p['width'],.90*height/p['height'])
+        x=width/2+(p['x']-sw/2)*factor
+        y=height/2+(p['y']-sh/2)*factor
+        transform(ids,p,x,y,factor,'centered-panel-contents')
+        # In portrait layouts, a centered card can still feel too high when
+        # the design has a separate header above and a footer below it. Use
+        # those source-separated bands to center the card in its actual slot.
+        panel_box=box(out[p['id']])
+        if height/max(1.,width)>=1.3:
+            upper=[];lower=[]
+            for other in units:
+                if other is unit:continue
+                source_bounds=other.get('bounds',())
+                current_items=[out[e['id']] for e in other['items'] if e['id'] in out]
+                if len(source_bounds)!=4 or not current_items:continue
+                current_bounds=union(current_items)
+                if (source_bounds[3]<=p['y']+.02*sh
+                        and other.get('semantic') not in ('decoration','art','background')):
+                    upper.append(current_bounds)
+                if (source_bounds[1]>=p['y']+p['height']-.02*sh
+                        and other.get('semantic') in ('cta','footer')):
+                    lower.append(current_bounds)
+            if upper and lower:
+                slot_top=max(b[3] for b in upper)
+                slot_bottom=min(b[1] for b in lower)
+                available_center=(slot_top+slot_bottom)/2.+.005*height
+                min_y=slot_top+.04*height
+                max_y=slot_bottom-(panel_box[3]-panel_box[1])-.04*height
+                if max_y>=min_y:
+                    next_y=min(max(available_center-(panel_box[3]-panel_box[1])/2.,min_y),max_y)
+                    dy=next_y-panel_box[1]
+                    for eid in ids:out[eid]['y']+=dy
+                    changes.append(dict(kind='portrait-panel-centered-between-bands',
+                                        element_ids=sorted(set(ids))))
+
+    # Preserve source crop fractions on corner art. Reconstructing the whole
+    # stack also attaches copy to diagonal panels instead of their raw boxes.
+    for unit in units:
+        images=[src[e['id']] for e in unit['items']
+                if e['id'] in src and e.get('type')=='image']
+        if len(images)<2:continue
+        p=max(images,key=lambda e:e['width']*e['height'])
+        side=('left' if abs(p['x'])<.03*sw else
+              'right' if abs(p['x']+p['width']-sw)<.03*sw else None)
+        edge=('top' if abs(p['y'])<.03*sh else
+              'bottom' if abs(p['y']+p['height']-sh)<.03*sh else None)
+        if not side or not edge or not (.12*sw<p['width']<.60*sw
+                                        and .35*sh<p['height']<.95*sh):continue
+        if not any(e['x']<0 or e['y']<0 or e['x']+e['width']>sw
+                   or e['y']+e['height']>sh for e in images):continue
+        labels=[];pb=box(p)
+        for e in src.values():
+            if e.get('type')!='text' or e['id'] in handled:continue
+            eb=box(e);a=max(1.,(eb[2]-eb[0])*(eb[3]-eb[1]))
+            if e.get('z_index',0)>p.get('z_index',0) and _overlap(pb,eb)/a>=.9:
+                labels.append(e['id'])
+        if not labels:continue
+        factor=min(.40*width/p['width'],.90*height/p['height'])
+        x=p['x']*factor if side=='left' else width-(sw-p['x'])*factor
+        y=p['y']*factor if edge=='top' else height-(sh-p['y'])*factor
+        transform([e['id'] for e in images]+labels,p,x,y,factor,'cropped-corner-attachments')
+
+    # Small image/text badges and footers already have explicit stack evidence.
+    for unit in units:
+        items=[src[e['id']] for e in unit['items'] if e['id'] in src]
+        images=[e for e in items if e.get('type')=='image']
+        labels=[e for e in items if e.get('type')=='text']
+        if len(images)!=1 or not labels or any(e['id'] in handled for e in items):continue
+        p=images[0];now=out[p['id']]
+        factor=min(now['width']/p['width'],now['height']/p['height'])
+        x,y=now['x'],now['y']
+        if p['y']<0 and abs(p['x']+p['width']/2-sw/2)<.04*sw:
+            factor=min(height/sh,.40*width/p['width'],.25*height/p['height'])
+            x=width/2-p['width']*factor/2;y=p['y']*factor
+        elif p['y']>.78*sh:
+            y=height-(sh-p['y'])*factor
+            if abs(p['x']+p['width']/2-sw/2)<.04*sw:
+                x=width/2-p['width']*factor/2
+        transform([e['id'] for e in items],p,x,y,factor,'badge-footer-attachments')
+
+    # Infer a single left-aligned or centered reading column using glyphs,
+    # rather than the oversized containers of short words such as "but".
+    texts=[e for e in src.values() if e.get('type')=='text'
+           and e.get('content','').strip() and e['id'] not in handled
+           and abs(float(e.get('rotation',0.)))<.5]
+    for seed in sorted(texts,key=lambda e:-e.get('font_size',1.)):
+        if seed['id'] in handled:continue
+        sb=box(seed);groups=[]
+        for axis in ('left','center'):
+            coordinate=lambda b:b[0] if axis=='left' else (b[0]+b[2])/2
+            group=[e for e in texts if e['id'] not in handled
+                   and abs(coordinate(box(e))-coordinate(sb))<.025*sw
+                   and (axis!='left' or e.get('text_align','left')=='left')]
+            if len(group)>=3:groups.append((len(group),axis,group))
+        if not groups:continue
+        _,axis,group=max(groups,key=lambda g:g[0]);gb=union(group)
+        anchor=max(group,key=lambda e:e.get('font_size',1.));now=out[anchor['id']]
+        factor=now['font_size']/anchor['font_size']
+        if axis=='left':
+            factor=min(factor,(width-now['x']-.08*width)/max(1.,gb[2]-gb[0]))
+        factor=min(factor,1.15*min(width,height)/min(sw,sh))
+        if factor<=0:continue
+        ids=[e['id'] for e in group]
+        for e in src.values():
+            if e['id'] in handled or e.get('type') not in ('image','shape'):continue
+            if (e['width']*e['height']<.012*sw*sh
+                    and gb[0]-.025*sw<=e['x'] and e['x']+e['width']<=gb[2]+.025*sw
+                    and gb[1]-.15*sh<=e['y'] and e['y']+e['height']<=gb[3]+.15*sh):
+                ids.append(e['id'])
+        transform(ids,anchor,now['x'],now['y'],factor,'source-copy-column')
+        # An enclosing outline anchors the entire lockup, including rules.
+        for p in src.values():
+            if p.get('type')!='image' or p['id'] in ids:continue
+            pb=box(p)
+            if not (pb[0]<=gb[0] and pb[1]<=gb[1] and pb[2]>=gb[2] and pb[3]>=gb[3]):continue
+            stats=_flat_image_asset_stats(str(_asset_root(p)/p.get('asset_id','')))
+            if not stats or stats[1]>.35:continue
+            content=union([out[eid] for eid in ids]);frame=box(out[p['id']])
+            dx=(frame[0]+frame[2]-content[0]-content[2])/2
+            dy=(frame[1]+frame[3]-content[1]-content[3])/2
+            if abs((pb[0]+pb[2]-gb[0]-gb[2])/2)>.06*p['width']:dx=0.
+            if abs((pb[1]+pb[3]-gb[1]-gb[3])/2)>.06*p['height']:dy=0.
+            for eid in ids:out[eid]['x']+=dx;out[eid]['y']+=dy
+            break
+    # Report the actual residual movement, so a re-applied projection is a
+    # zero-error fixed point and ranking can recognize a repaired relationship.
+    before={e['id']:e for e in elements};error=0.
+    for e in result:
+        old=before[e['id']]
+        error=max(error,abs(e['x']-old['x'])/width,abs(e['y']-old['y'])/height,
+                  abs(e['width']-old['width'])/width,abs(e['height']-old['height'])/height)
+        if e.get('type')=='text':
+            error=max(error,.1*abs(e['font_size']/max(1.,old['font_size'])-1))
+    return result,changes,error
+
+
 def _merge_groups(groups):
     """Return disjoint groups so no repair can move half of a lockup."""
     merged=[]
@@ -237,6 +447,7 @@ def lockup_groups(units):
 
 def repair_relationships(elements,units,width,height):
     """Fit compact lockups together, then solve whole text chains simultaneously."""
+    from math import sqrt
     from engine.resize import _bounds, _text_info, _unintended_text_overlaps
     result=deepcopy(elements);by_id={e['id']:e for e in result}
     source={e['id']:e for u in units for e in u['items']}
@@ -334,14 +545,27 @@ def repair_relationships(elements,units,width,height):
         scale=max(.01,median(scales))
         emblem=any(group<=ids for group in emblems)
         if emblem:
-            # Decoder font fitting can shrink a font while leaving a sound
-            # predicted box. Use the major boxes to size the entire emblem.
             major=[e for e in originals if min(e['width'],e['height'])>=.025*min(sw,sh)]
-            if major:
-                scale=median(min(by_id[e['id']]['width']/max(1.,e['width']),
-                                 by_id[e['id']]['height']/max(1.,e['height'])) for e in major)
-            short_scale=min(width,height)/max(1.,min(sw,sh))
-            scale=min(short_scale*1.25,max(short_scale*.85,scale))
+            thin_rules=[e for e in major if max(e['width'],e['height'])/
+                        max(1.,min(e['width'],e['height']))>=8.]
+            if len(thin_rules)>=2:
+                # Multiple thin rules are attachments, not reliable scale
+                # anchors: independently shrunken line heights can collapse
+                # the whole lockup. Estimate scale from substantial text/art
+                # boxes and keep it near an area-preserving canvas scale.
+                scale_anchors=[e for e in major if e not in thin_rules]
+                if scale_anchors:
+                    scale=median(min(by_id[e['id']]['width']/max(1.,e['width']),
+                                     by_id[e['id']]['height']/max(1.,e['height']))
+                                 for e in scale_anchors)
+                area_scale=sqrt(width*height/max(1.,sw*sh))
+                scale=min(area_scale*1.05,max(area_scale*.85,scale))
+            else:
+                # For ordinary emblems, preserve the existing short-side
+                # bound; the area scale correction is only needed when thin
+                # rules outnumber or outweigh the actual lettering.
+                short_scale=min(width,height)/max(1.,min(sw,sh))
+                scale=min(short_scale*1.25,max(short_scale*.85,scale))
         scale=min(scale,width/max(1,sb[2]-sb[0]),height/max(1,sb[3]-sb[1]))
         cx=median(by_id[e['id']]['x']+by_id[e['id']]['width']/2
                   -(e['x']+e['width']/2-sx)*scale for e in originals)

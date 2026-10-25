@@ -161,9 +161,10 @@ button:disabled{opacity:.45}#count{font-variant-numeric:tabular-nums;color:#bdc9
 figure{margin:0;padding:12px;background:#161f2b;border:1px solid #2a3747;border-radius:14px;min-width:0}
 figcaption{font-weight:650;margin-bottom:8px}img{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain;background:#10151d;border-radius:8px}
 #diag{margin-top:16px;padding:14px;background:#161f2b;border:1px solid #2a3747;border-radius:12px;white-space:pre-wrap;line-height:1.55}
+#pair-note{margin:8px 0 14px;padding:10px 12px;border:1px solid #34455a;border-radius:10px;background:#121a25;color:#c7d2df;line-height:1.45}
 @media(max-width:760px){body{padding:12px}.grid{grid-template-columns:1fr}}
 </style></head><body>
-<header><button id="prev">← Previous</button><button id="next">Next →</button><span id="count"></span></header><div id="meta"></div>
+<header><button id="prev">← Previous</button><button id="next">Next →</button><span id="count"></span></header><div id="meta"></div><div id="pair-note">The dataset preview and local target show the target template. Qwen-off/on reflow the source design’s assets onto that canvas, so background photos can differ between the reference and engine output. Compare layout and source asset preservation.</div>
 <main class="grid">
 <figure><figcaption>Dataset preview</figcaption><img id="preview"></figure>
 <figure><figcaption>Local target JSON render (unadjusted)</figcaption><img id="target"></figure>
