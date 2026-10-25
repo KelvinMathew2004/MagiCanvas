@@ -1,7 +1,10 @@
-"""Small, source-evidenced alternatives to a model's layout proposal.
+"""Source container trees, robust proposal projection and shared alignment axes.
 
-These helpers never consult a target design or change content/asset pixels.
-The original proposal remains available to the candidate ranker.
+Qwen places functional containers. Source geometry supplies their internal
+layout; renderer-based calibration and deterministic axis clusters handle
+small measurement/placement errors before visual verification. Compatibility
+helpers for earlier candidates remain available, but the active pipeline uses
+these universal structural passes.
 """
 from copy import deepcopy
 from math import cos, radians, sin
@@ -26,212 +29,13 @@ def _overlap(a, b):
 
 
 def relationship_variant(elements, units, source, width, height):
-    """Restore high-confidence source attachments with shared transforms.
-
-    Containment alone cannot detect detached typography inside a large frame.
-    Keep panel children, cropped corner stacks, and aligned copy columns in
-    their authored local coordinates. No target design or asset edits are used.
-    """
-    from math import sqrt
-    from engine.resize import (_text_visible_bounds, _text_info,
-                               _flat_image_asset_stats, _asset_root)
-
-    result=deepcopy(elements);out={e['id']:e for e in result}
-    src={e['id']:e for e in source['elements'] if e['id'] in out}
-    sw,sh=map(float,(source['canvas']['width'],source['canvas']['height']))
-    area_scale=sqrt(width*height/(sw*sh));handled=set();changes=[]
-    def box(e):
-        return (_text_visible_bounds(e) if e.get('type')=='text' else
-                (e['x'],e['y'],e['x']+e['width'],e['y']+e['height']))
-    def union(items):
-        bs=[box(e) for e in items]
-        return (min(b[0] for b in bs),min(b[1] for b in bs),
-                max(b[2] for b in bs),max(b[3] for b in bs))
-    def transform(ids, anchor, x, y, factor, kind):
-        ids=sorted(set(ids)&src.keys())
-        for eid in ids:
-            old,e=src[eid],out[eid]
-            e.update(x=x+(old['x']-anchor['x'])*factor,
-                     y=y+(old['y']-anchor['y'])*factor,
-                     width=old['width']*factor,height=old['height']*factor)
-            if old.get('type')=='text':
-                e['font_size']=old['font_size']*factor
-                e['letter_spacing']=float(old.get('letter_spacing',0.))*factor
-                e['line_height']=old.get('line_height',1.2)
-                e['text_align']=old.get('text_align','left')
-                natural=_text_info(e,1e9,e['font_size'])[1]
-                e['width']=max(e['width']*1.015,natural+max(1.,e['font_size']*.02))
-                # Some dataset text frames extend past the canvas even though
-                # the glyphs fit. Tighten those frames without moving the ink.
-                ink=box(e)
-                if e['x']+e['width']>width and ink[2]<=width+1e-4:
-                    if e.get('text_align','left')=='left':
-                        e['width']=max(1.,width-e['x'])
-                    else:
-                        e.update(x=ink[0],width=max(1.,ink[2]-ink[0]))
-            handled.add(eid)
-        if kind=='cropped-corner-attachments':
-            labels=[out[eid] for eid in ids if out[eid].get('type')=='text']
-            floor=min(8.,min(width,height)*.03)
-            delta=max(0.,floor-min((e['font_size'] for e in labels),default=floor))
-            if delta<=2.5:
-                for e in labels:
-                    if e['font_size']>=floor:continue
-                    old_size=e['font_size'];e['font_size']+=delta
-                    e['letter_spacing']*=e['font_size']/old_size
-                    e['line_height']=max(1.,e['line_height']*old_size/e['font_size'])
-                    measured=_text_info(e,1e9,e['font_size'])
-                    e['width']=max(e['width'],measured[1]+1.)
-                    e['height']=max(e['height'],measured[0])
-        changes.append(dict(kind=kind,element_ids=ids))
-
-    # A centered panel is an explicit container, including tilted cards.
-    for unit in units:
-        if not unit.get('backing_panel'):continue
-        p=next((e for e in unit['items'] if e.get('type')=='image'),None)
-        if p is None or p['id'] not in out:continue
-        ids=[p['id']]+[eid for eid in unit.get('backed_ids',()) if eid in src]
-        if len(ids)<2:continue
-        now=out[p['id']]
-        factor=min(now['width']/p['width'],now['height']/p['height'])
-        centered=(abs(p['x']+p['width']/2-sw/2)<.03*sw
-                  and abs(p['y']+p['height']/2-sh/2)<.03*sh)
-        if not centered:continue
-        labels=[src[eid] for eid in ids if src[eid].get('type')=='text']
-        if len(labels)==1 or p['width']*p['height']>.5*sw*sh:
-            factor=min(area_scale,.90*width/p['width'],.90*height/p['height'])
-        x=width/2+(p['x']-sw/2)*factor
-        y=height/2+(p['y']-sh/2)*factor
-        transform(ids,p,x,y,factor,'centered-panel-contents')
-        # In portrait layouts, a centered card can still feel too high when
-        # the design has a separate header above and a footer below it. Use
-        # those source-separated bands to center the card in its actual slot.
-        panel_box=box(out[p['id']])
-        if height/max(1.,width)>=1.3:
-            upper=[];lower=[]
-            for other in units:
-                if other is unit:continue
-                source_bounds=other.get('bounds',())
-                current_items=[out[e['id']] for e in other['items'] if e['id'] in out]
-                if len(source_bounds)!=4 or not current_items:continue
-                current_bounds=union(current_items)
-                if (source_bounds[3]<=p['y']+.02*sh
-                        and other.get('semantic') not in ('decoration','art','background')):
-                    upper.append(current_bounds)
-                if (source_bounds[1]>=p['y']+p['height']-.02*sh
-                        and other.get('semantic') in ('cta','footer')):
-                    lower.append(current_bounds)
-            if upper and lower:
-                slot_top=max(b[3] for b in upper)
-                slot_bottom=min(b[1] for b in lower)
-                available_center=(slot_top+slot_bottom)/2.+.005*height
-                min_y=slot_top+.04*height
-                max_y=slot_bottom-(panel_box[3]-panel_box[1])-.04*height
-                if max_y>=min_y:
-                    next_y=min(max(available_center-(panel_box[3]-panel_box[1])/2.,min_y),max_y)
-                    dy=next_y-panel_box[1]
-                    for eid in ids:out[eid]['y']+=dy
-                    changes.append(dict(kind='portrait-panel-centered-between-bands',
-                                        element_ids=sorted(set(ids))))
-
-    # Preserve source crop fractions on corner art. Reconstructing the whole
-    # stack also attaches copy to diagonal panels instead of their raw boxes.
-    for unit in units:
-        images=[src[e['id']] for e in unit['items']
-                if e['id'] in src and e.get('type')=='image']
-        if len(images)<2:continue
-        p=max(images,key=lambda e:e['width']*e['height'])
-        side=('left' if abs(p['x'])<.03*sw else
-              'right' if abs(p['x']+p['width']-sw)<.03*sw else None)
-        edge=('top' if abs(p['y'])<.03*sh else
-              'bottom' if abs(p['y']+p['height']-sh)<.03*sh else None)
-        if not side or not edge or not (.12*sw<p['width']<.60*sw
-                                        and .35*sh<p['height']<.95*sh):continue
-        if not any(e['x']<0 or e['y']<0 or e['x']+e['width']>sw
-                   or e['y']+e['height']>sh for e in images):continue
-        labels=[];pb=box(p)
-        for e in src.values():
-            if e.get('type')!='text' or e['id'] in handled:continue
-            eb=box(e);a=max(1.,(eb[2]-eb[0])*(eb[3]-eb[1]))
-            if e.get('z_index',0)>p.get('z_index',0) and _overlap(pb,eb)/a>=.9:
-                labels.append(e['id'])
-        if not labels:continue
-        factor=min(.40*width/p['width'],.90*height/p['height'])
-        x=p['x']*factor if side=='left' else width-(sw-p['x'])*factor
-        y=p['y']*factor if edge=='top' else height-(sh-p['y'])*factor
-        transform([e['id'] for e in images]+labels,p,x,y,factor,'cropped-corner-attachments')
-
-    # Small image/text badges and footers already have explicit stack evidence.
-    for unit in units:
-        items=[src[e['id']] for e in unit['items'] if e['id'] in src]
-        images=[e for e in items if e.get('type')=='image']
-        labels=[e for e in items if e.get('type')=='text']
-        if len(images)!=1 or not labels or any(e['id'] in handled for e in items):continue
-        p=images[0];now=out[p['id']]
-        factor=min(now['width']/p['width'],now['height']/p['height'])
-        x,y=now['x'],now['y']
-        if p['y']<0 and abs(p['x']+p['width']/2-sw/2)<.04*sw:
-            factor=min(height/sh,.40*width/p['width'],.25*height/p['height'])
-            x=width/2-p['width']*factor/2;y=p['y']*factor
-        elif p['y']>.78*sh:
-            y=height-(sh-p['y'])*factor
-            if abs(p['x']+p['width']/2-sw/2)<.04*sw:
-                x=width/2-p['width']*factor/2
-        transform([e['id'] for e in items],p,x,y,factor,'badge-footer-attachments')
-
-    # Infer a single left-aligned or centered reading column using glyphs,
-    # rather than the oversized containers of short words such as "but".
-    texts=[e for e in src.values() if e.get('type')=='text'
-           and e.get('content','').strip() and e['id'] not in handled
-           and abs(float(e.get('rotation',0.)))<.5]
-    for seed in sorted(texts,key=lambda e:-e.get('font_size',1.)):
-        if seed['id'] in handled:continue
-        sb=box(seed);groups=[]
-        for axis in ('left','center'):
-            coordinate=lambda b:b[0] if axis=='left' else (b[0]+b[2])/2
-            group=[e for e in texts if e['id'] not in handled
-                   and abs(coordinate(box(e))-coordinate(sb))<.025*sw
-                   and (axis!='left' or e.get('text_align','left')=='left')]
-            if len(group)>=3:groups.append((len(group),axis,group))
-        if not groups:continue
-        _,axis,group=max(groups,key=lambda g:g[0]);gb=union(group)
-        anchor=max(group,key=lambda e:e.get('font_size',1.));now=out[anchor['id']]
-        factor=now['font_size']/anchor['font_size']
-        if axis=='left':
-            factor=min(factor,(width-now['x']-.08*width)/max(1.,gb[2]-gb[0]))
-        factor=min(factor,1.15*min(width,height)/min(sw,sh))
-        if factor<=0:continue
-        ids=[e['id'] for e in group]
-        for e in src.values():
-            if e['id'] in handled or e.get('type') not in ('image','shape'):continue
-            if (e['width']*e['height']<.012*sw*sh
-                    and gb[0]-.025*sw<=e['x'] and e['x']+e['width']<=gb[2]+.025*sw
-                    and gb[1]-.15*sh<=e['y'] and e['y']+e['height']<=gb[3]+.15*sh):
-                ids.append(e['id'])
-        transform(ids,anchor,now['x'],now['y'],factor,'source-copy-column')
-        # An enclosing outline anchors the entire lockup, including rules.
-        for p in src.values():
-            if p.get('type')!='image' or p['id'] in ids:continue
-            pb=box(p)
-            if not (pb[0]<=gb[0] and pb[1]<=gb[1] and pb[2]>=gb[2] and pb[3]>=gb[3]):continue
-            stats=_flat_image_asset_stats(str(_asset_root(p)/p.get('asset_id','')))
-            if not stats or stats[1]>.35:continue
-            content=union([out[eid] for eid in ids]);frame=box(out[p['id']])
-            dx=(frame[0]+frame[2]-content[0]-content[2])/2
-            dy=(frame[1]+frame[3]-content[1]-content[3])/2
-            if abs((pb[0]+pb[2]-gb[0]-gb[2])/2)>.06*p['width']:dx=0.
-            if abs((pb[1]+pb[3]-gb[1]-gb[3])/2)>.06*p['height']:dy=0.
-            for eid in ids:out[eid]['x']+=dx;out[eid]['y']+=dy
-            break
-    # Report the actual residual movement, so a re-applied projection is a
-    # zero-error fixed point and ranking can recognize a repaired relationship.
-    before={e['id']:e for e in elements};error=0.
-    for e in result:
-        old=before[e['id']]
-        error=max(error,abs(e['x']-old['x'])/width,abs(e['y']-old['y'])/height,
-                  abs(e['width']-old['width'])/width,abs(e['height']-old['height'])/height)
-        if e.get('type')=='text':
-            error=max(error,.1*abs(e['font_size']/max(1.,old['font_size'])-1))
+    """Universal container/axis/font alternative for the rendered verifier."""
+    from engine.resize import _structural_qwen_projection
+    result,report=_structural_qwen_projection(elements,source,units,width,height)
+    before={e['id']:e for e in elements}
+    changes=report['containers']+report['font_calibration']+report['axes']
+    error=sum(abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))/max(1.,width if k in ('x','width') else height)
+              for e in result for k in ('x','y','width','height'))/max(1,len(result))
     return result,changes,error
 
 
@@ -1016,85 +820,15 @@ def anchor_superscripts(elements,units):
 
 
 def font_variant(elements,units,width,height):
-    """Measure font alternatives in fixed model boxes; never rewrite target labels."""
-    from engine.resize import _text, _text_info, _text_visible_bounds, _unintended_text_overlaps
-    result=deepcopy(elements);source={e['id']:e for u in units for e in u['items']};changes=[]
-    source_canvas=next((u.get('source_canvas') for u in units if u.get('source_canvas')),
-                       (width,height))
-    source_w=float(source_canvas[0])
-    # If an authored single-line centered label only wrapped because Qwen
-    # proposed a narrow frame, offer a centered wider-frame repair. Keep this
-    # bounded and source-evidenced; the global overlap check can reject it.
-    for e in result:
-        original=source.get(e['id'])
-        if (not original or e['type']!='text' or '\n' in original.get('content','')
-                or original.get('text_align')!='center'
-                or abs((original['x']+original['width']/2)/max(1.,source_w)-.5)>.08
-                or _text(original)[2]!=1 or _text(e)[2]<=1):
-            continue
-        natural_width=_text(e,1e9,e.get('font_size',1))[1]+max(1.,e.get('font_size',1))*.12
-        max_width=min(width*.90,max(e['width'],natural_width))
-        if natural_width>max_width+1e-5:continue
-        old=deepcopy(e);center=e['x']+e['width']/2
-        e['width']=max_width;e['x']=min(width-max_width,max(0.,center-max_width/2))
-        if set(_unintended_text_overlaps(result,units))-set(_unintended_text_overlaps(elements,units)):
-            e.update(old)
-        else:
-            changes.append(e['id'])
-    for e in result:
-        if e['type']!='text' or not e.get('content','').strip() or e['id'] not in source:continue
-        original=source[e['id']];base=max(1,float(e.get('font_size',1)))
-        source_font=max(1,float(original.get('font_size',1)))
-        source_lines=max(1,_text(original)[2])
-        narrowed=(e['width']/max(1,e['height']))<.65*(original['width']/max(1,original['height']))
-        max_lines=min(e.get('max_lines') or 1000,source_lines if not narrowed else max(source_lines,_text(e)[2]))
-        # Preserve source type hierarchy through relative font ratios within
-        # each actual lockup, rather than a global headline/body/tag ordering.
-        low,high=max(1,base*.70),base*1.45
-        def fits(size):
-            probe=deepcopy(e);probe['letter_spacing']=original.get('letter_spacing',0)*base/source_font
-            h,w,lines=_text(probe,e['width']*.96,size)
-            # Single-line text that fits horizontally should keep its source-
-            # scaled size. Increase the frame height after calibration instead
-            # of shrinking a headline just to satisfy a conservative metric.
-            single_line=(lines==1 and '\n' not in e.get('content','')
-                         and w<=e['width'])
-            return (single_line or (h<=e['height']*.95 and w<=e['width']*.96)) and lines<=max_lines
-        if not fits(low):continue  # no feasible calibration in the bounded range
-        for _ in range(20):
-            mid=(low+high)/2
-            if fits(mid):low=mid
-            else:high=mid
-        if abs(low-base)<base*.03:continue
-        e['font_size']=low;e['letter_spacing']=original.get('letter_spacing',0)*low/source_font
-        measured=_text_info(e,e['width'],low)
-        measured_h,measured_w,measured_lines=measured[0],measured[1],measured[2]
-        if measured_lines==1 and '\n' not in e.get('content','') and measured_w<=e['width']:
-            e['height']=max(e['height'],measured_h)
-            if e['y']+e['height']>height:
-                e['y']=max(0.,height-e['height'])
-        changes.append(e['id'])
-    # Enforce a clear source-supported headline/copy hierarchy only where the
-    # bounded font ranges permit it. Do not invent a universal tag size rule.
-    roles={e['id']:u.get('semantic') for u in units for e in u['items']}
-    incoming={e['id']:e for e in elements}
-    for headline in result:
-        if roles.get(headline['id'])!='headline' or headline['type']!='text':continue
-        for body in result:
-            if roles.get(body['id']) not in ('subheading','body') or body['type']!='text':continue
-            if source[headline['id']].get('font_size',1)<1.35*source[body['id']].get('font_size',1):continue
-            ceiling=headline['font_size']/1.35
-            if body['font_size']>ceiling>=incoming[body['id']]['font_size']*.70:
-                body['font_size']=ceiling
-                body['letter_spacing']=source[body['id']].get('letter_spacing',0)*ceiling/max(1,source[body['id']].get('font_size',1))
-                changes.append(body['id'])
-    # Re-anchor compact superscripts after calibration, using measured glyph
-    # advance instead of the usually oversized text frame.
-    result,anchor_changes=anchor_superscripts(result,units)
-    changes.extend(anchor_changes)
+    """Calibrate actual rendered glyphs, expanding available boxes before size."""
+    from engine.resize import _calibrate_text_boxes, _unintended_text_overlaps
+    source_items={e['id']:e for u in units for e in u['items']}
+    sw,sh=next((u['source_canvas'] for u in units if u.get('source_canvas')),(width,height))
+    source={'canvas':{'width':sw,'height':sh},'elements':list(source_items.values())}
+    result,notes=_calibrate_text_boxes(elements,source,width,height)
     if set(_unintended_text_overlaps(result,units))-set(_unintended_text_overlaps(elements,units)):
         return deepcopy(elements),[]
-    return result,sorted(set(changes))
+    return result,sorted({note['element_id'] for note in notes})
 
 
 def polish_variant(elements,units,source,width,height,desired,iterations=24):
@@ -1562,3 +1296,247 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                                      item[0][0]['x'],item[0][0]['y']))
         return unique[:18],[]
     return result,changes
+# Universal structural passes. Geometry comes exclusively from the source;
+# Qwen supplies robust container placement and scale, never internal offsets.
+def _frame(items):
+    boxes=[_rotated_bounds(e) for e in items]
+    return (min(b[0] for b in boxes),min(b[1] for b in boxes),
+            max(b[2] for b in boxes),max(b[3] for b in boxes))
+
+
+def _axis(e, axis):
+    dimension, fraction=axis
+    length='width' if dimension=='x' else 'height'
+    return float(e[dimension])+fraction*float(e[length])
+
+
+def _weighted_median(values):
+    ordered=sorted(values);half=sum(w for _,w in ordered)/2;total=0.
+    for value,weight in ordered:
+        total+=weight
+        if total>=half:return value
+    return ordered[-1][0]
+
+
+def build_container_tree(source, units=None):
+    """Canvas -> functional containers -> nested containers/leaves.
+
+    Recompute the prompt's geometric relationships without its token-budget
+    truncation. Full-canvas backgrounds cannot join the foreground graph.
+    Alignment alone couples nearby peers; backing/overlap and explicit groups
+    provide stronger evidence. Backing sets form a laminar containment tree.
+    """
+    sw,sh=map(float,(source['canvas']['width'],source['canvas']['height']))
+    active=({e['id'] for u in units for e in u['items']} if units is not None else
+            {e['id'] for e in source['elements'] if not
+             (e.get('type')!='text' and e['width']>=.9*sw and e['height']>=.9*sh)})
+    src={e['id']:e for e in source['elements'] if e['id'] in active}
+    items=sorted(src.values(),key=lambda e:str(e['id']))
+    parent={eid:eid for eid in src};relations=[];backings=[]
+    def find(eid):
+        while parent[eid]!=eid:parent[eid]=parent[parent[eid]];eid=parent[eid]
+        return eid
+    def join(a,b):parent[find(b)]=find(a)
+    for i,a in enumerate(items):
+        ab=_rotated_bounds(a);aa=max(1.,a['width']*a['height'])
+        contained={a['id']}
+        for b in items:
+            if a['id']==b['id']:continue
+            bb=_rotated_bounds(b);ba=max(1.,b['width']*b['height'])
+            coverage=_overlap(ab,bb)/ba
+            if (a.get('type')!='text' and aa>1.15*ba and aa<.85*sw*sh
+                    and coverage>=.96 and a.get('z_index',0)<=b.get('z_index',0)):
+                contained.add(b['id'])
+                relations.append(['backing',a['id'],b['id']])
+        if len(contained)>1:backings.append(contained)
+        for b in items[i+1:]:
+            bb=_rotated_bounds(b);ba=max(1.,b['width']*b['height'])
+            shared=_overlap(ab,bb)/min(aa,ba)
+            xc=abs(_axis(a,('x',.5))-_axis(b,('x',.5)))
+            yc=abs(_axis(a,('y',.5))-_axis(b,('y',.5)))
+            row=yc<=.025*sh and xc>=.04*sw
+            column=xc<=.025*sw and yc>=.04*sh
+            if row:relations.append(['same-row',a['id'],b['id']])
+            if column:relations.append(['same-column',a['id'],b['id']])
+            if shared>=.18:relations.append(['overlap',a['id'],b['id']])
+            gapx=max(0.,ab[0]-bb[2],bb[0]-ab[2])
+            gapy=max(0.,ab[1]-bb[3],bb[1]-ab[3])
+            explicit=a.get('group_id') is not None and a.get('group_id')==b.get('group_id')
+            # Nested backplates are represented below, not collapsed by their
+            # containment edges. Non-contained overlap is an atomic lockup.
+            nested=_overlap(ab,bb)/min(aa,ba)>=.96 and max(aa,ba)>1.15*min(aa,ba)
+            aligned_column=(min(abs(a['x']-b['x']),xc,
+                               abs(a['x']+a['width']-b['x']-b['width']))<=4
+                            and gapy<=.14*sh and yc>=.02*sh)
+            aligned_row=yc<=4 and gapx<=.10*sw and xc>=.02*sw
+            if explicit or (shared>=.18 and not nested) or aligned_column or aligned_row:
+                join(a['id'],b['id'])
+    if units:
+        for u in units:
+            if u.get('backing_panel'):
+                ids={e['id'] for e in u['items']}|set(u.get('backed_ids',()))
+                ids&=src.keys()
+                if len(ids)>1:backings.append(ids)
+    coupled={}
+    for eid in src:coupled.setdefault(find(eid),set()).add(eid)
+    sets=[g for g in coupled.values() if len(g)>1]+backings
+    # Crossing memberships become one container; strict subsets stay nested.
+    merged=True
+    while merged:
+        merged=False
+        for i,a in enumerate(sets):
+            for j in range(i+1,len(sets)):
+                b=sets[j]
+                if a&b and not (a<=b or b<=a):
+                    sets[i]=a|b;sets.pop(j);merged=True;break
+            if merged:break
+    sets=sorted({frozenset(g) for g in sets},key=lambda g:(-len(g),tuple(sorted(g))))
+    for eid in sorted(src):
+        if not any(eid in g for g in sets):sets.append(frozenset([eid]))
+    def node(group):
+        subsets=[s for s in sets if s<group and not any(s<t<group for t in sets)]
+        covered=set().union(*subsets) if subsets else set()
+        children=[node(s) for s in subsets]
+        children.extend({'kind':'element','element_id':eid} for eid in sorted(group-covered))
+        # Only schema-native shapes may stretch; images always scale uniformly.
+        elastic=any(src[eid].get('type')=='shape' for eid in group)
+        return {'kind':'container','id':'container:'+','.join(sorted(group)),
+                'element_ids':sorted(group),'source_box':list(_frame([src[eid] for eid in group])),
+                'mode':'semi-elastic' if elastic else 'rigid','children':children}
+    roots=[g for g in sets if not any(g<h for h in sets)]
+    return {'kind':'canvas','source_canvas':{'width':sw,'height':sh},
+            'source_elements':src,'relationships':relations,
+            'children':[node(g) for g in roots]}
+
+
+def project_container_tree(elements, tree, width, height):
+    """Infer each container transform from substantial proposal members.
+
+    A weighted robust affine estimate produces [X,Y,W,H]. Thin geometry never
+    estimates a transform; it receives the same transform as the source copy.
+    All text, artwork, rotations, tracking and internal offsets stay rigid.
+    Only native shape backplates may absorb excess width in semi-elastic mode.
+    """
+    from math import sqrt, isfinite
+    src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
+    sw=float(tree['source_canvas']['width']);sh=float(tree['source_canvas']['height']);notes=[]
+    for node in tree['children']:
+        ids=[eid for eid in node['element_ids'] if eid in out]
+        if len(ids)<2:continue
+        original=[src[eid] for eid in ids]
+        sb=_frame(original);cx=(sb[0]+sb[2])/2;cy=(sb[1]+sb[3])/2
+        substantial=[e for e in original if min(e['width'],e['height'])>max(2.,.006*min(sw,sh))
+                     and max(e['width'],e['height'])/max(1.,min(e['width'],e['height']))<16]
+        if not substantial:substantial=original
+        largest=max(e['width']*e['height'] for e in substantial)
+        weights={e['id']:max(.05,min(1.,sqrt(e['width']*e['height']/max(1.,largest))))
+                 for e in substantial}
+        scales=[];xscales=[]
+        for e in substantial:
+            q=out[e['id']];sx=float(q['width'])/max(1e-6,e['width']);sy=float(q['height'])/max(1e-6,e['height'])
+            if not all(isfinite(v) and v>0 for v in (sx,sy)):continue
+            scales.append((min(sx,sy),weights[e['id']]))
+            xscales.append((sx,weights[e['id']]))
+        if not scales:continue
+        scale=_weighted_median(scales)
+        scale=min(scale,width/max(1e-6,sb[2]-sb[0]),height/max(1e-6,sb[3]-sb[1]))
+        tx=_weighted_median([(_axis(out[e['id']],('x',.5))-(_axis(e,('x',.5))-cx)*scale,weights[e['id']]) for e in substantial])
+        ty=_weighted_median([(_axis(out[e['id']],('y',.5))-(_axis(e,('y',.5))-cy)*scale,weights[e['id']]) for e in substantial])
+        # Preserve edge bleed only when the source container was edge anchored.
+        gx=min(width*.03,max(0.,min(sb[0],sw-sb[2]))/max(1.,sw)*width)
+        gy=min(height*.03,max(0.,min(sb[1],sh-sb[3]))/max(1.,sh)*height)
+        scale=min(scale,(width-2*gx)/max(1e-6,sb[2]-sb[0]),(height-2*gy)/max(1e-6,sb[3]-sb[1]))
+        # The canvas is the parent container too. A lone source-centered
+        # lockup inherits that shared parent axis, rather than model drift.
+        if len(tree['children'])==1:
+            if abs(cx-sw/2)<=max(4.,sw*.02):tx=width/2
+            if abs(cy-sh/2)<=max(4.,sh*.02):ty=height/2
+        hw=(sb[2]-sb[0])*scale/2;hh=(sb[3]-sb[1])*scale/2
+        tx=min(width-gx-hw,max(gx+hw,tx));ty=min(height-gy-hh,max(gy+hh,ty))
+        for eid in ids:
+            e=src[eid];q=out[eid]
+            q.update(x=tx+(e['x']-cx)*scale,y=ty+(e['y']-cy)*scale,
+                     width=e['width']*scale,height=e['height']*scale,
+                     rotation=e.get('rotation',0))
+            if e.get('type')=='text':
+                q['font_size']=max(1.,e.get('font_size',1.)*scale)
+                q['letter_spacing']=float(e.get('letter_spacing',0))*q['font_size']/max(1.,e.get('font_size',1.))
+                q['line_height']=e.get('line_height',1.2);q['text_align']=e.get('text_align','left')
+        elastic_width=(sb[2]-sb[0])*min(_weighted_median(xscales),scale*1.5)
+        if node['mode']=='semi-elastic' and elastic_width>(sb[2]-sb[0])*scale:
+            for eid in ids:
+                e=src[eid];q=out[eid]
+                # Only a shape that spans the group can absorb its free axis.
+                if e.get('type')=='shape' and e['width']>=.9*(sb[2]-sb[0]) and abs(e.get('rotation',0)%360)<.5:
+                    delta=min(elastic_width-q['width'],2*min(q['x'],width-q['x']-q['width']))
+                    if delta>0:q['x']-=delta/2;q['width']+=delta
+        final_box=_frame([out[eid] for eid in ids])
+        notes.append({'container_id':node['id'],'mode':node['mode'],'element_ids':ids,
+                      'scale':scale,'target_box':[final_box[0],final_box[1],final_box[2]-final_box[0],final_box[3]-final_box[1]],
+                      'anchor_ids':[e['id'] for e in substantial]})
+    return result,notes
+
+
+def snap_source_axes(elements, source, width, height, tree=None):
+    """Complete-link 1D source/target clusters; no transitive snap chains.
+
+    Source axis diameter <=4px and target diameter <=3% of the dimension.
+    Competing left/center/right constraints claim an element deterministically;
+    impossible competing axes are recorded rather than successively drifting it.
+    """
+    from engine.resize import _unintended_text_overlaps
+    tree=tree or build_container_tree(source)
+    src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
+    pairs={frozenset(r[1:3]) for r in tree['relationships'] if r[0] in ('same-column','same-row','backing','overlap')}
+    candidates=[]
+    for dimension in ('x','y'):
+        limit=.03*(width if dimension=='x' else height)
+        for fraction in (0.,.5,1.):
+            axis=(dimension,fraction)
+            eligible=[e for eid,e in src.items() if eid in out and (fraction==.5 or abs(e.get('rotation',0)%360)<.5)]
+            ordered=sorted(eligible,key=lambda e:(_axis(e,axis),str(e['id'])))
+            source_clusters=[]
+            for e in ordered:
+                if not source_clusters or _axis(e,axis)-_axis(source_clusters[-1][0],axis)>4:
+                    source_clusters.append([])
+                source_clusters[-1].append(e)
+            for cluster in source_clusters:
+                target_clusters=[]
+                for e in sorted(cluster,key=lambda e:(_axis(out[e['id']],axis),str(e['id']))):
+                    if not target_clusters or _axis(out[e['id']],axis)-_axis(out[target_clusters[-1][0]['id']],axis)>limit:
+                        target_clusters.append([])
+                    target_clusters[-1].append(e)
+                for group in target_clusters:
+                    if len(group)<2:continue
+                    # Source edge alignment itself is same-column evidence,
+                    # even where the compact prompt only encoded centers.
+                    ids=[e['id'] for e in group]
+                    if not any(frozenset((a,b)) in pairs or
+                               abs(_axis(src[a],axis)-_axis(src[b],axis))<=4
+                               for i,a in enumerate(ids) for b in ids[i+1:]):continue
+                    spread=max(_axis(e,axis) for e in group)-min(_axis(e,axis) for e in group)
+                    preference=sum(e.get('type')=='text' and dimension=='x' and
+                                   e.get('text_align','left')=={0.:'left',.5:'center',1.:'right'}[fraction] for e in group)
+                    candidates.append((-len(group),spread,-preference,dimension,fraction,ids))
+    used={};notes=[]
+    # All axes are derived from the original target; no order-dependent medians.
+    initial={e['id']:e for e in elements}
+    for _,_,_,dimension,fraction,ids in sorted(candidates):
+        axis=(dimension,fraction);target=median(_axis(initial[eid],axis) for eid in ids)
+        shifts={eid:target-_axis(out[eid],axis) for eid in ids}
+        if any((eid,dimension) in used and abs(shifts[eid])>1e-6 for eid in ids):continue
+        if max(abs(v) for v in shifts.values())<1e-7:
+            for eid in ids:used[eid,dimension]=True
+            continue
+        before={eid:out[eid][dimension] for eid in ids}
+        old_overlaps=set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))
+        for eid,delta in shifts.items():out[eid][dimension]+=delta
+        in_bounds=all(0<=_rotated_bounds(out[eid])[0] and 0<=_rotated_bounds(out[eid])[1]
+                      and _rotated_bounds(out[eid])[2]<=width+1e-5
+                      and _rotated_bounds(out[eid])[3]<=height+1e-5 for eid in ids)
+        if not in_bounds or set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))-old_overlaps:
+            for eid,value in before.items():out[eid][dimension]=value
+            continue
+        for eid in ids:used[eid,dimension]=True
+        notes.append({'axis':dimension,'fraction':fraction,'value':target,'element_ids':ids})
+    return result,notes

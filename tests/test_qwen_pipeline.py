@@ -37,7 +37,9 @@ class QwenPipelineTests(unittest.TestCase):
         ])
         backgrounds,analysis_units=_analyze(source)
         self.assertEqual({e['id'] for e in backgrounds},{'base','frame'})
-        self.assertFalse(analysis_units)
+        # A full-canvas asset is a backdrop, not evidence that separate copy
+        # was flattened into it. Preserve that label as a foreground unit.
+        self.assertEqual([e['id'] for u in analysis_units for e in u['items']],['label'])
         assembled=_assemble(source['elements'],backgrounds,source,600,400)
         by_id={e['id']:e for e in assembled['elements']}
         self.assertEqual(by_id['frame']['fit'],'contain')
@@ -229,12 +231,12 @@ class QwenPipelineTests(unittest.TestCase):
         self.assertEqual(report['selected_index'],1)
         self.assertTrue(report['qwen_safety_checks']['busy_background_tolerated'])
 
-    def test_font_calibration_can_grow_without_mutating_original(self):
+    def test_font_calibration_keeps_an_already_readable_size_without_mutating_original(self):
         original=text('a');proposal=deepcopy(original);proposal['font_size']=10
         before=deepcopy(proposal)
         fitted,changed=font_variant([proposal],units([original]),500,500)
         self.assertEqual(proposal,before)
-        self.assertEqual(changed,['a']);self.assertGreater(fitted[0]['font_size'],10)
+        self.assertEqual(changed,[]);self.assertEqual(fitted[0]['font_size'],10)
         self.assertLessEqual(_text(fitted[0])[0],fitted[0]['height'])
 
     def test_whole_column_solving_cannot_push_into_next_member(self):
@@ -355,7 +357,7 @@ class QwenPipelineTests(unittest.TestCase):
                   source_canvas=(500,500))
         self.assertEqual(_broken_source_stack_units(proposal,[unit]),[])
 
-    def test_runtime_adds_layer_candidate_only_after_qwen_breaks_stack(self):
+    def test_runtime_projects_broken_art_stack_before_render_ranking(self):
         source=dict(canvas=dict(width=500,height=500),elements=[
             dict(id='back',type='shape',shape_type='rectangle',x=50,y=50,width=100,height=100,
                  z_index=0,fill_color='#204060'),
@@ -367,19 +369,22 @@ class QwenPipelineTests(unittest.TestCase):
         proposal[1].update(x=300,y=20)
         before=deepcopy(source)
         def inspect_candidates(candidates,*args,**kwargs):
-            names={candidate['name'] for candidate in candidates}
-            self.assertIn('qwen-layer-preserved',names)
-            return candidates[0],dict(used=False,selected_index=0)
+            _,analysis_units=_analyze(source)
+            modeled=[c for c in candidates if c['name'].startswith('qwen-')]
+            self.assertTrue(modeled)
+            for candidate in modeled:
+                self.assertEqual(_broken_source_stack_units(candidate['elements'],analysis_units),[])
+                self.assertTrue(candidate['structure']['containers'])
+            return modeled[0],dict(used=False,selected_index=0)
         with patch.dict(os.environ,{'MAGICANVAS_QWEN_ENABLED':'1'}), \
              patch('engine.qwen_seed.generate_seed',return_value=(proposal,'mock proposal')), \
              patch('engine.resize._visual_rerank',side_effect=inspect_candidates):
             _,report=_adapt_with_diagnostics(source,dict(width=500,height=300))
         self.assertEqual(source,before)
         diagnostics=report['qwen_diagnostics']
-        self.assertEqual(diagnostics['layer_stack_repaired_ids'],['back','front'])
-        _,analysis_units=_analyze(source)
-        self.assertEqual(_broken_source_stack_units(
-            diagnostics['layer_preserved_elements'],analysis_units),[])
+        self.assertEqual(diagnostics['structural_pass_version'],1)
+        self.assertEqual(set(diagnostics['container_tree']['children'][0]['element_ids']),{'back','front'})
+        self.assertTrue(diagnostics['selected_structure']['containers'])
 
     def test_missing_superscript_uses_matched_parent_transform(self):
         a=text('price',group_id='g');b=text('suffix',group_id='g');b.update(x=120,width=25,content='99')

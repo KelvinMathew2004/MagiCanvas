@@ -66,6 +66,173 @@ def _crello_font_manager():
         return None
 
 
+@lru_cache(maxsize=1)
+def _layout_font_manager():
+    """Use the renderer's local lookup and merge brand faces over Crello faces."""
+    try:
+        from cr_renderer.fonts import FontManager
+        from renderer.converter.brand_fonts import build_font_dict
+        dataset=_crello_font_manager()
+        fonts=dict(dataset._fonts) if dataset is not None else {}
+        fonts.update(build_font_dict(str(Path(__file__).resolve().parents[1]/'brand_kit'/'fonts')))
+        if not fonts:return None
+        manager=FontManager.__new__(FontManager);manager._fonts=fonts
+        return manager
+    except (ImportError,OSError,ValueError):
+        return None
+
+
+@lru_cache(maxsize=16384)
+def _skia_advances(content,family,bold,italic,size):
+    manager=_layout_font_manager()
+    if manager is None:return None
+    try:
+        from renderer.converter.wrap import char_widths
+        style='bolditalic' if bold and italic else 'italic' if italic else 'bold' if bold else 'regular'
+        return tuple(char_widths(manager,family,'bold' if bold else 'regular',style,size,content))
+    except (ImportError,OSError,ValueError):
+        return None
+
+
+@lru_cache(maxsize=8192)
+def _render_text_ink_cached(payload):
+    """Rasterize a text probe with the actual converter and Skia text renderer.
+
+    Pixel bounds include mixed styles, fractional tracking, integer renderer
+    font sizes and italic overhang. No image assets or target labels are used.
+    """
+    import json
+    from math import ceil
+    e=json.loads(payload);manager=_layout_font_manager()
+    if manager is None:return None
+    try:
+        import numpy as np
+        import skia
+        from renderer.converter.convert import convert_chameleon_to_crello
+        from cr_renderer.schema import TextElement
+        from cr_renderer.text_utils import generate_map,render_text
+        # Source/exporter run offsets are end exclusive, as in the dataset
+        # rendering adapter. The converter's internal style maps are inclusive.
+        for run in e.get('style_runs') or []:run['end']=int(run['end'])-1
+        example,_=convert_chameleon_to_crello({'canvas':{'width':1,'height':1},'elements':[e]},manager)
+        prop=TextElement(uuid='',type='textElement',width=float(e['width']),height=float(e['height']),
+            text=example['text'][0],fontSize=example['font_size'][0],font=example['font'][0],
+            lineHeight=example['line_height'][0],textAlign=example['text_align'][0],
+            capitalize=example['capitalize'][0],letterSpacing=example['letter_spacing'][0],
+            boldMap=generate_map(example['font_bold'][0]),italicMap=generate_map(example['font_italic'][0]),
+            colorMap=generate_map(['#ffffff']*len(example['text'][0])),lineMap=generate_map(example['text_line'][0]))
+        pad=max(4,ceil(prop.fontSize*2));lines=max(1,example['text'][0].count('\n')+1)
+        natural=_text_info(e,1e9)[1]
+        w=ceil(max(prop.width,natural)+pad*2);h=ceil(lines*prop.fontSize*max(1,prop.lineHeight)+pad*2+prop.fontSize*2)
+        if w*h>16_000_000 or max(w,h)>16384:return None
+        surface=skia.Surface(max(1,w),max(1,h));canvas=surface.getCanvas();canvas.clear(0)
+        canvas.translate(pad,pad);render_text(canvas,manager,prop)
+        alpha=surface.makeImageSnapshot().toarray()[:,:,3]
+        yy,xx=np.nonzero(alpha)
+        if not len(xx):return (0.,0.,0.,0.)
+        return (float(xx.min()-pad),float(yy.min()-pad),float(xx.max()+1-pad),float(yy.max()+1-pad))
+    except (ImportError,OSError,ValueError,TypeError):
+        return None
+
+
+def _render_text_ink(e):
+    import json
+    probe={k:v for k,v in e.items() if k in ('type','content','font_family','font_size','font_weight',
+        'font_style','italic','line_height','letter_spacing','text_align','capitalize','style_runs','width','height')}
+    probe.update(id='font-probe',x=0,y=0,rotation=0,opacity=1,color='#ffffff')
+    return _render_text_ink_cached(json.dumps(probe,sort_keys=True))
+
+
+def _set_font_size(element,size):
+    old=max(1e-6,float(element.get('font_size',1)))
+    element['font_size']=max(1.,float(size))
+    element['letter_spacing']=float(element.get('letter_spacing',0))*element['font_size']/old
+
+
+def _calibrate_text_boxes(elements,source,width,height,tree=None):
+    """Widen into empty space, then adjust height, then shrink only as needed."""
+    result=deepcopy(elements);out={e['id']:e for e in result};src={e['id']:e for e in source['elements']}
+    notes=[]
+    for e in result:
+        if e.get('type')!='text' or not e.get('content','').strip():continue
+        original=deepcopy(e);size=max(1.,float(e.get('font_size',1)))
+        left,right,top,bottom=0.,float(width),0.,float(height)
+        authored=src.get(e['id'],e)
+        # Respect the smallest source backing, rather than widening across it.
+        backing=[]
+        for sid,s in src.items():
+            if sid==e['id'] or sid not in out or s.get('type')=='text':continue
+            if s['width']>=.9*source['canvas']['width'] and s['height']>=.9*source['canvas']['height']:continue
+            if (s['x']<=authored['x'] and s['y']<=authored['y'] and
+                    s['x']+s['width']>=authored['x']+authored['width'] and
+                    s['y']+s['height']>=authored['y']+authored['height'] and
+                    s.get('z_index',0)<=authored.get('z_index',0)):
+                backing.append((s['width']*s['height'],s,out[sid]))
+        if backing:
+            _,s,p=min(backing,key=lambda pair:pair[0])
+            sx=p['width']/max(1.,s['width']);sy=p['height']/max(1.,s['height'])
+            px=min(max(1.,size*.12),max(0.,authored['x']-s['x'])*sx)
+            py=min(max(1.,size*.10),max(0.,authored['y']-s['y'])*sy)
+            left=max(left,p['x']+px);right=min(right,p['x']+p['width']-px)
+            top=max(top,p['y']+py);bottom=min(bottom,p['y']+p['height']-py)
+        # Non-overlapping source neighbours are expansion obstacles. Existing
+        # source overlap and a backing are intentional, not empty-space errors.
+        for other in result:
+            if other['id']==e['id']:continue
+            a=src.get(other['id'])
+            if a is None:continue
+            sb=(authored['x'],authored['y'],authored['x']+authored['width'],authored['y']+authored['height'])
+            ob=(a['x'],a['y'],a['x']+a['width'],a['y']+a['height'])
+            if _overlap(sb,ob)>0:continue
+            if other.get('type')!='text' and other['width']>.8*width and other['height']>.8*height:continue
+            gap=max(1.,size*.04)
+            if other['y']<e['y']+e['height'] and other['y']+other['height']>e['y']:
+                if other['x']>=e['x']+e['width']-1:right=min(right,other['x']-gap)
+                if other['x']+other['width']<=e['x']+1:left=max(left,other['x']+other['width']+gap)
+            if other['x']<e['x']+e['width'] and other['x']+other['width']>e['x']:
+                if other['y']>=e['y']+e['height']-1:bottom=min(bottom,other['y']-gap)
+        align=e.get('text_align','left');anchor=e['x']+(e['width']/2 if align=='center' else e['width'] if align=='right' else 0)
+        room=(2*min(anchor-left,right-anchor) if align=='center' else anchor-left if align=='right' else right-anchor)
+        natural=_text_info(e,1e9,size)[1]+max(1.,size*.03)
+        preferred_lines=max(1,_text_info(authored)[2])
+        if _text_info(e)[2]>preferred_lines or natural>e['width']:
+            new_width=max(e['width'],min(room,natural))
+            e['x']=anchor-(new_width/2 if align=='center' else new_width if align=='right' else 0)
+            e['width']=new_width
+        ink=_render_text_ink(e)
+        if ink is None:
+            h,w,_=_text(e);ink=(0.,0.,w,h)
+        if ink[3]>e['height'] and bottom>=e['y']+ink[3]:e['height']=ink[3]+1
+        def fits(probe):
+            bounds=_render_text_ink(probe)
+            if bounds is None:
+                h,w,_=_text(probe);bounds=(0.,0.,w,h)
+            return (bounds[0]>=-max(1.,probe['font_size']*.03) and bounds[2]<=probe['width']+1
+                    and bounds[3]<=probe['height']+1 and probe['y']+bounds[3]<=bottom+1
+                    and probe['x']+bounds[2]<=right+1)
+        if not fits(e):
+            low,high=1.,size
+            for _ in range(12):
+                mid=(low+high)/2;probe=deepcopy(e);_set_font_size(probe,mid)
+                if fits(probe):low=mid
+                else:high=mid
+            _set_font_size(e,low)
+        if any(abs(float(e.get(k,0))-float(original.get(k,0)))>1e-5 for k in ('x','width','height','font_size','letter_spacing')):
+            notes.append({'element_id':e['id'],'widened':e['width']>original['width']+1e-5,
+                          'font_before':size,'font_after':e['font_size'],
+                          'measured_with':'skia-render' if _render_text_ink(e) is not None else 'font-metrics-fallback'})
+    return result,notes
+
+
+def _structural_qwen_projection(elements,source,units,width,height,tree=None):
+    from engine.qwen_refine import build_container_tree,project_container_tree,snap_source_axes
+    tree=tree or build_container_tree(source,units)
+    projected,containers=project_container_tree(elements,tree,width,height)
+    projected,fonts=_calibrate_text_boxes(projected,source,width,height,tree)
+    projected,axes=snap_source_axes(projected,source,width,height,tree)
+    return projected,{'containers':containers,'font_calibration':fonts,'axes':axes}
+
+
 def _rotated_bounds(element):
     """Compute visual bounds for a rotated element around its center pivot."""
     x = float(element.get('x', 0.0))
@@ -285,7 +452,15 @@ def _text_cached(content,family,bold,italic,line_height,spacing,runs,width,size)
     # Match the supplied converter's space-replacement wrap rule. No hard
     # splitting of long words or text rewriting is hidden in the measurement.
     advances = _advances(content,family,bold,italic,runs)
-    widths = [v*size for v in advances]
+    measured = _skia_advances(content,family,bold,italic,size)
+    widths = list(measured) if measured is not None else [v*size for v in advances]
+    drawn = _skia_advances(content,family,bold,italic,max(1,int(size)))
+    glyph_widths = list(drawn) if drawn is not None else list(widths)
+    for start,end,rb,ri in runs:
+        styled = _skia_advances(content,family,bold if rb is None else rb,
+                                italic if ri is None else ri,max(1,int(size)))
+        if styled is not None:
+            for i in range(max(0,start),min(len(content),end)):glyph_widths[i]=styled[i]
     chars, line_width, space = list(content), 0, None
     for i, c in enumerate(chars):
         if c == '\n':
@@ -299,7 +474,7 @@ def _text_cached(content,family,bold,italic,line_height,spacing,runs,width,size)
         if c == ' ':
             space = i
     lines, line_width, count = [], 0, 0
-    for c, advance in zip(chars, widths):
+    for c, advance in zip(chars, glyph_widths):
         if c == '\n':
             lines.append(line_width+max(0, count-1)*spacing)
             line_width, count = 0, 0
@@ -307,7 +482,16 @@ def _text_cached(content,family,bold,italic,line_height,spacing,runs,width,size)
             line_width, count = line_width+advance, count+1
     lines.append(line_width+max(0, count-1)*spacing)
     words=tuple(len(line.split()) for line in ''.join(chars).split('\n'))
-    return len(lines)*size*line_height+size*.12, max(lines, default=0), len(lines), tuple(lines), words
+    # The converter wraps with fractional-size advances, while cr-renderer
+    # draws at int(fontSize). A fit must satisfy both, or a nominally fitting
+    # single line can wrap before its narrower integer-size glyphs are drawn.
+    wrap_lines=[];wrap_width=0.
+    for c,advance in zip(chars,widths):
+        if c=='\n':wrap_lines.append(wrap_width);wrap_width=0.
+        else:wrap_width+=advance
+    wrap_lines.append(wrap_width)
+    required=max(max(lines,default=0),max(wrap_lines,default=0))
+    return len(lines)*size*line_height+size*.12, required, len(lines), tuple(lines), words
 
 
 def _fit_text(e, width, height, desired):
@@ -391,7 +575,7 @@ def _scale(items, factor):
             if key in e:
                 e[key] *= factor
         if e['type'] == 'text':
-            e['font_size'] = max(1, e['font_size'])
+            _set_font_size(e,max(1,e['font_size']))
     return result
 
 
@@ -647,10 +831,11 @@ def _unit(u, width, height, scale, fill=False):
         e = deepcopy(items[0])
         desired=_target_font(e,u,scale)
         if u.get('semantic') in ('headline','subheading'):
-            e['width'],e['font_size']=_balanced_text(e,width,height,desired)
+            e['width'],fitted_size=_balanced_text(e,width,height,desired)
+            _set_font_size(e,fitted_size)
         else:
             e['width']=width
-            e['font_size']=_fit_text(e,width,height,desired)
+            _set_font_size(e, _fit_text(e, width, height, desired))
         e['height'] = min(height, _text(e)[0])
         e['x'], e['y'] = 0, 0
         return _contain([e], width, height)
@@ -669,7 +854,7 @@ def _unit(u, width, height, scale, fill=False):
             fit_height=height/len(texts)*.75
             if '\n' not in old.get('content',''):
                 fit_height=min(fit_height,desired_font*(old.get('line_height',1.2)+.12)+.001)
-            e['font_size'] = _fit_text(old,e['width'],fit_height,desired_font)
+            _set_font_size(e, _fit_text(old, e['width'], fit_height, desired_font))
             e['height'] = _text(e)[0]
             total_h += e['height']
         label_h = min(height, max(shape['height']*scale, total_h*1.5))
@@ -704,7 +889,7 @@ def _unit(u, width, height, scale, fill=False):
     result = _scale(items, factor)
     for e in result:
         if e['type']=='text':
-            e['font_size'] = _fit_text(e, e['width'], e['height'], e['font_size'])
+            _set_font_size(e, _fit_text(e, e['width'], e['height'], e['font_size']))
     return _contain(result, width, height)
 
 
@@ -1112,6 +1297,17 @@ def _decoration_obstacle(element):
 
 def _text_visible_bounds(element):
     """Approximate ink bounds using the same measured line widths as layout."""
+    ink=_render_text_ink(element)
+    if ink is not None:
+        x,y=float(element['x']),float(element['y'])
+        angle=radians(float(element.get('rotation',0)))
+        cx,cy=x+element['width']/2,y+element['height']/2
+        points=[]
+        for px,py in ((ink[0],ink[1]),(ink[2],ink[1]),(ink[0],ink[3]),(ink[2],ink[3])):
+            dx,dy=x+px-cx,y+py-cy
+            points.append((cx+dx*cos(angle)-dy*sin(angle),cy+dx*sin(angle)+dy*cos(angle)))
+        return (min(v[0] for v in points),min(v[1] for v in points),
+                max(v[0] for v in points),max(v[1] for v in points))
     height,_,_,line_widths,_=_text_info(element)
     align=element.get('text_align','left')
     lefts=[element['x']+(element['width']-line)/2 if align=='center'
@@ -1287,47 +1483,13 @@ def _separate_qwen_unit_collisions(elements,units,width,height,gap=None):
 
 
 def _micro_snap_qwen_proposal(elements, units, width, height,source=None):
-    """Repair source-supported lockups and small proposal-only text collisions."""
-    from engine.qwen_refine import repair_relationships
-    repaired,changes=repair_relationships(elements, units, width, height)
-    if source is not None:
-        line_aligned=_source_alignment_variant(
-            repaired,units,source,width,height,
-            align_text=False,align_lines=True,panel_inset=False)
-        if line_aligned is not None:
-            before={e['id']:e for e in repaired}
-            moved=[e for e in line_aligned if any(
-                abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
-                for k in ('x','y','width','height'))]
-            if (moved and all(e['x']>=0 and e['y']>=0
-                    and e['x']+e['width']<=width+1e-5
-                    and e['y']+e['height']<=height+1e-5 for e in moved)
-                    and not (set(_unintended_text_overlaps(line_aligned,units))-
-                             set(_unintended_text_overlaps(repaired,units)))):
-                repaired=line_aligned
-                changes.extend(dict(kind='source-rule-alignment',element_id=e['id'])
-                               for e in moved)
-        inset_aligned=_source_alignment_variant(
-            repaired,units,source,width,height,
-            align_text=False,align_lines=False,panel_inset=True)
-        if inset_aligned is not None:
-            before={e['id']:e for e in repaired}
-            moved=[e for e in inset_aligned if any(
-                abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
-                for k in ('x','y','width','height'))]
-            if (moved and all(e['x']>=0 and e['y']>=0
-                    and e['x']+e['width']<=width+1e-5
-                    and e['y']+e['height']<=height+1e-5 for e in moved)
-                    and not (set(_unintended_text_overlaps(inset_aligned,units))-
-                             set(_unintended_text_overlaps(repaired,units)))):
-                repaired=inset_aligned
-                changes.extend(dict(kind='source-frame-heading-clearance',element_id=e['id'])
-                               for e in moved)
-    repaired,separation_changes=_separate_qwen_text_collisions(repaired,units,width,height)
-    changes.extend(separation_changes)
-    repaired,unit_changes=_separate_qwen_unit_collisions(repaired,units,width,height)
-    changes.extend(unit_changes)
-    return repaired,changes
+    """Project whole source containers before any leaf-level fitting."""
+    if source is None:
+        sw,sh=next((u['source_canvas'] for u in units if u.get('source_canvas')),(width,height))
+        source={'canvas':{'width':sw,'height':sh},
+                'elements':list({e['id']:e for u in units for e in u['items']}.values())}
+    result,report=_structural_qwen_projection(elements,source,units,width,height)
+    return result,report['containers']+report['axes']+report['font_calibration']
 
 
 def _unintended_text_overlaps(elements, units):
@@ -1562,7 +1724,7 @@ def _banner_actions(units,width,height,scale,gap,banner_width=None):
             if lo>=max(12.,desired*.55):chosen=lo
         natural=_text(e,1e9,chosen)[1]
         if natural<=max_text_width:
-            e['font_size']=_fit_text(e,natural+chosen*.2,height,chosen)
+            _set_font_size(e, _fit_text(e, natural + chosen * 0.2, height, chosen))
             natural=_text(e,1e9,e['font_size'])[1]
             # Leave room for renderer/font-metric differences after the
             # cached measurement used by the layout engine.
@@ -1821,7 +1983,7 @@ def _proportional(units,width,height,sw,sh):
             if e['type']=='text':
                 original=originals[e['id']]
                 target=_target_font(original,u,desired)
-                e['font_size']=_fit_text(e,e['width'],e['height'],max(e['font_size'],target))
+                _set_font_size(e, _fit_text(e, e['width'], e['height'], max(e['font_size'], target)))
         x,y,_,_=u['bounds']; _,_,w,h=_bounds(block)
         px=(width-sw*factor)/2+x*factor; py=(height-sh*factor)/2+y*factor
         result.extend(_move(block,max(0,min(width-w,px)),max(0,min(height-h,py))))
@@ -2501,8 +2663,16 @@ def _feasible(elements, units, width, height, strict_margins=True, gap_factor=.0
         return False
     if _unintended_text_overlaps(elements,units):
         return False
-    records = [(u,_record_canvas_bounds(items,originals,canvas,width,height))
-               for u,items in _records(elements,units)]
+    records = []
+    for u,items in _records(elements,units):
+        if allow_text_visual_overlap:
+            boxes=[_text_visible_bounds(e) if e.get('type')=='text' else
+                   _record_canvas_bounds([e],originals,canvas,width,height) for e in items]
+            box=(min(b[0] for b in boxes),min(b[1] for b in boxes),
+                 max(b[2] for b in boxes),max(b[3] for b in boxes))
+        else:
+            box=_record_canvas_bounds(items,originals,canvas,width,height)
+        records.append((u,box))
     gap = min(width,height)*gap_factor
     for i,(u,b) in enumerate(records):
         if not all(isfinite(v) for v in b):
@@ -2757,6 +2927,8 @@ def _background_fit(element,source,width,height):
     source_ratio=sw/max(1.0,sh);target_ratio=float(width)/max(1.0,float(height))
     ratio_shift=max(source_ratio/target_ratio,target_ratio/source_ratio)
     asset=Path(_asset_root(element))/str(element.get('asset_id',''))
+    if not asset.is_file():
+        return element.get('fit','contain')
     if ratio_shift>=1.35 and _poster_like_background(str(asset)):
         return 'fill'
     return 'cover'
@@ -3621,7 +3793,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
                 e['width']=max(1,min(room,_text(e,1e9)[1]+e['font_size']*.02))
             else:
                 e['width']=max(1,e['width']*rng.choice((.90,1.10)))
-            e['font_size']=_fit_text(e,e['width'],height*.7,max(1,e['font_size']*rng.choice((1.,1.04))))
+            _set_font_size(e, _fit_text(e, e['width'], height * 0.7, max(1, e['font_size'] * rng.choice((1.0, 1.04)))))
             e['height']=_text(e)[0]
             _tighten_text(e)
             new_box=_bounds(proposal);new_w=new_box[2]-new_box[0]
@@ -3805,24 +3977,15 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                      if c not in shortlist)
     shortlist.extend(c for c in qwen_candidates
                      if c['name']=='qwen-source-contained-proposal' and c not in shortlist)
-    # Repeated rule spans can be outside the six lowest-energy Qwen siblings.
-    # Keep this bounded alignment candidate in the actual rendered comparison
-    # so the visual selector can judge its effect on the lockup.
-    shortlist.extend(c for c in qwen_candidates
-                     if c['name'].startswith('qwen-rule-span-aligned-')
-                     and c not in shortlist)
-    # Source-evidenced panel-centering siblings are similarly rare and must be
-    # rendered even when their geometry energy falls below the general Qwen
-    # shortlist. They correct the relationship that the source outlines encode.
-    shortlist.extend(c for c in qwen_candidates
-                     if c['name'].startswith('qwen-panel-content-centered-')
-                     and c not in shortlist)
     from engine.qwen_refine import relationship_variant
     repaired_signatures=set()
     for name in ('qwen-proposal','qwen-font-fitted','qwen-original'):
         parent=next((c for c in qwen_candidates if c['name']==name),None)
         if parent is None:continue
-        repaired,changes,error=relationship_variant(parent['elements'],units,source,width,height)
+        repaired,structure=_structural_qwen_projection(parent['elements'],source,units,width,height)
+        changes=structure['containers']+structure['font_calibration']+structure['axes']
+        before={e['id']:e for e in parent['elements']}
+        error=sum(abs(e[k]-before[e['id']][k]) for e in repaired for k in ('x','y','width','height'))/max(1.,len(repaired)*(width+height))
         signature=tuple((e['id'],*(round(float(e.get(k,0)),2)
                         for k in ('x','y','width','height','font_size'))) for e in repaired)
         if error<.006 or signature in repaired_signatures:continue
@@ -3832,7 +3995,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         repaired_signatures.add(signature)
         shortlist.append(dict(name='qwen-source-relationships-'+name.removeprefix('qwen-'),
             elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
-            variant_of=name,relationship_repairs=changes))
+            variant_of=name,relationship_repairs=changes,structure=structure))
     relationship_context=_visual_relationship_context(units,source,width,height)
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
         reference_image=None;source_under=None;source_contrast={}
@@ -3964,7 +4127,13 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     # column repair from a later sibling.
                     for repair_index,(repaired,changes) in enumerate(repairs[:3],1):
                         if sum('contrast-repaired' in c['name'] for c in shortlist)>=10:break
+                        repaired,structure=_structural_qwen_projection(
+                            repaired,source,units,width,height)
+                        if (not _feasible(repaired,units,width,height,strict_margins=False,
+                                          gap_factor=.001,allow_text_visual_overlap=True)
+                                or _unintended_text_overlaps(repaired,units)):continue
                         shortlist.append(dict(name=f"{candidate['name']}-contrast-repaired-{repair_index:02d}",
+                            structure=structure,
                             elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
                             contrast_repairs=changes,
                             readability_floor=candidate.get('readability_floor'),
@@ -4081,26 +4250,6 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                                            source_contrast=source_contrast)
         perceptual.update(fallback,used=False)
     selected=valid[perceptual['selected_index']]
-    # Centered text-and-rule stacks inside duplicated source outlines carry a
-    # strong authored alignment cue. The generic SigLIP tie-break can overlook
-    # a small horizontal drift there, so prefer a rendered, source-grounded
-    # centering sibling when it remains visually and geometrically safe.
-    centered_entries=[entry for entry in valid
-        if entry['candidate']['name'].startswith('qwen-panel-content-centered-')
-        and not entry.get('has_layout_defects')
-        and not entry.get('invisible_text')]
-    if centered_entries:
-        best_centered=min(centered_entries,key=objective_cost)
-        if (best_centered['cost']<=selected['cost']+1.0
-                and best_centered.get('layout_defect_cost',0)
-                    <=selected.get('layout_defect_cost',0)+1.0):
-            original_name=selected['candidate']['name']
-            selected=best_centered
-            perceptual['source_alignment_override']={
-                'selected':selected['candidate']['name'],
-                'replaced':original_name,
-                'reason':'source outlines and repeated horizontal rules define a centered text lockup',
-            }
     report=dict(used=True,
                 method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
                 perceptual=perceptual,qwen_primary=qwen_primary,
@@ -4264,548 +4413,6 @@ def _source_scaled_art_variant(elements,units,source,width,height):
                           width=e['width'],height=e['height'])
         changed=True
     return result if changed else None
-
-
-def _source_alignment_variant(elements,units,source,width,height,*,align_text=True,
-                              align_lines=True,panel_inset=True):
-    """Restore source-evidenced horizontal alignment inside Qwen lockups.
-
-    A frequent proposal defect is that a visual anchor is resized/reflowed,
-    while a related text stack keeps stale x coordinates. Detect compact,
-    source-aligned text stacks and align them to the corresponding current
-    decorative-rule group, symmetric image pair, or hero art. Keep text sizes
-    and y positions intact. Backed text also retains its source inset when a
-    panel has been resized.
-    """
-    from statistics import median
-
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    scale=min(float(width)/max(1.,sw),float(height)/max(1.,sh))
-    src={e['id']:e for e in source.get('elements',())}
-    cur={e['id']:e for e in elements}
-    result=deepcopy(elements);out={e['id']:e for e in result}
-    texts=[e for e in src.values() if e.get('type')=='text' and e.get('content','').strip()
-           and e['id'] in out]
-    line_items=[e for e in src.values() if e.get('type') in ('image','shape')
-                and float(e.get('width',0))>=max(8.,float(e.get('height',0))*8)
-                and float(e.get('width',0))<=.5*sw and e['id'] in out]
-    if align_text and len(texts)>=2:
-        centers={e['id']:float(e['x'])+float(e['width'])/2 for e in texts}
-        groups=[]
-        for seed in texts:
-            members=[e for e in texts if abs(centers[e['id']]-centers[seed['id']])<=.07*sw]
-            ids=frozenset(e['id'] for e in members)
-            if len(ids)>=2 and ids not in groups:groups.append(ids)
-        image_units=[u for u in units if u.get('items') and
-                     all(e.get('type')=='image' for e in u['items']) and
-                     not u.get('backed_ids') and not u.get('backed_by_ids')]
-        for ids in groups:
-            members=[e for e in texts if e['id'] in ids]
-            stack_center=median(centers[e['id']] for e in members)
-            stack_top=min(float(e['y']) for e in members)
-            stack_bottom=max(float(e['y'])+float(e['height']) for e in members)
-            anchors=[]
-            # A cluster of horizontal rules is a strong source alignment cue.
-            nearby=[e for e in line_items if abs(
-                float(e['x'])+float(e['width'])/2-stack_center)<=.10*sw
-                and float(e['y'])>=stack_top-.22*sh
-                and float(e['y'])<=stack_bottom+.22*sh]
-            if len(nearby)>=2:
-                source_center=median(float(e['x'])+float(e['width'])/2 for e in nearby)
-                current_center=median(float(out[e['id']]['x'])+
-                                      float(out[e['id']]['width'])/2 for e in nearby)
-                anchors.append((abs(source_center-stack_center),source_center,current_center))
-            # A symmetric pair of small illustrations often brackets a title
-            # or price. Preserve the source offset from the pair's midpoint.
-            for i,a in enumerate(image_units):
-                ai=[src.get(e['id']) for e in a['items']]
-                ai=[e for e in ai if e]
-                if not ai:continue
-                ab=(min(e['x'] for e in ai),min(e['y'] for e in ai),
-                    max(e['x']+e['width'] for e in ai),max(e['y']+e['height'] for e in ai))
-                if (ab[2]-ab[0])>.22*sw or (ab[3]-ab[1])>.25*sh:continue
-                for b in image_units[i+1:]:
-                    bi=[src.get(e['id']) for e in b['items']];bi=[e for e in bi if e]
-                    if not bi:continue
-                    bb=(min(e['x'] for e in bi),min(e['y'] for e in bi),
-                        max(e['x']+e['width'] for e in bi),max(e['y']+e['height'] for e in bi))
-                    if abs((ab[1]+ab[3]-bb[1]-bb[3])/2)>.12*sh:continue
-                    pair_center=((ab[0]+ab[2])+(bb[0]+bb[2]))/4
-                    if abs(pair_center-stack_center)>.08*sw:continue
-                    out_ids=[e['id'] for e in a['items']+b['items'] if e['id'] in out]
-                    if not out_ids:continue
-                    current_boxes=[_bounds([out[eid]]) for eid in out_ids]
-                    current_center=(min(bx[0] for bx in current_boxes)+
-                                    max(bx[2] for bx in current_boxes))/2
-                    anchors.append((abs(pair_center-stack_center),pair_center,current_center))
-            # Large, unboxed artwork can anchor a centered title stack.
-            for unit in image_units:
-                si=[src.get(e['id']) for e in unit['items']];si=[e for e in si if e]
-                if not si:continue
-                sb=(min(e['x'] for e in si),min(e['y'] for e in si),
-                    max(e['x']+e['width'] for e in si),max(e['y']+e['height'] for e in si))
-                share=(sb[2]-sb[0])*(sb[3]-sb[1])/max(1.,sw*sh)
-                if share<.06 or abs((sb[0]+sb[2])/2-stack_center)>.065*sw:continue
-                out_ids=[e['id'] for e in unit['items'] if e['id'] in out]
-                if not out_ids:continue
-                cb=[_bounds([out[eid]]) for eid in out_ids]
-                current_center=(min(b[0] for b in cb)+max(b[2] for b in cb))/2
-                anchors.append((abs((sb[0]+sb[2])/2-stack_center),
-                                (sb[0]+sb[2])/2,current_center))
-            if anchors:
-                _,source_anchor,current_anchor=min(anchors,key=lambda a:a[0])
-                desired_center=current_anchor+(stack_center-source_anchor)*scale
-                for e in members:
-                    target=out[e['id']]
-                    desired=desired_center+(centers[e['id']]-stack_center)*scale
-                    dx=desired-(float(target['x'])+float(target['width'])/2)
-                    if abs(dx)<=.025*width or abs(dx)>.24*width:continue
-                    target['x']+=dx
-    # Preserve short rule-to-copy alignment as a separate relation. The rule
-    # is the lighter visual element, so a modest correction moves it toward
-    # the text rather than displacing an otherwise well placed text line.
-    for line in (line_items if align_lines and len(texts)>=2 else ()):
-        for text in texts:
-            old_line=src[line['id']];old_text=src[text['id']]
-            vertical_gap=max(0.,float(old_line['y'])-(float(old_text['y'])+float(old_text['height'])),
-                             float(old_text['y'])-(float(old_line['y'])+float(old_line['height'])))
-            if vertical_gap>.13*sh:continue
-            left_delta=float(old_text['x'])-float(old_line['x'])
-            center_delta=(float(old_text['x'])+float(old_text['width'])/2-
-                          float(old_line['x'])-float(old_line['width'])/2)
-            relation=('left' if abs(left_delta)<=abs(center_delta) else 'center')
-            source_error=abs(left_delta if relation=='left' else center_delta)
-            if source_error>.025*sw:continue
-            now_line=out[line['id']];now_text=out[text['id']]
-            desired=(float(now_text['x'])-left_delta*scale if relation=='left' else
-                     float(now_text['x'])+float(now_text['width'])/2-
-                     float(now_line['width'])/2-center_delta*scale)
-            dx=desired-float(now_line['x'])
-            if .004*width<abs(dx)<.08*width:
-                now_line['x']+=dx
-                break
-    # For text explicitly backed by a card/frame, preserve its authored inset
-    # from the panel when the panel changes size. Do not move text that still
-    # has that inset already.
-    for unit in (units if panel_inset else ()):
-        if not unit.get('backing_panel') or not unit.get('backed_ids'):continue
-        panel=next((e for e in unit.get('items',()) if e.get('type') in ('shape','image')),
-                   None)
-        if panel is None or panel['id'] not in out or panel['id'] not in src:continue
-        old,new=src[panel['id']],out[panel['id']]
-        sx=float(new['width'])/max(1.,float(old['width']))
-        sy=float(new['height'])/max(1.,float(old['height']))
-        backed=[eid for eid in unit['backed_ids'] if eid in src and eid in out
-                and src[eid].get('type')=='text' and src[eid].get('content','').strip()]
-        if not backed:continue
-        # The largest backed text is the heading; moving that row slightly
-        # clears the frame while leaving the other copy and its hierarchy put.
-        eid=max(backed,key=lambda key:float(src[key].get('font_size',1.)))
-        before,after=src[eid],out[eid]
-        expected_y=float(new['y'])+(float(before['y'])-float(old['y']))*sy
-        dy=expected_y-float(after['y'])
-        if abs(dy)<=.035*height:
-            after['y']+=.6*dy
-    return result if result!=elements else None
-
-
-def _source_rule_span_variant(elements,source,width,height):
-    """Extend repeated source-aligned rules to frame nearby display text.
-
-    This only touches clear groups of three or more similarly placed rules.
-    If Qwen keeps their shared geometry but makes the whole group visibly
-    narrower than the nearby display copy, the candidate widens the rules
-    toward the measured glyph width while retaining their source left edge.
-    """
-    from statistics import median
-
-    src={e['id']:e for e in source.get('elements',())}
-    result=deepcopy(elements);out={e['id']:e for e in result}
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    line_items=[e for e in src.values() if e.get('type') in ('image','shape')
-                and e['id'] in out and float(e.get('height',0))>0
-                and float(e.get('width',0))>=max(8.,float(e.get('height',0))*8)
-                and .08*sw<=float(e['width'])<=.55*sw]
-    groups=[]
-    for seed in line_items:
-        members=[e for e in line_items
-                 if abs(float(e['x'])-float(seed['x']))<=.02*sw
-                 and abs(float(e['width'])-float(seed['width']))<=.025*sw]
-        ids=frozenset(e['id'] for e in members)
-        if len(ids)>=3 and ids not in groups:groups.append(ids)
-    changed=False
-    for ids in groups:
-        members=[src[eid] for eid in ids]
-        sx0=median(float(e['x']) for e in members)
-        source_width=median(float(e['width']) for e in members)
-        sy0=min(float(e['y']) for e in members)
-        sy1=max(float(e['y'])+float(e['height']) for e in members)
-        source_cx=sx0+source_width/2
-        related=[]
-        for text in src.values():
-            if text.get('type')!='text' or not text.get('content','').strip():continue
-            if text['id'] not in out:continue
-            text_cx=float(text['x'])+float(text['width'])/2
-            ty0=float(text['y']);ty1=ty0+float(text['height'])
-            vertical_gap=max(0.,sy0-ty1,ty0-sy1)
-            if abs(text_cx-source_cx)>.12*sw or vertical_gap>.16*sh:continue
-            related.append(text)
-        if not related:continue
-        primary=max(related,key=lambda e:_text_info(e)[1])
-        current_text=out[primary['id']]
-        glyph_width=_text_info(current_text,current_text['width'],
-                               current_text['font_size'])[1]
-        if glyph_width<=1:continue
-        current_lines=[out[eid] for eid in ids]
-        current_width=median(float(e['width']) for e in current_lines)
-        desired_width=min(.5*float(width),.96*glyph_width)
-        # Keep the repair to modest frame corrections and skip a source group
-        # that Qwen already sized close to the measured text.
-        if (desired_width<=current_width*1.02
-                or desired_width>current_width+.12*float(width)):
-            continue
-        source_left_delta=float(primary['x'])-sx0
-        scale=float(current_text['width'])/max(1.,float(primary['width']))
-        desired_x=float(current_text['x'])-source_left_delta*scale
-        if desired_x<0 or desired_x+desired_width>float(width):continue
-        for line in current_lines:
-            line.update(x=desired_x,width=desired_width)
-            changed=True
-    return result if changed else None
-
-
-def _source_panel_center_variant(elements,source,width,height):
-    """Center source-evidenced panel contents inside a duplicated outline.
-
-    Some designs encode an outline as two nearly coincident raster layers.
-    When their shared frame is clear and contains a compact text/decorative
-    lockup, keep that lockup centered in the *current* frame. This corrects a
-    common Qwen drift while preserving each child's scale and local spacing.
-    """
-    src={e['id']:e for e in source.get('elements',())}
-    out={e['id']:e for e in elements}
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    frames=[e for e in src.values() if e.get('type') in ('image','shape')
-            and e['id'] in out and .18*sw<=float(e.get('width',0))<=.82*sw
-            and .22*sh<=float(e.get('height',0))<=.94*sh]
-    pairs=[]
-    for i,a in enumerate(frames):
-        ab=(float(a['x']),float(a['y']),float(a['x'])+float(a['width']),
-            float(a['y'])+float(a['height']))
-        aa=max(1.,(ab[2]-ab[0])*(ab[3]-ab[1]))
-        for b in frames[i+1:]:
-            if a.get('type')!=b.get('type'):continue
-            bb=(float(b['x']),float(b['y']),float(b['x'])+float(b['width']),
-                float(b['y'])+float(b['height']))
-            ba=max(1.,(bb[2]-bb[0])*(bb[3]-bb[1]))
-            overlap=_overlap(ab,bb)/min(aa,ba)
-            if overlap<.88:continue
-            if (abs((ab[0]+ab[2]-bb[0]-bb[2])/2)>.035*sw
-                    or abs((ab[1]+ab[3]-bb[1]-bb[3])/2)>.035*sh
-                    or abs(aa-ba)/max(aa,ba)>.12):continue
-            pairs.append((overlap*min(aa,ba),a,b,ab,bb))
-    if not pairs:return None
-    # Prefer the largest clear double-outline, which is unlikely to be a
-    # repeated icon or superscript elsewhere in the design.
-    _,a,b,ab,bb=max(pairs,key=lambda pair:pair[0])
-    panel=(min(ab[0],bb[0]),min(ab[1],bb[1]),
-           max(ab[2],bb[2]),max(ab[3],bb[3]))
-    source_center=((panel[0]+panel[2])/2,(panel[1]+panel[3])/2)
-    frame_ids={a['id'],b['id']}
-    z_floor=max(float(a.get('z_index',0)),float(b.get('z_index',0)))
-    inset_x=.025*(panel[2]-panel[0]);inset_y=.025*(panel[3]-panel[1])
-    child_ids=[]
-    for e in src.values():
-        if e['id'] in frame_ids or e['id'] not in out:
-            continue
-        if float(e.get('z_index',0))<=z_floor:
-            continue
-        box=(float(e['x']),float(e['y']),float(e['x'])+float(e['width']),
-             float(e['y'])+float(e['height']))
-        if (box[0]>=panel[0]+inset_x and box[1]>=panel[1]+inset_y
-                and box[2]<=panel[2]-inset_x and box[3]<=panel[3]-inset_y):
-            child_ids.append(e['id'])
-    if len(child_ids)<2:return None
-    source_text=[src[eid] for eid in child_ids if src[eid].get('type')=='text'
-                 and src[eid].get('content','').strip()]
-    source_rules=[src[eid] for eid in child_ids
-                  if src[eid].get('type') in ('image','shape')
-                  and float(src[eid].get('height',0))>0
-                  and float(src[eid].get('width',0))>=8*float(src[eid]['height'])]
-    # Do not impose centered alignment on ordinary left-aligned cards. Require
-    # both a text stack and repeated horizontal rules whose source geometry
-    # already signals a centered decorative lockup.
-    if len(source_text)<2 or len(source_rules)<3:return None
-    from statistics import median
-    source_text_center=median(float(e['x'])+float(e['width'])/2 for e in source_text)
-    source_rule_center=median(float(e['x'])+float(e['width'])/2 for e in source_rules)
-    panel_width=panel[2]-panel[0]
-    if (abs(source_text_center-source_center[0])>.06*panel_width
-            or abs(source_rule_center-source_center[0])>.06*panel_width):
-        return None
-    current_frames=[out[eid] for eid in frame_ids]
-    frame_center=sum(float(e['x'])+float(e['width'])/2 for e in current_frames)/len(current_frames)
-    if not 0<=frame_center<=width:return None
-    child_centers=[]
-    for eid in child_ids:
-        e=out[eid]
-        visual=(_text_visible_bounds(e) if e.get('type')=='text'
-                else _bounds([e]))
-        child_centers.append((visual[0]+visual[2])/2)
-    content_center=median(child_centers)
-    dx=frame_center-content_center
-    frame_width=sum(float(e['width']) for e in current_frames)/len(current_frames)
-    if abs(dx)<=max(1.5,.006*frame_width) or abs(dx)>.12*frame_width:
-        return None
-    result=deepcopy(elements);result_by={e['id']:e for e in result}
-    for eid in child_ids:
-        result_by[eid]['x']+=dx
-    return result
-
-
-def _source_side_flourish_center_variant(elements,source,width,height):
-    """Align paired mini-rules to the long rules enclosing their label.
-
-    The short ornaments are a two-sided part of a rule lockup: each side starts
-    or ends at the same vertical edge as the long separators. Centering the
-    ornaments as one span loses that authored relationship after resizing.
-    """
-    src={e['id']:e for e in source.get('elements',())}
-    out={e['id']:e for e in elements}
-    line_assets=[e for e in src.values() if e.get('id') in out
-           and e.get('type') in ('image','shape') and float(e.get('height',0))>0
-           and float(e.get('width',0))>=3.5*float(e['height'])
-           and float(e.get('height',0))<=.025*float(source['canvas']['height'])]
-    rules=[e for e in line_assets
-           if float(e['width'])<=.12*float(source['canvas']['width'])]
-    texts=[e for e in src.values() if e.get('id') in out and e.get('type')=='text'
-           and e.get('content','').strip()]
-    if len(rules)<6 or not texts:return None
-    best=None
-    for text in texts:
-        tc=float(text['x'])+float(text['width'])/2
-        ty=float(text['y'])+float(text['height'])/2
-        nearby=[r for r in rules if abs((float(r['y'])+float(r['height'])/2)-ty)
-                <=max(.08*float(source['canvas']['height']),.8*float(text['height']))]
-        left=[r for r in nearby if float(r['x'])+float(r['width'])/2<tc]
-        right=[r for r in nearby if float(r['x'])+float(r['width'])/2>tc]
-        if len(left)<3 or len(right)<3:continue
-        # Use the nearest three rules on each side so other dividers in the
-        # lockup do not get pulled into this local ornament.
-        left=sorted(left,key=lambda r:abs(tc-(float(r['x'])+float(r['width'])/2)))[:3]
-        right=sorted(right,key=lambda r:abs(tc-(float(r['x'])+float(r['width'])/2)))[:3]
-        ornament=left+right
-        # Find two long separators with matching spans that bracket the text.
-        long_rules=[r for r in line_assets if float(r['width'])>=.15*float(source['canvas']['width'])
-                    and float(r['height'])<=.012*float(source['canvas']['height'])]
-        enclosing=[]
-        for upper in long_rules:
-            uy=float(upper['y'])+float(upper['height'])/2
-            if uy>=ty:continue
-            for lower in long_rules:
-                ly=float(lower['y'])+float(lower['height'])/2
-                if ly<=ty or abs(float(upper['x'])-float(lower['x']))>.02*float(source['canvas']['width']):continue
-                if abs(float(upper['width'])-float(lower['width']))>.035*float(upper['width']):continue
-                if (uy<=float(text['y'])+float(text['height'])
-                        and ly>=float(text['y'])):
-                    enclosing.append((ly-uy,upper,lower))
-        if not enclosing:continue
-        _,upper,lower=min(enclosing,key=lambda pair:pair[0])
-        # Require the source's paired rules to use the separator endpoints.
-        source_left=float(upper['x'])
-        source_right=float(upper['x'])+float(upper['width'])
-        if min(float(r['x']) for r in left)>source_left+.03*float(source['canvas']['width']):continue
-        if max(float(r['x'])+float(r['width']) for r in right)<source_right-.03*float(source['canvas']['width']):continue
-        separator_mid=((float(upper['y'])+float(upper['height'])/2)
-                       +(float(lower['y'])+float(lower['height'])/2))/2
-        score=(abs(tc-(float(upper['x'])+float(upper['width'])/2))
-               +abs(ty-separator_mid))
-        if best is None or score<best[0]:best=(score,text,ornament,upper,lower,left,right)
-    if best is None:return None
-    _,text,ornament,upper,lower,left,right=best
-    result=deepcopy(elements);by_id={e['id']:e for e in result}
-    current_upper=by_id[upper['id']];current_lower=by_id[lower['id']]
-    line_left=(float(current_upper['x'])+float(current_lower['x']))/2
-    line_right=(float(current_upper['x'])+float(current_upper['width'])
-                +float(current_lower['x'])+float(current_lower['width']))/2
-    label=by_id[text['id']]
-    label_center=(float(label['y'])+float(label['height'])/2)
-    separator_mid=((float(current_upper['y'])+float(current_upper['height'])/2)
-                   +(float(current_lower['y'])+float(current_lower['height'])/2))/2
-    # Preserve the visible gap while placing the label midway between rules.
-    dy=separator_mid-label_center
-    if abs(dy)>.05*float(height):return None
-    label['y']=float(label['y'])+dy
-    for r in ornament:
-        item=by_id[r['id']]
-        target_x=(line_left if r in left else line_right-float(item['width']))
-        if target_x<0 or target_x+float(item['width'])>width:return None
-        item['x']=target_x
-    return result
-
-
-def _source_centered_copy_group_variant(elements,source,width,height):
-    """Move a source-centered copy group and its small ornaments as one unit."""
-    src={e['id']:e for e in source.get('elements',())}
-    out={e['id']:e for e in elements}
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    labels=[e for e in src.values() if e.get('type')=='text' and e['id'] in out
-            and e.get('content','').strip() and e.get('text_align')=='center'
-            and min(abs(float(e.get('rotation',0))%360),
-                    abs(float(e.get('rotation',0))%360-360))<=12]
-    best=None
-    for seed in labels:
-        cx=float(seed['x'])+float(seed['width'])/2
-        group=[e for e in labels if abs(float(e['x'])+float(e['width'])/2-cx)<=.035*sw]
-        if len(group)<2:continue
-        sb=(min(float(e['x']) for e in group),min(float(e['y']) for e in group),
-            max(float(e['x'])+float(e['width']) for e in group),
-            max(float(e['y'])+float(e['height']) for e in group))
-        scx=(sb[0]+sb[2])/2;scy=(sb[1]+sb[3])/2
-        # Only recenter groups whose authored source position is itself close
-        # to the canvas center. Side columns and panel copy remain anchored.
-        if abs(scx-sw/2)>.08*sw:continue
-        if best is None or len(group)>len(best[0]):best=(group,sb)
-    if best is None:return None
-    group,sb=best;ids={e['id'] for e in group}
-    cx=(sb[0]+sb[2])/2;cy=(sb[1]+sb[3])/2
-    # Attach nearby decorative flourishes and non-background art by their
-    # source centers, so moving the copy never separates its authored lockup.
-    for e in src.values():
-        if e['id'] in ids or e['id'] not in out or e.get('type') not in ('image','shape'):continue
-        ew=float(e.get('width',0));eh=float(e.get('height',0))
-        if ew>=.9*sw and eh>=.9*sh:continue
-        ecx=float(e['x'])+ew/2;ecy=float(e['y'])+eh/2
-        if abs(ecx-cx)<=.035*sw and abs(ecy-cy)<=.18*sh:
-            ids.add(e['id'])
-    result=deepcopy(elements);by_id={e['id']:e for e in result}
-    # Source-centered text and attachments share one horizontal axis. Correct
-    # each member's drift first, then translate the complete lockup vertically
-    # as one unit; its shared horizontal axis is now the canvas centerline.
-    aligned=False
-    for eid in ids:
-        item=by_id[eid]
-        shift=width/2-(float(item['x'])+float(item['width'])/2)
-        aligned=aligned or abs(shift)>1.5
-        item['x']+=shift
-    bs=[]
-    for eid in ids:
-        e=by_id[eid]
-        if e.get('type')=='text':bs.append(_text_visible_bounds(e))
-        else:bs.append((float(e['x']),float(e['y']),float(e['x'])+float(e['width']),float(e['y'])+float(e['height'])))
-    cb=(min(b[0] for b in bs),min(b[1] for b in bs),max(b[2] for b in bs),max(b[3] for b in bs))
-    dy=height/2-(cb[1]+cb[3])/2
-    if abs(dy)/max(1.,height)<.006 and not aligned:return None
-    for eid in ids:by_id[eid]['y']+=dy
-    return result
-
-
-def _source_panel_child_gutters_variant(elements,units,source,width,height):
-    """Keep a panel's complete child lockup within the source's panel gutters."""
-    src={e['id']:e for e in source.get('elements',())};out={e['id']:e for e in elements}
-    for unit in units:
-        if not unit.get('backing_panel') or not unit.get('backed_ids'):continue
-        panel=next((e for e in unit.get('items',()) if e.get('type')=='image'
-                    and e['id'] in src and e['id'] in out),None)
-        if panel is None:continue
-        p=src[panel['id']];now=out[panel['id']]
-        kids=[src[eid] for eid in unit['backed_ids'] if eid in src and eid in out]
-        if len(kids)<2:continue
-        pb=(float(p['x']),float(p['y']),float(p['x'])+float(p['width']),float(p['y'])+float(p['height']))
-        cb=(min(float(e['x']) for e in kids),min(float(e['y']) for e in kids),
-            max(float(e['x'])+float(e['width']) for e in kids),
-            max(float(e['y'])+float(e['height']) for e in kids))
-        # Use source padding as a minimum safe inset, then apply one uniform
-        # scale to every child around the panel center to preserve the lockup.
-        source_margins=(max(0.,cb[0]-pb[0]),max(0.,cb[1]-pb[1]),
-                        max(0.,pb[2]-cb[2]),max(0.,pb[3]-cb[3]))
-        sx=float(now['width'])/max(1.,float(p['width']));sy=float(now['height'])/max(1.,float(p['height']))
-        req=(max(.008*float(now['width']),source_margins[0]*sx),
-             max(.008*float(now['height']),source_margins[1]*sy),
-             max(.008*float(now['width']),source_margins[2]*sx),
-             max(.008*float(now['height']),source_margins[3]*sy))
-        current=(float(now['x']),float(now['y']),float(now['x'])+float(now['width']),float(now['y'])+float(now['height']))
-        child=[]
-        for e in kids:
-            item=out[e['id']]
-            child.append(_text_visible_bounds(item) if item.get('type')=='text'
-                         else (float(item['x']),float(item['y']),float(item['x'])+float(item['width']),float(item['y'])+float(item['height'])))
-        cbnow=(min(b[0] for b in child),min(b[1] for b in child),max(b[2] for b in child),max(b[3] for b in child))
-        cx=float(now['x'])+float(now['width'])/2;cy=float(now['y'])+float(now['height'])/2
-        limits=[1.]
-        if cbnow[0]<cx:limits.append((cx-(float(now['x'])+req[0]))/(cx-cbnow[0]))
-        if cbnow[2]>cx:limits.append((float(now['x'])+float(now['width'])-req[2]-cx)/(cbnow[2]-cx))
-        if cbnow[1]<cy:limits.append((cy-(float(now['y'])+req[1]))/(cy-cbnow[1]))
-        if cbnow[3]>cy:limits.append((float(now['y'])+float(now['height'])-req[3]-cy)/(cbnow[3]-cy))
-        scale=max(.01,min(limits))
-        if scale>=.995:continue
-        result=deepcopy(elements);by_id={e['id']:e for e in result}
-        for src_kid in kids:
-            item=by_id[src_kid['id']];x,y,w,h=map(float,(item['x'],item['y'],item['width'],item['height']))
-            item.update(x=cx+(x-cx)*scale,y=cy+(y-cy)*scale,width=w*scale,height=h*scale)
-            if item.get('type')=='text' and item.get('font_size') is not None:
-                item['font_size']=max(1.,float(item['font_size'])*scale)
-        return result
-    return None
-
-
-def _source_panel_margin_variant(elements,source,width,height):
-    """Restore source canvas gutters around an inset foreground panel.
-
-    When a full-bleed source background sits behind a wide, inset raster panel,
-    retain that panel's source-relative horizontal footprint after resize. Move
-    and scale only the panel and text that were contained by it in the source.
-    Full-bleed artwork and unrelated foreground elements are left alone.
-    """
-    src={e['id']:e for e in source.get('elements',())}
-    out={e['id']:e for e in elements}
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    backgrounds=[e for e in src.values() if e.get('type')=='image'
-                 and float(e.get('x',0))<=.02*sw and float(e.get('y',0))<=.02*sh
-                 and float(e.get('x',0))+float(e.get('width',0))>=.98*sw
-                 and float(e.get('y',0))+float(e.get('height',0))>=.98*sh]
-    if not backgrounds:return None
-    panels=[]
-    for panel in src.values():
-        if panel.get('type')!='image' or panel['id'] not in out or panel in backgrounds:continue
-        px,py,pw,ph=map(float,(panel.get('x',0),panel.get('y',0),panel.get('width',0),panel.get('height',0)))
-        if (pw<.4*sw or pw>.88*sw or ph<.14*sh or ph>.85*sh
-                or pw/max(1.,ph)<1.5 or px<.06*sw or px+pw>.94*sw):continue
-        # The source must visibly reserve space on both sides of the panel.
-        source_scale=pw/sw
-        if source_scale>.84:continue
-        contained=[]
-        for e in src.values():
-            if e['id']==panel['id'] or e['id'] in {b['id'] for b in backgrounds} or e['id'] not in out:
-                continue
-            if float(e.get('z_index',0))<=float(panel.get('z_index',0)):continue
-            box=(float(e.get('x',0)),float(e.get('y',0)),
-                 float(e.get('x',0))+float(e.get('width',0)),
-                 float(e.get('y',0))+float(e.get('height',0)))
-            overlap=_overlap(box,(px,py,px+pw,py+ph))/max(1.,float(e.get('width',0))*float(e.get('height',0)))
-            if e.get('type')=='text' and overlap>=.68:contained.append(e)
-        if len(contained)<2:continue
-        current=out[panel['id']]
-        if float(current.get('width',0))/max(1.,width)<.92:continue
-        panels.append((panel,contained))
-    if len(panels)!=1:return None
-    panel,contained=panels[0]
-    current=out[panel['id']]
-    scale=min(1.,(float(panel['width'])/sw)/(float(current['width'])/width))
-    if scale>=.92:return None
-    cx=float(current['x'])+float(current['width'])/2
-    cy=float(current['y'])+float(current['height'])/2
-    ids={panel['id'],*(e['id'] for e in contained)}
-    result=deepcopy(elements);by_id={e['id']:e for e in result}
-    for eid in ids:
-        item=by_id[eid]
-        x,y,w,h=map(float,(item['x'],item['y'],item['width'],item['height']))
-        ncx=cx+(x+w/2-cx)*scale; ncy=cy+(y+h/2-cy)*scale
-        nw,nh=w*scale,h*scale
-        item.update(x=ncx-nw/2,y=ncy-nh/2,width=nw,height=nh)
-        if item.get('type')=='text' and item.get('font_size') is not None:
-            item['font_size']=max(1.,float(item['font_size'])*scale)
-    return result
 
 
 def _rotation_candidate_variants(elements,units,width,height,limit=6):
@@ -5350,9 +4957,13 @@ def _adapt_with_diagnostics(source,target_canvas):
         u['perceptual']=context
         u['font_gamma']=min(1.,.65+.7*desired)
     seeds=[dict(name='proportional',elements=_proportional(units,width,height,sw,sh))]
+    from engine.qwen_refine import build_container_tree
+    container_tree=build_container_tree(source,units)
     qwen_status = 'disabled (set MAGICANVAS_QWEN_ENABLED=1 to enable)'
     qwen_diagnostics = dict(status=qwen_status, proposal_received=False,
-                            constraint_feasible=False, optimized=False)
+                            constraint_feasible=False, optimized=False,
+                            structural_pass_version=1,
+                            container_tree={k:v for k,v in container_tree.items() if k!='source_elements'})
     if os.environ.get('MAGICANVAS_QWEN_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
         try:
             from engine.qwen_seed import generate_seed
@@ -5387,21 +4998,6 @@ def _adapt_with_diagnostics(source,target_canvas):
                 qwen_diagnostics['post_anchor_text_separations']=post_anchor_changes
                 qwen_diagnostics['post_anchor_unit_separations']=post_anchor_unit_changes
                 seeds.append(dict(name='qwen-proposal', elements=proposal))
-                rule_aligned=_source_alignment_variant(
-                    proposal,units,source,width,height,
-                    align_text=False,align_lines=True,panel_inset=False)
-                if rule_aligned is not None:
-                    before={e['id']:e for e in proposal}
-                    changed=[e for e in rule_aligned if any(
-                        abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
-                        for k in ('x','y','width','height'))]
-                    if (changed and all(e['x']>=0 and e['y']>=0
-                            and e['x']+e['width']<=width+1e-5
-                            and e['y']+e['height']<=height+1e-5 for e in changed)
-                            and not (set(_unintended_text_overlaps(rule_aligned,units))-
-                                     set(_unintended_text_overlaps(proposal,units)))):
-                        seeds.append(dict(name='qwen-rule-aligned-proposal',
-                                          elements=rule_aligned))
                 contained_candidate,contained_ids=_preserve_backed_containment(
                     proposal,units,width,height)
                 if (contained_ids and contained_candidate!=proposal
@@ -5637,139 +5233,16 @@ def _adapt_with_diagnostics(source,target_canvas):
                     energy=_energy(readable_candidate,units,source,width,height,desired),
                     variant_of=parent['name'],readability_floor=floor,
                     readability_floor_met=minimum_font>=floor-1e-4))
-                if is_qwen:
-                    frame_clearance=_source_alignment_variant(
-                        readable_candidate,units,source,width,height,
-                        align_text=False,align_lines=False,panel_inset=True)
-                    if (frame_clearance is not None and _feasible(
-                            frame_clearance,units,width,height,strict_margins=False,
-                            gap_factor=.004,allow_text_visual_overlap=True)
-                            and not set(_unintended_text_overlaps(frame_clearance,units))-
-                                       set(_unintended_text_overlaps(readable_candidate,units))):
-                        exploratory.append(dict(
-                            name='qwen-source-frame-clearance-'+label,
-                            elements=frame_clearance,
-                            energy=_energy(frame_clearance,units,source,width,height,desired),
-                            variant_of=name,readability_floor=floor,
-                            readability_floor_met=minimum_font>=floor-1e-4))
         if is_qwen:
-            aligned=_source_alignment_variant(parent['elements'],units,source,width,height)
-            if aligned is not None and _feasible(
-                    aligned,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                if not set(_unintended_text_overlaps(aligned,units))-set(
-                        _unintended_text_overlaps(parent['elements'],units)):
-                    name='qwen-source-aligned-'+label
-                    exploratory.append(dict(name=name,elements=aligned,
-                        energy=_energy(aligned,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            rule_aligned=_source_alignment_variant(
-                parent['elements'],units,source,width,height,
-                align_text=False,align_lines=True,panel_inset=False)
-            if rule_aligned is not None:
-                before={e['id']:e for e in parent['elements']}
-                changed=[e for e in rule_aligned if any(
-                    abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
-                    for k in ('x','y','width','height'))]
-                changed_in_bounds=all(
-                    e['x']>=0 and e['y']>=0 and e['x']+e['width']<=width+1e-5
-                    and e['y']+e['height']<=height+1e-5 for e in changed)
-                no_new_text_overlaps=not (set(_unintended_text_overlaps(rule_aligned,units))-
-                                          set(_unintended_text_overlaps(parent['elements'],units)))
-                if changed and changed_in_bounds and no_new_text_overlaps:
-                    exploratory.append(dict(name='qwen-rule-aligned-'+label,
-                        elements=rule_aligned,
-                        energy=_energy(rule_aligned,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            rule_span_aligned=_source_rule_span_variant(
-                parent['elements'],source,width,height)
-            if rule_span_aligned is not None and _feasible(
-                    rule_span_aligned,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                before={e['id']:e for e in parent['elements']}
-                changed=[e for e in rule_span_aligned if any(
-                    abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>1e-5
-                    for k in ('x','y','width','height'))]
-                changed_in_bounds=all(
-                    e['x']>=0 and e['y']>=0 and e['x']+e['width']<=width+1e-5
-                    and e['y']+e['height']<=height+1e-5 for e in changed)
-                no_new_text_overlaps=not (set(_unintended_text_overlaps(
-                    rule_span_aligned,units))-set(_unintended_text_overlaps(
-                    parent['elements'],units)))
-                if changed and changed_in_bounds and no_new_text_overlaps:
-                    exploratory.append(dict(name='qwen-rule-span-aligned-'+label,
-                        elements=rule_span_aligned,
-                        energy=_energy(rule_span_aligned,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            side_flourish=_source_side_flourish_center_variant(
-                parent['elements'],source,width,height)
-            if side_flourish is not None and _feasible(
-                    side_flourish,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                if not (set(_unintended_text_overlaps(side_flourish,units))-
-                        set(_unintended_text_overlaps(parent['elements'],units))):
-                    exploratory.append(dict(name='qwen-side-flourish-centered-'+label,
-                        elements=side_flourish,
-                        energy=_energy(side_flourish,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            panel_margins=_source_panel_margin_variant(
-                parent['elements'],source,width,height)
-            if panel_margins is not None and _feasible(
-                    panel_margins,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                if not (set(_unintended_text_overlaps(panel_margins,units))-
-                        set(_unintended_text_overlaps(parent['elements'],units))):
-                    exploratory.append(dict(name='qwen-source-panel-gutters-'+label,
-                        elements=panel_margins,
-                        energy=_energy(panel_margins,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            panel_inset=_source_alignment_variant(
-                parent['elements'],units,source,width,height,
-                align_text=False,align_lines=False,panel_inset=True)
-            if panel_inset is not None and _feasible(
-                    panel_inset,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                exploratory.append(dict(name='qwen-panel-inset-'+label,
-                    elements=panel_inset,
-                    energy=_energy(panel_inset,units,source,width,height,desired),
+            structured,structure=_structural_qwen_projection(
+                parent['elements'],source,units,width,height,container_tree)
+            if (_feasible(structured,units,width,height,strict_margins=False,
+                          gap_factor=.001,allow_text_visual_overlap=True)
+                    and not _unintended_text_overlaps(structured,units)):
+                exploratory.append(dict(name='qwen-container-projected-'+label,
+                    elements=structured,structure=structure,
+                    energy=_energy(structured,units,source,width,height,desired),
                     variant_of=parent['name']))
-            panel_centered=_source_panel_center_variant(
-                parent['elements'],source,width,height)
-            if panel_centered is not None and _feasible(
-                    panel_centered,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                no_new_text_overlaps=not (set(_unintended_text_overlaps(
-                    panel_centered,units))-set(_unintended_text_overlaps(
-                    parent['elements'],units)))
-                if no_new_text_overlaps:
-                    exploratory.append(dict(
-                        name='qwen-panel-content-centered-'+label,
-                        elements=panel_centered,
-                        energy=_energy(panel_centered,units,source,width,height,desired),
-                        variant_of=parent['name']))
-            source_scaled=_source_scaled_art_variant(
-                parent['elements'],units,source,width,height)
-            if source_scaled is not None and _feasible(
-                    source_scaled,units,width,height,strict_margins=False,
-                    gap_factor=.004,allow_text_visual_overlap=True):
-                if not set(_unintended_text_overlaps(source_scaled,units))-set(
-                        _unintended_text_overlaps(parent['elements'],units)):
-                    name='qwen-source-scaled-art-'+label
-                    exploratory.append(dict(name=name,elements=source_scaled,
-                        energy=_energy(source_scaled,units,source,width,height,desired),
-                        variant_of=parent['name']))
-                    aligned_scaled=_source_alignment_variant(
-                        source_scaled,units,source,width,height)
-                    if aligned_scaled is not None and _feasible(
-                            aligned_scaled,units,width,height,strict_margins=False,
-                            gap_factor=.004,allow_text_visual_overlap=True):
-                        if not set(_unintended_text_overlaps(aligned_scaled,units))-set(
-                                _unintended_text_overlaps(source_scaled,units)):
-                            exploratory.append(dict(
-                                name='qwen-source-aligned-source-scaled-art-'+label,
-                                elements=aligned_scaled,
-                                energy=_energy(aligned_scaled,units,source,width,height,desired),
-                                variant_of='qwen-source-scaled-art-'+label))
         # Generic rotation of foreground images tilts decorative lines and
         # ornaments. Rotation candidates are generated for the background only.
     # Limit total renderer work while ensuring at least one model-first source
@@ -5777,16 +5250,7 @@ def _adapt_with_diagnostics(source,target_canvas):
     if exploratory:
         qwen_exploratory=[c for c in exploratory if c['name'].startswith('qwen-')]
         other_exploratory=[c for c in exploratory if not c['name'].startswith('qwen-')]
-        required=[c for c in qwen_exploratory if c['name'].startswith((
-            'qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-',
-            'qwen-rule-span-aligned-','qwen-panel-content-centered-'))]
         selected_qwen=qwen_exploratory[:12]
-        for prefix in ('qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-',
-                       'qwen-source-frame-clearance-','qwen-rule-span-aligned-',
-                       'qwen-panel-content-centered-'):
-            matches=[c for c in required if c['name'].startswith(prefix)]
-            if matches and not any(c['name'].startswith(prefix) for c in selected_qwen):
-                selected_qwen.append(matches[0])
         feasible.extend(selected_qwen+other_exploratory[:12])
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
@@ -5865,118 +5329,39 @@ def _adapt_with_diagnostics(source,target_canvas):
                 elements=deepcopy(parent['elements']),backgrounds=rotated_backgrounds,
                 energy=parent['energy'],optimization=dict(before=parent['energy'],
                 after=parent['energy'],accepted=0,iterations=0),rotation_change=change))
-    # Reapply measured superscript anchoring after all position searches so a
-    # local refinement cannot restore a model-proposed box-edge offset.
-    if any(c['name'].startswith('qwen-') for c in optimized):
-        from engine.qwen_refine import anchor_superscripts
-        anchored_ids=set()
-        for candidate in optimized:
-            if not candidate['name'].startswith('qwen-'):continue
-            candidate['elements'],changed=anchor_superscripts(candidate['elements'],units)
-            candidate['energy']=_energy(candidate['elements'],units,source,width,height,desired)
-            anchored_ids.update(changed)
-        if anchored_ids:qwen_diagnostics['superscript_anchored_ids']=sorted(anchored_ids)
+    # Every layout family, including search/rotation variants, enters the render
+    # verifier with its hierarchy restored. A noisy raw sibling cannot bypass
+    # these constraints by winning a perceptual tie-break.
+    structural_rejections=[]
+    structured_candidates=[]
+    rejected_structures=[]
+    for candidate in optimized:
+        structured,structure=_structural_qwen_projection(
+            candidate['elements'],source,units,width,height,container_tree)
+        if (not _feasible(structured,units,width,height,strict_margins=False,
+                          gap_factor=.001,allow_text_visual_overlap=True)
+                or _unintended_text_overlaps(structured,units)):
+            structural_rejections.append(candidate['name'])
+            rejected_structures.append(dict(candidate,elements=structured,structure=structure,
+                energy=_energy(structured,units,source,width,height,desired)))
+            continue
+        structured_candidates.append(dict(candidate,elements=structured,structure=structure,
+            energy=_energy(structured,units,source,width,height,desired)))
+    if structured_candidates:
+        optimized=structured_candidates
+    else:
+        # An impossible target must retain all elements and expose the failure;
+        # do not mislabel an unverified structure as accepted.
+        optimized=sorted(rejected_structures,key=lambda c:(
+            _constraint_violation(c['elements'],units,width,height),c['name']))[:4]
+        qwen_diagnostics['structural_fallback_reason']='No projected candidate satisfies geometry and text constraints; retaining the least-violating complete container layout'
+    qwen_diagnostics['structural_rejected_candidates']=structural_rejections
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
-    # Apply source-evidenced local repairs after ranking so a perceptual
-    # tie-break cannot reselect the same visible alignment or edge-gutter flaw.
-    if winner['name'].startswith('qwen-'):
-        side_flourish=_source_side_flourish_center_variant(
-            winner['elements'],source,width,height)
-        if (side_flourish is not None
-                and _feasible(side_flourish,units,width,height,strict_margins=False,
-                              gap_factor=.004,allow_text_visual_overlap=True)
-                and not _unintended_text_overlaps(side_flourish,units)):
-            before={e['id']:e for e in winner['elements']}
-            changed=sorted(e['id'] for e in side_flourish
-                           if abs(float(e.get('x',0))-float(before[e['id']].get('x',0)))>.01)
-            winner=dict(winner,elements=side_flourish,
-                        name=winner['name']+'-source-side-flourish-centered',
-                        energy=_energy(side_flourish,units,source,width,height,desired))
-            visual['post_selection_source_side_flourish_repair']={
-                'selected':winner['name'],'element_ids':changed,
-                'reason':'paired short rules centered around their centered source label'}
-            qwen_diagnostics['source_side_flourish_centered_ids']=changed
-        panel_margins=_source_panel_margin_variant(
-            winner['elements'],source,width,height)
-        if (panel_margins is not None
-                and _feasible(panel_margins,units,width,height,strict_margins=False,
-                              gap_factor=.004,allow_text_visual_overlap=True)
-                and not _unintended_text_overlaps(panel_margins,units)):
-            before={e['id']:e for e in winner['elements']}
-            changed=sorted(e['id'] for e in panel_margins
-                           if any(abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>.01
-                                     for k in ('x','y','width','height')))
-            winner=dict(winner,elements=panel_margins,
-                        name=winner['name']+'-source-panel-gutters',
-                        energy=_energy(panel_margins,units,source,width,height,desired))
-            visual['post_selection_source_panel_gutter_repair']={
-                'selected':winner['name'],'element_ids':changed,
-                'reason':'restore the inset source panel footprint while retaining the full-bleed background'}
-            qwen_diagnostics['source_panel_gutter_ids']=changed
-    # A centered lockup inside a duplicated source outline is a direct
-    # alignment constraint. Apply this small source-evidenced correction to
-    # the final Qwen winner as well, so a perceptual tie-break cannot reselect
-    # the same known horizontal drift after rendering sibling candidates.
-    if winner['name'].startswith('qwen-'):
-        panel_centered=_source_panel_center_variant(
-            winner['elements'],source,width,height)
-        if (panel_centered is not None
-                and _feasible(panel_centered,units,width,height,strict_margins=False,
-                              gap_factor=.004,allow_text_visual_overlap=True)
-                and not _unintended_text_overlaps(panel_centered,units)):
-            before={e['id']:e for e in winner['elements']}
-            moved_ids=sorted(e['id'] for e in panel_centered
-                if e['id'] in before and abs(float(e.get('x',0))-float(before[e['id']].get('x',0)))>.01)
-            original_name=winner['name']
-            winner=dict(winner,elements=panel_centered,
-                        name=original_name+'-source-panel-centered',
-                        energy=_energy(panel_centered,units,source,width,height,desired))
-            visual['post_selection_source_alignment_repair']={
-                'selected':winner['name'],'replaced':original_name,
-                'element_ids':moved_ids,
-                'reason':'source outlines and repeated horizontal rules define a centered text lockup',
-            }
-            qwen_diagnostics['source_panel_centered_ids']=moved_ids
-            qwen_diagnostics['winner']=winner['name']
-            qwen_diagnostics['variants']=sorted(set(qwen_diagnostics.get('variants',[])+[winner['name']]))
-    if winner['name'].startswith('qwen-'):
-        child_gutters=_source_panel_child_gutters_variant(
-            winner['elements'],units,source,width,height)
-        if (child_gutters is not None
-                and _feasible(child_gutters,units,width,height,strict_margins=False,
-                              gap_factor=.004,allow_text_visual_overlap=True)
-                and not _unintended_text_overlaps(child_gutters,units)):
-            before={e['id']:e for e in winner['elements']}
-            changed=sorted(e['id'] for e in child_gutters
-                if any(abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>.01
-                         for k in ('x','y','width','height','font_size')))
-            winner=dict(winner,elements=child_gutters,
-                        name=winner['name']+'-source-panel-children-inset',
-                        energy=_energy(child_gutters,units,source,width,height,desired))
-            visual['post_selection_source_panel_child_gutters']={
-                'selected':winner['name'],'element_ids':changed,
-                'reason':'scale the complete panel child group uniformly to retain its source inset'}
-            qwen_diagnostics['source_panel_child_gutter_ids']=changed
-    if winner['name'].startswith('qwen-'):
-        centered_group=_source_centered_copy_group_variant(
-            winner['elements'],source,width,height)
-        if (centered_group is not None
-                and _feasible(centered_group,units,width,height,strict_margins=False,
-                              gap_factor=.004,allow_text_visual_overlap=True)
-                and not _unintended_text_overlaps(centered_group,units)):
-            before={e['id']:e for e in winner['elements']}
-            changed=sorted(e['id'] for e in centered_group
-                if any(abs(float(e.get(k,0))-float(before[e['id']].get(k,0)))>.01
-                         for k in ('x','y')))
-            winner=dict(winner,elements=centered_group,
-                        name=winner['name']+'-source-centered-copy-group',
-                        energy=_energy(centered_group,units,source,width,height,desired))
-            visual['post_selection_source_centered_group']={
-                'selected':winner['name'],'element_ids':changed,
-                'reason':'preserve source-centered copy and attached ornaments as one centered group'}
-            qwen_diagnostics['source_centered_group_ids']=changed
+    # No geometry mutations after render verification. Store the selected
+    # structural evidence and deliver the exact geometry that was judged.
+    qwen_diagnostics['selected_structure']=winner.get('structure',{})
     qwen_diagnostics['winner'] = winner['name']
     qwen_diagnostics['variants']=sorted({c['name'] for c in optimized+visual.get('candidates',[])
                                         if c['name'].startswith('qwen-')})
