@@ -31,7 +31,7 @@ def _prediction_queues(records,cached,completed=()):
     return queues,by_pair
 
 
-def replay(records, cached, adapter, model, checkpoint):
+def replay(records, cached, adapter, model, checkpoint, source_for=None, allow_incomplete=False):
     import torch
     from engine import qwen_seed
     from engine.qwen_prompt import font_reference
@@ -59,7 +59,7 @@ def replay(records, cached, adapter, model, checkpoint):
 
     def generate(source,target,base_elements,diagnostics=None):
         row=queues[(tuple(e['id'] for e in source['elements']),target['width'],target['height'])].popleft()
-        if not row.get('raw_proposal_valid',bool(row.get('official_path'))) or not row.get('qwen_model_elements'):
+        if (not allow_incomplete and not row.get('raw_proposal_valid',bool(row.get('official_path')))) or not row.get('qwen_model_elements'):
             raise ValueError(f"Cannot replay incomplete raw prediction: {row['pair_id']}")
         aliases={e['id']:f'e{i:03d}' for i,e in enumerate(source['elements'])}
         payload=[]
@@ -72,7 +72,7 @@ def replay(records, cached, adapter, model, checkpoint):
         return original_generate(source,target,base_elements,diagnostics=diagnostics)
 
     with patch.object(qwen_seed,'_load',load),patch.object(qwen_seed,'generate_seed',generate):
-        rows=run_engine_mode(records,read_sources(),Path(adapter),Path(model),checkpoint)
+        rows=run_engine_mode(records,source_for or read_sources(),Path(adapter),Path(model),checkpoint)
     for row in rows:
         if row.get('engine_error'):continue
         old=by_pair[row['pair_id']]

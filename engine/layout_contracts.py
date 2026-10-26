@@ -69,12 +69,12 @@ def _controls_cached(payload):
                 or panel['width']/max(1.,panel['height'])<1.6):continue
         pb=_rotated_bounds(panel);labels=[]
         for text in items:
-            if text.get('type')!='text' or not text.get('content','').strip() or len(text['content'])>80:continue
+            if text.get('type')!='text' or not text.get('content','').strip():continue
             if text.get('z_index',0)<panel.get('z_index',0):continue
             if panel.get('group_id') and text.get('group_id')!=panel['group_id']:continue
             tb=_text_visible_bounds(text);area=max(1.,(tb[2]-tb[0])*(tb[3]-tb[1]))
             if _overlap(pb,tb)/area>=.96:labels.append(text)
-        if len(labels)==1:pairs.append((panel['id'],labels[0]['id']))
+        if len(labels)==1 and len(labels[0]['content'])<=80:pairs.append((panel['id'],labels[0]['id']))
     # A small nested asset should not claim a label already owned by an
     # explicit group. Otherwise choose the tightest actual backing.
     chosen={};by={e['id']:e for e in items}

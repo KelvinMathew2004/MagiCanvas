@@ -1,6 +1,6 @@
 # Source attachments, selector integrity and new-composition testing
 
-October 26, 2026. Current review entry point. Earlier source-evidence and visual-contract documents are historical checkpoints.
+October 26, 2026. Historical checkpoint. Read [MACRO_STRUCTURE_REVIEW.md](MACRO_STRUCTURE_REVIEW.md) for the current revision. Earlier source-evidence and visual-contract documents are historical checkpoints.
 
 ## General repairs
 

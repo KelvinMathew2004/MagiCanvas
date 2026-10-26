@@ -170,6 +170,7 @@ def run_engine_mode(records,source_for,adapter_dir,model_dir=None,checkpoint_pat
                     rendered_candidates=(report.get('visual') or {}).get('candidates',[]),
                     qwen_model_elements=qdiag.get('model_elements',[]),
                     qwen_container_tree=qdiag.get('container_tree',{}),
+                    macro_reflow=qdiag.get('macro_reflow',{}),
                     runtime=round(perf_counter()-started,2))
             except Exception as exc:
                 measured=dict(pair_id=row['pair_id'],family_id=row.get('family_id'),valid=False,

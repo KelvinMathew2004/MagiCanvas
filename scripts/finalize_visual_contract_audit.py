@@ -6,22 +6,22 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 
 def main():
     import argparse
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('run',type=Path);a=p.parse_args();run=a.run.resolve()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('run',type=Path);p.add_argument('--baseline',type=Path);a=p.parse_args();run=a.run.resolve()
     if (run/'heldout/report.json').exists():
         reports=[json.loads((run/'heldout/report.json').read_text())]
     else:
-        reports=[json.loads((run/f'heldout_{s}/report.json').read_text()) for s in 'abcd']
+        reports=[json.loads(path.read_text()) for path in sorted(run.glob('heldout_*/report.json'))]
     rows=[r for d in reports for r in d['results']]
     assert len(rows)==89 and len({r['pair_id'] for r in rows})==89
     hashes=reports[0]['manifest']['code_sha256'];assert all(d['manifest']['code_sha256']==hashes for d in reports)
     from scripts.evaluate_qwen_adapter import summarize_engine
     from scripts.layout_defects import build_ab_viewer
-    base=json.loads((ROOT/'data/qwen_lora/inventory_fixes_verified/heldout/report.json').read_text())['results']
+    base=json.loads((a.baseline or ROOT/'data/qwen_lora/inventory_fixes_verified/heldout/report.json').read_text())['results']
     records=[json.loads(s) for s in (ROOT/'data/qwen_lora_expanded_v2/test.jsonl').read_text().splitlines() if s.strip()]
     target=run/'heldout';target.mkdir(exist_ok=True)
     manifest=dict(reports[0]['manifest'],cases=89,pair_ids=[r['pair_id'] for r in rows],shards=len(reports))
     combined=dict(manifest=manifest,summary=summarize_engine(rows),results=rows)
-    combined['viewer']=build_ab_viewer(rows,base,records,target/'viewer',10,candidate_label='Current visual contracts',comparison_label='Previous inventory engine')
+    combined['viewer']=build_ab_viewer(rows,base,records,target/'viewer',10,candidate_label='Current structural reflow',comparison_label='Frozen previous engine')
     (target/'report.json').write_text(json.dumps(combined,indent=2)+'\n')
     from collections import Counter
     summary={}

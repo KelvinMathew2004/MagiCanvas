@@ -210,6 +210,14 @@ def _unintended_control_overlaps(elements,source):
             ba=_text_visible_bounds(a) if a.get('type')=='text' else _bounds([a])
             bb=_text_visible_bounds(b) if b.get('type')=='text' else _bounds([b])
             overlap=_overlap(ba,bb)
+            # Nested cards may contain another control's label. This source-
+            # evidenced backing is intentional even across schema group IDs.
+            # A newly introduced intersection receives no exemption.
+            old_a=_text_visible_bounds(sa) if sa.get('type')=='text' else _bounds([sa])
+            old_b=_text_visible_bounds(sb) if sb.get('type')=='text' else _bounds([sb])
+            small=min(max(1.,(old_a[2]-old_a[0])*(old_a[3]-old_a[1])),max(1.,(old_b[2]-old_b[0])*(old_b[3]-old_b[1])))
+            if (a.get('type')!=b.get('type') and 'text' in (a.get('type'),b.get('type'))
+                    and _overlap(old_a,old_b)/small>=.92):continue
             if overlap>1.:result.append({'a':a['id'],'b':b['id'],'area':overlap})
     return result
 
@@ -4632,7 +4640,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
     has_reflow=any(c['name']!='proportional' for c in candidates)
     shortlist=[];families=set()
-    qwen_candidates=[c for c in candidates if c['name'].startswith('qwen-')]
+    qwen_candidates=[c for c in candidates if c['name'].startswith('qwen-') and not c.get('macro_locked')]
     for candidate in candidates:
         name=candidate['name']
         if name.startswith('qwen-'):continue
@@ -4709,7 +4717,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
             with Image.open(reference_path) as image:
                 reference_image=image.convert('RGB')
-            if qwen_candidates:
+            if qwen_candidates or any(c.get('macro_locked') for c in candidates):
                 source_backing=dict(canvas=source['canvas'],elements=[e for e in source['elements'] if e['type']!='text'])
                 source_backing_path=Path(directory)/'source-backing.png'
                 render_diagnostic(source_backing,diagnostic_assets,source_backing_path,max_size=640)
@@ -4756,25 +4764,29 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         except (OSError,ValueError,ImportError):
             clean_zones=[]
         for index,candidate in enumerate(shortlist):
-            from engine.layout_contracts import repair
-            repaired=(deepcopy(candidate['elements']) if candidate.get('source_attached')
-                      else repair(candidate['elements'],source,units,width,height))
-            from engine.qwen_refine import snap_source_axes
-            if not candidate.get('source_attached'):
-                repaired,_=snap_source_axes(repaired,source,width,height)
-            if candidate.get('measured_stack'):
-                from engine.structural_reflow import resolve_stack
-                repaired=resolve_stack(repaired,source,units,width,height)
-            if candidate.get('source_attached'):
-                repaired,contract_fonts=_calibrate_text_boxes(repaired,source,width,height)
-                from engine.source_structure import fit_groups_to_canvas
-                from engine.layout_contracts import _primary_axis
-                _primary_axis(repaired,source,units,width,height,apply=True)
-                fit_groups_to_canvas(repaired,source,width,height)
-            else:
-                repaired,contract_fonts=_finish_candidate_text(repaired,source,units,width,height,candidate.get('measured_stack',False))
-            candidate=dict(candidate,elements=repaired,contract_font_calibration=contract_fonts)
-            shortlist[index]=candidate
+            if candidate.get('macro_locked'):
+                candidate=dict(candidate,elements=deepcopy(candidate['elements']))
+                shortlist[index]=candidate
+            if not candidate.get('macro_locked'):
+                from engine.layout_contracts import repair
+                repaired=(deepcopy(candidate['elements']) if candidate.get('source_attached')
+                          else repair(candidate['elements'],source,units,width,height))
+                from engine.qwen_refine import snap_source_axes
+                if not candidate.get('source_attached'):
+                    repaired,_=snap_source_axes(repaired,source,width,height)
+                if candidate.get('measured_stack'):
+                    from engine.structural_reflow import resolve_stack
+                    repaired=resolve_stack(repaired,source,units,width,height)
+                if candidate.get('source_attached'):
+                    repaired,contract_fonts=_calibrate_text_boxes(repaired,source,width,height)
+                    from engine.source_structure import fit_groups_to_canvas
+                    from engine.layout_contracts import _primary_axis
+                    _primary_axis(repaired,source,units,width,height,apply=True)
+                    fit_groups_to_canvas(repaired,source,width,height)
+                else:
+                    repaired,contract_fonts=_finish_candidate_text(repaired,source,units,width,height,candidate.get('measured_stack',False))
+                candidate=dict(candidate,elements=repaired,contract_font_calibration=contract_fonts)
+                shortlist[index]=candidate
             candidate_backgrounds=candidate.get('backgrounds',backgrounds)
             doc=_assemble(candidate['elements'],candidate_backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
@@ -4864,7 +4876,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         structural_errors.append(f"{element['id']}: image aspect distortion")
                 structural_errors.extend(_backing_containment_defects(doc['elements'],source))
                 entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,occlusion_defects=occlusion_defects,structural_errors=structural_errors,warnings=warnings,image=full.copy()))
-                if clean_zones and 'clean-zone-fitted' not in candidate['name'] and sum('clean-zone-fitted' in c['name'] for c in shortlist)<3:
+                if not candidate.get('macro_locked') and clean_zones and 'clean-zone-fitted' not in candidate['name'] and sum('clean-zone-fitted' in c['name'] for c in shortlist)<3:
                     from engine.clean_zones import fitted_variant
                     fitted=fitted_variant(candidate['elements'],source,units,
                         [e for e in doc['elements'] if e['id'] in {b['id'] for b in backgrounds}],
@@ -4879,7 +4891,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 # Independent deterministic fallbacks need the same measured
                 # repair opportunity as the learned family. Never recursively
                 # repair a repair, and retain the primary learned slot.
-                if (regressions and not invisible and 'contrast-repaired' not in candidate['name']
+                if (not candidate.get('macro_locked') and regressions and not invisible and 'contrast-repaired' not in candidate['name']
                         and (candidate['name']=='qwen-container-locked-font-fitted'
                              or candidate['name']=='qwen-pre-container-font-fitted'
                              or not candidate['name'].startswith('qwen-'))):
@@ -4892,7 +4904,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     if calm and candidate['name']=='qwen-container-locked-font-fitted':
                         required_families['qwen-contrast-repaired']='proposed and rerendered'
                 target_repair_ids=sorted(set(weak)|set(busy))
-                if (candidate['name'].startswith('qwen-') and target_repair_ids and not invisible
+                if (not candidate.get('macro_locked') and candidate['name'].startswith('qwen-') and target_repair_ids and not invisible
                         and _needs_contrast_repair(entries[-1])
                         and 'contrast-repaired' not in candidate['name']
                         and sum('contrast-repaired' in c['name'] for c in shortlist)<10):
@@ -5013,6 +5025,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             entry['candidate']['elements'],units,source,width,height)[2]
         from engine.source_structure import relationship_cost
         entry['attachment_error']=relationship_cost(entry['candidate']['elements'],source,width,height)
+        from engine.macro_layout import quality
+        entry['layout_quality']=quality(entry['candidate']['elements'],source,width,height)
         entry['contrast_regressions']=[];entry['mild_contrast_regressions']=[]
         penalty=0.
         for eid,metrics in entry.get('contrast_by_text',{}).items():
@@ -6294,6 +6308,9 @@ def _adapt_with_diagnostics(source,target_canvas):
                                   energy=_energy(attached,units,source,width,height,desired)))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
+    from engine.macro_layout import upgrade
+    winner,visual,macro_diagnostics=upgrade(winner,visual,backgrounds,units,source,width,height,desired,_visual_rerank)
+    qwen_diagnostics['macro_reflow']=macro_diagnostics
     # No geometry mutations after render verification. Store the selected
     # structural evidence and deliver the exact geometry that was judged.
     qwen_diagnostics['selected_structure']=winner.get('structure',{})
