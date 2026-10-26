@@ -8,6 +8,7 @@ import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -341,6 +342,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    qwen_local=Path(os.environ.get('MAGICANVAS_QWEN_DIR',ROOT/'models/qwen3-0.6b'))
+    if (qwen_local/'config.json').is_file() and any(qwen_local.glob('*.safetensors')):
+        os.environ.setdefault('MAGICANVAS_QWEN_ENABLED','1')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=5050)
     args = parser.parse_args()

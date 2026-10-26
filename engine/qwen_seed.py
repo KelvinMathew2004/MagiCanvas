@@ -109,7 +109,7 @@ class QwenEarlyStoppingCriteria:
 
     def __call__(self, input_ids, scores=None, **kwargs) -> bool:
         self._counter += 1
-        if self._counter % 4 != 0:
+        if self._counter % 16 != 0:
             return False
         cur_tokens = input_ids[0, self.prompt_len:]
         text = self.tokenizer.decode(cur_tokens, skip_special_tokens=True)
@@ -145,7 +145,7 @@ class QwenEarlyStoppingCriteria:
                 elif ch == '[': s_depth += 1
                 elif ch == ']': s_depth -= 1
 
-        if self.expected_ids and len(unique_ids) >= self.N:
+        if self.expected_ids and self.expected_ids.issubset(set(unique_ids)):
             if s_depth == 0 and c_depth == 0 and len(text.strip()) > 10:
                 self.stopped_early = True
                 return True
@@ -631,7 +631,10 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
                     aspect=float(original["width"])/max(1e-6,float(original["height"]))
                     center_x=proposed["x"]+proposed["width"]/2
                     center_y=proposed["y"]+proposed["height"]/2
-                    width=min(proposed["width"],proposed["height"]*aspect,canvas_w)
+                    # Width is the scale parameter for a foreground image;
+                    # derive height from its source aspect instead of letting
+                    # two independently generated dimensions shrink it.
+                    width=min(max(1.,proposed["width"]),canvas_w)
                     height=width/aspect
                     if height>canvas_h:
                         height=canvas_h;width=height*aspect

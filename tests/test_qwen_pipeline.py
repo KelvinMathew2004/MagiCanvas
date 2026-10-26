@@ -357,6 +357,20 @@ class QwenPipelineTests(unittest.TestCase):
                   source_canvas=(500,500))
         self.assertEqual(_broken_source_stack_units(proposal,[unit]),[])
 
+    def test_raw_font_fitted_candidate_is_not_constraint_projected(self):
+        source=dict(canvas=dict(width=500,height=500),elements=[text('first',y=50.),text('second',y=130.)])
+        proposal=deepcopy(source['elements']);proposal[1]['y']=proposal[0]['y']
+        def inspect(candidates,*args,**kwargs):
+            raw=next(c for c in candidates if c['name']=='qwen-pre-container-font-fitted')
+            by_id={e['id']:e for e in raw['elements']}
+            self.assertAlmostEqual(by_id['first']['y'],by_id['second']['y'])
+            self.assertTrue(any(c['name']=='qwen-raw-constraint-repaired' for c in candidates))
+            return next(c for c in candidates if not c['name'].startswith('qwen-')),dict(used=False)
+        with patch.dict(os.environ,{'MAGICANVAS_QWEN_ENABLED':'1'}), \
+             patch('engine.qwen_seed.generate_seed',return_value=(proposal,'mock')), \
+             patch('engine.resize._visual_rerank',side_effect=inspect):
+            _adapt_with_diagnostics(source,dict(width=500,height=500))
+
     def test_runtime_projects_broken_art_stack_before_render_ranking(self):
         source=dict(canvas=dict(width=500,height=500),elements=[
             dict(id='back',type='shape',shape_type='rectangle',x=50,y=50,width=100,height=100,
@@ -372,10 +386,14 @@ class QwenPipelineTests(unittest.TestCase):
             _,analysis_units=_analyze(source)
             modeled=[c for c in candidates if c['name'].startswith('qwen-')]
             self.assertTrue(modeled)
-            for candidate in modeled:
+            projected=[c for c in modeled if c.get('structure',{}).get('containers')]
+            self.assertTrue(projected)
+            for candidate in projected:
                 self.assertEqual(_broken_source_stack_units(candidate['elements'],analysis_units),[])
-                self.assertTrue(candidate['structure']['containers'])
-            return modeled[0],dict(used=False,selected_index=0)
+            # A structurally valid raw layout must remain available beside the
+            # container projection; the renderer decides whether to preserve it.
+            self.assertTrue(any(c['name']=='qwen-pre-container-font-fitted' for c in modeled))
+            return projected[0],dict(used=False,selected_index=0)
         with patch.dict(os.environ,{'MAGICANVAS_QWEN_ENABLED':'1'}), \
              patch('engine.qwen_seed.generate_seed',return_value=(proposal,'mock proposal')), \
              patch('engine.resize._visual_rerank',side_effect=inspect_candidates):
@@ -624,6 +642,39 @@ class QwenPipelineTests(unittest.TestCase):
         tgt_offset_y = by_id['txt_011']['y'] - by_id['img_004']['y']
         self.assertAlmostEqual(tgt_offset_y, src_offset_y * factor, places=1)
 
+    def test_large_overlapping_hero_does_not_bridge_distant_copy_clusters(self):
+        from engine.qwen_refine import build_container_tree
+        source=dict(canvas=dict(width=1000,height=1000),elements=[
+            dict(id='hero',type='image',x=200.,y=100.,width=600.,height=800.,z_index=0),
+            text('left',x=100.,y=300.,width=200.,height=50.,z_index=1),
+            text('right',x=700.,y=300.,width=200.,height=50.,z_index=2)])
+        tree=build_container_tree(source)
+        self.assertFalse(any({'left','right'}<=set(c['element_ids']) for c in tree['children']))
+
+    def test_translucent_decoration_cannot_bridge_separate_foreground_groups(self):
+        from engine.qwen_refine import build_container_tree
+        source=dict(canvas=dict(width=1000,height=1000),elements=[
+            dict(id='decoration',type='shape',x=150.,y=250.,width=700.,height=100.,z_index=0,opacity=.15),
+            text('left',x=100.,y=300.,width=200.,height=50.,z_index=1),
+            text('right',x=700.,y=300.,width=200.,height=50.,z_index=2)])
+        tree=build_container_tree(source)
+        self.assertFalse(any({'left','right'}<=set(c['element_ids']) for c in tree['children']))
+
+    def test_small_contained_card_uses_banner_height_and_stays_centered(self):
+        from engine.qwen_refine import build_container_tree,project_container_tree
+        source=dict(canvas=dict(width=1000,height=1400),elements=[
+            dict(id='card',type='shape',x=100.,y=100.,width=600.,height=600.,z_index=0),
+            text('label',x=150.,y=300.,width=400.,height=200.,font_size=50.,z_index=1)])
+        proposed=deepcopy(source['elements'])
+        for e in proposed:
+            for k in ('x','y','width','height'):e[k]*=.1
+            if e['type']=='text':e['font_size']=10.
+        result,_=project_container_tree(proposed,build_container_tree(source),900,300)
+        card=next(e for e in result if e['id']=='card')
+        self.assertAlmostEqual(card['height'],300*.76)
+        self.assertAlmostEqual(card['y']+card['height']/2,150.)
+        self.assertTrue(all(0<=e['x'] and e['x']+e['width']<=900 and 0<=e['y'] and e['y']+e['height']<=300 for e in result))
+
     def test_qwen_early_stopping_criteria_stops_repetition_and_closes_json(self):
         import torch
         from engine.qwen_seed import QwenEarlyStoppingCriteria, generate_seed
@@ -638,21 +689,26 @@ class QwenPipelineTests(unittest.TestCase):
 
         # Incomplete text: should not stop
         tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]}'
-        criteria._counter = 3
+        criteria._counter = 15
         self.assertFalse(criteria(torch.tensor([[1, 2, 3]])))
 
         # All IDs present and closed with ]}: should stop
         tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]},{"id":"e002","box":[20,20,30,30]}]}'
-        criteria._counter = 3
+        criteria._counter = 15
         self.assertTrue(criteria(torch.tensor([[1, 2, 3]])))
         self.assertTrue(criteria.stopped_early)
 
         # Repetition loop: duplicate element begins: should stop
         criteria2 = QwenEarlyStoppingCriteria(tok, prompt_len=0, expected_ids=expected)
         tok.current_text = '{"elements":[{"id":"e000","box":[0,0,10,10]},{"id":"e001","box":[10,10,20,20]},{"id":"e002","box":[20,20,30,30]},{"id":"e001"'
-        criteria2._counter = 3
+        criteria2._counter = 15
         self.assertTrue(criteria2(torch.tensor([[1, 2, 3]])))
         self.assertTrue(criteria2.stopped_early)
+        criteria3=QwenEarlyStoppingCriteria(tok,prompt_len=0,expected_ids=expected)
+        tok.current_text='{"elements":[{"id":"e000"},{"id":"e001"},{"id":"e999"}]}'
+        criteria3._counter=15
+        self.assertFalse(criteria3(torch.tensor([[1,2,3]])))
+
 
 
 if __name__=='__main__':unittest.main()

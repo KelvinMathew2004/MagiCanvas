@@ -26,14 +26,15 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY scripts/fetch_siglip.py ./scripts/fetch_siglip.py
 RUN python scripts/fetch_siglip.py
 
-# Qwen is an opt-in proposal source (MAGICANVAS_QWEN_ENABLED=1). Its local
+# Qwen is enabled with the local offline weights below. Its local
 # weights are included so a judging container can run entirely offline.
 COPY scripts/fetch_qwen.py ./scripts/fetch_qwen.py
 RUN python scripts/fetch_qwen.py
+ENV MAGICANVAS_QWEN_ENABLED=1
 
 # A public adapter is fetched only when its repository is supplied at build
 # time. The default image has no LoRA adapter and stays on the base-model
-# proposal path (which remains disabled unless opted in).
+# proposal path. MAGICANVAS_QWEN_ENABLED=0 explicitly disables proposals.
 ARG QWEN_ADAPTER_REPO=""
 ARG QWEN_ADAPTER_REVISION=""
 COPY scripts/fetch_qwen_lora.py ./scripts/fetch_qwen_lora.py

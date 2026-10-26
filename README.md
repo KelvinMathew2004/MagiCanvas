@@ -25,7 +25,7 @@ available locally.
 
 Docker is the recommended run path for a reproducible, offline model setup. The
 build step needs internet because it installs dependencies and downloads the
-SigLIP and Qwen base weights, even though Qwen is disabled by default. The
+SigLIP and Qwen base weights. Docker enables its baked Qwen model by default. The
 engine makes no network requests at runtime.
 
 ```bash
@@ -36,27 +36,28 @@ docker run --rm --network none \
   magicanvas
 ```
 
-Qwen is disabled by default. To enable its layout proposals:
+To compare the judging container with Qwen disabled:
 
 ```bash
 docker run --rm --network none \
-  -e MAGICANVAS_QWEN_ENABLED=1 \
+  -e MAGICANVAS_QWEN_ENABLED=0 \
   -v "$(pwd)/input:/app/input" \
   -v "$(pwd)/output:/app/output" \
   magicanvas
 ```
 
-To select the expanded v2 adapter for a local run, set its adapter directory:
+Direct local CLI runs opt into Qwen explicitly. Pair the 1.7B candidate with its matching base model:
 
 ```bash
 MAGICANVAS_QWEN_ENABLED=1 \
-MAGICANVAS_QWEN_ADAPTER_DIR=models/qwen3-layout-lora-v2-expanded \
+MAGICANVAS_QWEN_DIR=models/qwen3-1.7b \
+MAGICANVAS_QWEN_ADAPTER_DIR=models/qwen3-layout-lora-v2-expanded-1.7b \
 python -m engine.main
 ```
 
 The standard local default remains `models/qwen3-layout-lora-v2` until the
-expanded adapter passes the held-out A/B evaluation. The expanded adapter is
-kept at `models/qwen3-layout-lora-v2-expanded/` as a separate candidate.
+1.7B candidate passes a fresh held-out A/B evaluation. The installed 1.7B
+adapter is kept separately at `models/qwen3-layout-lora-v2-expanded-1.7b/`.
 
 SigLIP breaks close ties after exact structural and raster defect checks when
 its build-time weights are present; otherwise ranking is deterministic. Qwen can use a
@@ -81,8 +82,9 @@ readiness are documented in [docs/DAY4_5_AUDIT.md](docs/DAY4_5_AUDIT.md).
 
 ## Current layout and evaluation approach
 
-The engine infers functional containers from source relationships, projects
-their internal source geometry together, and snaps supported shared axes.
+The engine retains deterministic reflows and a bounded, font-fitted raw Qwen
+proposal alongside source-container projection and supported shared-axis snaps.
+Physical geometry/raster checks gate selection; heuristic unit gaps do not veto Qwen.
 Font calibration uses rendered glyphs and the available local font bundle,
 widens into available space before shrinking, and scales tracking with fonts.
 Learned container candidates compete with independent deterministic aspect
@@ -98,9 +100,17 @@ Colab training recipe are in [docs/QWEN_LORA_COLAB.md](docs/QWEN_LORA_COLAB.md).
 The cleaned training split has 1,122 unique target IDs, with 309 validation and
 89 test rows and no family overlap between splits. Both larger base models are
 available locally for later A/B training: Qwen3-1.7B and Qwen2.5-1.5B-Instruct.
-Neither has a newly trained/promoted adapter. Keep the existing 0.6B adapter as
-the baseline until an explicit base-model/adapter comparison passes the gates.
+The installed Qwen3-1.7B adapter was evaluated but did not pass the original
+89-case promotion gate. Keep the existing 0.6B adapter as the default; the 1.5B
+base remains available for a future controlled comparison.
 The training recipe uses 6,144 tokens so complex examples are retained.
+
+The latest selector fixes have a 12-case paired review with raw proposal
+ablations and a separate 18-format official Qwen on/off comparison. See
+[the current review packet](data/gemini_review_qwen_projection_fixes_2026-10-25/README_FOR_GEMINI.md)
+and [the verification audit](docs/DAY4_5_AUDIT.md). These curated checks do not
+replace a fresh full 89-case evaluation. The local viewer enables Qwen at
+startup when local weights exist; an explicit `MAGICANVAS_QWEN_ENABLED=0` is respected.
 
 Archived review snapshots and recovery details are listed in
 [docs/REVIEW_ARCHIVE.md](docs/REVIEW_ARCHIVE.md).
@@ -128,3 +138,5 @@ dataset card and VistaCreate terms; source designs may contain third-party
 rights. Downloaded and converted dataset files stay local and are not included
 in this repository. See [docs/CRELLO_DATA_AND_TRAINING.md](docs/CRELLO_DATA_AND_TRAINING.md)
 before sharing data or training artifacts.
+
+Current engine repair evidence and repeatable replay commands are documented in [docs/INVENTORY_REPAIR_AUDIT.md](docs/INVENTORY_REPAIR_AUDIT.md).

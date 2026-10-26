@@ -167,6 +167,9 @@ def run_engine_mode(records,source_for,adapter_dir,model_dir=None,checkpoint_pat
                     target_canvas=canvas,official_path=official,source_design=source,output_design=design,
                     required_families=(report.get('visual') or {}).get('required_families',{}),
                     shortlist_coverage=(report.get('visual') or {}).get('shortlist_coverage',{}),
+                    rendered_candidates=(report.get('visual') or {}).get('candidates',[]),
+                    qwen_model_elements=qdiag.get('model_elements',[]),
+                    qwen_container_tree=qdiag.get('container_tree',{}),
                     runtime=round(perf_counter()-started,2))
             except Exception as exc:
                 measured=dict(pair_id=row['pair_id'],family_id=row.get('family_id'),valid=False,
@@ -283,6 +286,8 @@ def main():
     args=parser.parse_args()
     if args.workers<1 or args.review_top<1:parser.error('workers and review-top must be positive')
     if args.limit<0:parser.error("--limit must be nonnegative")
+    if args.resume and not (args.engine_only or args.engine):
+        parser.error('--resume is supported for --engine-only and paired --engine evaluation')
     records=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if args.limit:records=records[:args.limit]
     if not records:raise SystemExit("No held-out examples found.")
@@ -377,9 +382,41 @@ def main():
                 raise SystemExit(f"Dataset uses prompt v{prompt_version}, but {path} uses prompt v{marker_version}.")
         if args.engine:
             print("Evaluating candidate adapter through the full engine",flush=True)
-            candidate_results=run_engine_mode(records,source_for,adapter_dir,model_dir)
+            from scripts.layout_defects import build_ab_viewer
+            import hashlib
+            output_dir=args.output.parent
+            candidate_checkpoint=args.output.with_name(args.output.stem+'.candidate.jsonl')
+            comparison_checkpoint=args.output.with_name(args.output.stem+'.comparison.jsonl')
+            manifest_path=args.output.with_name(args.output.stem+'.run_manifest.json')
+            output_dir.mkdir(parents=True,exist_ok=True)
+            code_paths=[ROOT/'engine/resize.py',ROOT/'engine/qwen_refine.py',ROOT/'engine/qwen_seed.py',
+                        ROOT/'engine/qwen_prompt.py',ROOT/'scripts/layout_defects.py',Path(__file__).resolve()]
+            def model_signature(folder):
+                return {p.name:[p.stat().st_size,p.stat().st_mtime_ns]
+                        for p in sorted(folder.glob('*.safetensors'))}
+            def adapter_signature(folder):
+                return {name:[(folder/name).stat().st_size,(folder/name).stat().st_mtime_ns]
+                        for name in ('adapter_config.json','adapter_model.safetensors',
+                                     'magicanvas_prompt_version.txt') if (folder/name).is_file()}
+            run_manifest={'input_sha256':hashlib.sha256(args.input.read_bytes()).hexdigest(),
+                'candidate':{'adapter':str(adapter_dir),'model':str(model_dir),
+                             'adapter_files':adapter_signature(adapter_dir),'model_weights':model_signature(model_dir)},
+                'comparison':{'adapter':str(compare_dir),'model':str(compare_model_dir),
+                               'adapter_files':adapter_signature(compare_dir),'model_weights':model_signature(compare_model_dir)},
+                'code_sha256':{str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+                               for path in code_paths if path.is_file()},'examples':len(records)}
+            if args.resume:
+                if not manifest_path.is_file():
+                    raise SystemExit('No paired A/B run manifest exists; start with a new output path or rerun without --resume.')
+                if json.loads(manifest_path.read_text())!=run_manifest:
+                    raise SystemExit('Model, adapter, data, or engine code differs from the A/B checkpoints. Use a new output path.')
+            else:
+                for checkpoint in (candidate_checkpoint,comparison_checkpoint):
+                    if checkpoint.exists():checkpoint.unlink()
+                manifest_path.write_text(json.dumps(run_manifest,indent=2)+'\n')
+            candidate_results=run_engine_mode(records,source_for,adapter_dir,model_dir,candidate_checkpoint)
             print("Evaluating comparison adapter through the full engine",flush=True)
-            comparison_results=run_engine_mode(records,source_for,compare_dir,compare_model_dir)
+            comparison_results=run_engine_mode(records,source_for,compare_dir,compare_model_dir,comparison_checkpoint)
             candidate_summary=summarize_engine(candidate_results)
             comparison_summary=summarize_engine(comparison_results)
             candidate_mae=candidate_summary["mean_post_constraint_geometry_mae"]
@@ -391,6 +428,7 @@ def main():
                 comparison_model_dir=str(compare_model_dir),
                 candidate_engine=candidate_summary,comparison_engine=comparison_summary,
                 results={"candidate":candidate_results,"comparison":comparison_results},
+                run_manifest=run_manifest,
                 candidate_beats_both_comparison_metrics=(
                     candidate_mae is not None and comparison_mae is not None
                     and candidate_mae<comparison_mae
@@ -399,6 +437,10 @@ def main():
                     and candidate_summary["qwen_family_win_rate"]>comparison_summary["qwen_family_win_rate"]
                     and candidate_summary["valid_rate"]==1.0
                     and candidate_summary["hard_check_pass_rate"]==1.0))
+            report['review_page']=build_ab_viewer(candidate_results,comparison_results,records,
+                output_dir/'ab_viewer',args.review_top,
+                candidate_label=f"Candidate · {model_dir.name} + {adapter_dir.name}",
+                comparison_label=f"Baseline · {compare_model_dir.name} + {compare_dir.name}")
         else:
             print("Evaluating candidate adapter on raw held-out proposals",flush=True)
             candidate_results=run_mode(records,source_for,adapter_dir,model_dir)

@@ -1318,6 +1318,27 @@ def _weighted_median(values):
     return ordered[-1][0]
 
 
+def _source_callout_groups(source):
+    """Recognize short markers on compact backplates and their following copy."""
+    sw,sh=source['canvas']['width'],source['canvas']['height'];items=source['elements']
+    groups=[]
+    for number in items:
+        if number.get('type')!='text' or not number.get('content','').strip().isdigit() or len(number['content'].strip())>3:continue
+        nb=_rotated_bounds(number)
+        plates=[e for e in items if e.get('type')!='text' and e['width']*e['height']<.08*sw*sh
+                and e.get('z_index',0)<number.get('z_index',0)
+                and _overlap(nb,_rotated_bounds(e))>=.15*number['width']*number['height']]
+        if not plates:continue
+        plate=min(plates,key=lambda e:e['width']*e['height'])
+        paragraphs=[e for e in items if e.get('type')=='text' and len(e.get('content','').strip())>8
+                    and abs(_axis(e,('x',.5))-_axis(plate,('x',.5)))<=.06*sw
+                    and -.02*sh<=e['y']-(number['y']+number['height'])<=.09*sh]
+        if paragraphs:
+            paragraph=min(paragraphs,key=lambda e:abs(e['y']-number['y']-number['height']))
+            groups.append({plate['id'],number['id'],paragraph['id']})
+    return groups
+
+
 def build_container_tree(source, units=None):
     """Canvas -> functional containers -> nested containers/leaves.
 
@@ -1332,11 +1353,28 @@ def build_container_tree(source, units=None):
              (e.get('type')!='text' and e['width']>=.9*sw and e['height']>=.9*sh)})
     src={e['id']:e for e in source['elements'] if e['id'] in active}
     items=sorted(src.values(),key=lambda e:str(e['id']))
+    atomic=[{e['id'] for e in u['items']} & src.keys() for u in (units or []) if len(u['items'])>1]
+    atomic.extend(g & src.keys() for g in _source_callout_groups(source))
+    atomic_for={eid:i for i,g in enumerate(atomic) for eid in g}
     parent={eid:eid for eid in src};relations=[];backings=[]
     def find(eid):
         while parent[eid]!=eid:parent[eid]=parent[parent[eid]];eid=parent[eid]
         return eid
-    def join(a,b):parent[find(b)]=find(a)
+    def join(a,b,explicit=False):
+        if not explicit:
+            if a in atomic_for and b in atomic_for and atomic_for[a]!=atomic_for[b]:return
+            members=[e for eid,e in src.items() if find(eid) in (find(a),find(b))]
+            box=_frame(members)
+            # An alignment graph describes a flow, not a rigid whole poster.
+            if (box[2]-box[0])*(box[3]-box[1])>.42*sw*sh:return
+            groups={e.get('group_id') for e in members if e.get('group_id') is not None}
+            if len(groups)>1:return
+            if any(e.get('type')=='image' and e['width']*e['height']>=.12*sw*sh
+                   and not e.get('group_id') for e in members):return
+        parent[find(b)]=find(a)
+    def decorative_bridge(e):
+        return (e.get('type')!='text' and e.get('group_id') is None
+                and float(e.get('opacity',1.))<.98)
     for i,a in enumerate(items):
         ab=_rotated_bounds(a);aa=max(1.,a['width']*a['height'])
         contained={a['id']}
@@ -1345,6 +1383,7 @@ def build_container_tree(source, units=None):
             bb=_rotated_bounds(b);ba=max(1.,b['width']*b['height'])
             coverage=_overlap(ab,bb)/ba
             if (a.get('type')!='text' and aa>1.15*ba and aa<.85*sw*sh
+                    and not decorative_bridge(a)
                     and coverage>=.96 and a.get('z_index',0)<=b.get('z_index',0)):
                 contained.add(b['id'])
                 relations.append(['backing',a['id'],b['id']])
@@ -1369,14 +1408,56 @@ def build_container_tree(source, units=None):
                                abs(a['x']+a['width']-b['x']-b['width']))<=4
                             and gapy<=.14*sh and yc>=.02*sh)
             aligned_row=yc<=4 and gapx<=.10*sw and xc>=.02*sw
-            if explicit or (shared>=.18 and not nested) or aligned_column or aligned_row:
-                join(a['id'],b['id'])
+            large_bridge=any(decorative_bridge(e) or (e.get('type')!='text' and e['width']*e['height']>.35*sw*sh
+                             and e.get('group_id') is None) for e in (a,b))
+            alignment_lock=(a.get('type')=='text' and b.get('type')=='text'
+                            and a.get('group_id') is None and b.get('group_id') is None)
+            if explicit or (not large_bridge and ((shared>=.18 and not nested) or
+                                                   alignment_lock and (aligned_column or aligned_row))):
+                join(a['id'],b['id'],explicit=explicit)
+    # A repeated row/column can be visually one lockup even when a centered
+    # emblem or label sits between the peers and keeps their boxes apart. Join
+    # that in-between anchor to the peer group using geometry alone. This lets
+    # container projection preserve the full arrangement as a unit instead of
+    # moving the paired leaves independently.
+    for i,a in enumerate(items):
+        ab=_rotated_bounds(a)
+        for b in items[i+1:]:
+            if decorative_bridge(a) or decorative_bridge(b):continue
+            bb=_rotated_bounds(b)
+            acx,acy=_axis(a,('x',.5)),_axis(a,('y',.5))
+            bcx,bcy=_axis(b,('x',.5)),_axis(b,('y',.5))
+            if abs(acy-bcy)<=4 and abs(acx-bcx)>=.04*sw:
+                left,right=sorted((acx,bcx))
+                gap=max(0.,max(a['x'],b['x'])-min(a['x']+a['width'],b['x']+b['width']))
+                row_top=min(ab[1],bb[1]);row_bottom=max(ab[3],bb[3])
+                if gap<=.25*sw:
+                    for anchor in items:
+                        if anchor['id'] in (a['id'],b['id']) or decorative_bridge(anchor):continue
+                        ac=_axis(anchor,('x',.5));ancb=_rotated_bounds(anchor)
+                        if (left+4<ac<right-4
+                                and min(row_bottom,ancb[3])>max(row_top,ancb[1])
+                                and (_frame([a,b,anchor])[2]-_frame([a,b,anchor])[0])*(_frame([a,b,anchor])[3]-_frame([a,b,anchor])[1])<=.45*sw*sh):
+                            join(a['id'],b['id']);join(a['id'],anchor['id'])
+            if abs(acx-bcx)<=4 and abs(acy-bcy)>=.04*sh:
+                top,bottom=sorted((acy,bcy))
+                gap=max(0.,max(a['y'],b['y'])-min(a['y']+a['height'],b['y']+b['height']))
+                col_left=min(ab[0],bb[0]);col_right=max(ab[2],bb[2])
+                if gap<=.25*sh:
+                    for anchor in items:
+                        if anchor['id'] in (a['id'],b['id']) or decorative_bridge(anchor):continue
+                        ancy=_axis(anchor,('y',.5));ancb=_rotated_bounds(anchor)
+                        if (top+4<ancy<bottom-4
+                                and min(col_right,ancb[2])>max(col_left,ancb[0])
+                                and (_frame([a,b,anchor])[2]-_frame([a,b,anchor])[0])*(_frame([a,b,anchor])[3]-_frame([a,b,anchor])[1])<=.45*sw*sh):
+                            join(a['id'],b['id']);join(a['id'],anchor['id'])
     if units:
         for u in units:
-            if u.get('backing_panel'):
+            if u.get('backing_panel') and not any(decorative_bridge(e) for e in u['items']):
                 ids={e['id'] for e in u['items']}|set(u.get('backed_ids',()))
                 ids&=src.keys()
                 if len(ids)>1:backings.append(ids)
+    backings.extend(g for g in atomic if len(g)>1)
     coupled={}
     for eid in src:coupled.setdefault(find(eid),set()).add(eid)
     sets=[g for g in coupled.values() if len(g)>1]+backings
@@ -1414,8 +1495,9 @@ def project_container_tree(elements, tree, width, height):
 
     A weighted robust affine estimate produces [X,Y,W,H]. Thin geometry never
     estimates a transform; it receives the same transform as the source copy.
-    All text, artwork, rotations, tracking and internal offsets stay rigid.
-    Only native shape backplates may absorb excess width in semi-elastic mode.
+    Typography and tracking receive the same uniform transform as the frame.
+    Renderer calibration may then widen a frame before reducing its font. Only native shape backplates may absorb
+    excess width in semi-elastic mode.
     """
     from math import sqrt, isfinite
     src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
@@ -1447,17 +1529,60 @@ def project_container_tree(elements, tree, width, height):
         gy=min(height*.03,max(0.,min(sb[1],sh-sb[3]))/max(1.,sh)*height)
         scale=min(scale,(width-2*gx)/max(1e-6,sb[2]-sb[0]),(height-2*gy)/max(1e-6,sb[3]-sb[1]))
         # The canvas is the parent container too. A lone source-centered
-        # lockup inherits that shared parent axis, rather than model drift.
-        if len(tree['children'])==1:
-            if abs(cx-sw/2)<=max(4.,sw*.02):tx=width/2
-            if abs(cy-sh/2)<=max(4.,sh*.02):ty=height/2
+        # lockup inherits that shared parent axis, while an off-center lockup
+        # keeps its nearer authored canvas edge at the same scaled inset. This
+        # corrects a common Qwen failure where the internal group is coherent
+        # but the whole composition drifts far from its source anchor.
+        position_anchors={}
+        if (len(tree['children'])==1 or
+                max((width/height)/(sw/sh),(sw/sh)/(width/height))<1.4):
+            source_margins={'x':(sb[0],sw-sb[2]),'y':(sb[1],sh-sb[3])}
+            target_extent={'x':width,'y':height}
+            target_half={'x':(sb[2]-sb[0])*scale/2,'y':(sb[3]-sb[1])*scale/2}
+            source_extent={'x':sw,'y':sh}
+            for dimension in ('x','y'):
+                before_gap,after_gap=source_margins[dimension]
+                extent=source_extent[dimension]
+                if abs(before_gap-after_gap)<=max(4.,extent*.02):
+                    if dimension=='x':tx=target_extent[dimension]/2
+                    else:ty=target_extent[dimension]/2
+                    position_anchors[dimension]='center'
+                elif (dimension=='y' and min(before_gap,after_gap)>=0
+                      and abs(before_gap-after_gap)>=extent*.08
+                      and (sb[3]-sb[1])<extent*.9
+                      and (max((width/height)/(sw/sh),(sw/sh)/(width/height))<=1.4
+                           or (sw<=sh and width<=height))):
+                    if before_gap<after_gap:
+                        center=before_gap*scale+target_half[dimension]
+                        anchor='top'
+                    else:
+                        center=target_extent[dimension]-after_gap*scale-target_half[dimension]
+                        anchor='bottom'
+                    current_edge=ty-target_half[dimension] if anchor=='top' else target_extent[dimension]-(ty+target_half[dimension])
+                    expected_edge=before_gap*scale if before_gap<after_gap else after_gap*scale
+                    if abs(current_edge-expected_edge)>height*.08:
+                        ty=center
+                        position_anchors[dimension]=anchor
+        font_growth=1.
+        if (len(tree['children'])==1 and width/height>=1.8
+                and (sb[3]-sb[1])*scale<height*.70
+                and (sb[2]-sb[0])*scale<width*.55):
+            # A compact card is allowed to use the banner's short side. Only
+            # grow a genuinely contained lockup, not an entire poster/hero.
+            card=any(e.get('type')!='text' and e['width']*e['height']>=.8*(sb[2]-sb[0])*(sb[3]-sb[1])
+                     for e in original)
+            if card:
+                grown=min(height*.76/max(1e-6,sb[3]-sb[1]),width*.65/max(1e-6,sb[2]-sb[0]),
+                          (width-2*gx)/max(1e-6,sb[2]-sb[0]),(height-2*gy)/max(1e-6,sb[3]-sb[1]))
+                font_growth=max(1.,grown/max(1e-6,scale));scale=max(scale,grown)
+                if font_growth>1.:ty=height/2
         hw=(sb[2]-sb[0])*scale/2;hh=(sb[3]-sb[1])*scale/2
         tx=min(width-gx-hw,max(gx+hw,tx));ty=min(height-gy-hh,max(gy+hh,ty))
         # Deliberate single-edge raster crops are parent constraints too.
         # Clamp the visible container while retaining its authored hidden part;
         # shifting each image inward would expose artwork the source cropped.
-        for dimension,low,high,extent,half in (
-                ('x',sb[0],sb[2],sw,hw),('y',sb[1],sb[3],sh,hh)):
+        for dimension,low,high,extent,half in (() if tree.get('strict_canvas') else (
+                ('x',sb[0],sb[2],sw,hw),('y',sb[1],sb[3],sh,hh))):
             length='width' if dimension=='x' else 'height'
             leaking=[e for e in original if e[dimension]<0 or e[dimension]+e[length]>extent]
             if not leaking or any(e.get('type')!='image' or
@@ -1477,7 +1602,9 @@ def project_container_tree(elements, tree, width, height):
                      width=e['width']*scale,height=e['height']*scale,
                      rotation=e.get('rotation',0))
             if e.get('type')=='text':
-                q['font_size']=max(1.,e.get('font_size',1.)*scale)
+                # This is the rigid alternative; independent font predictions
+                # remain available in the separately rendered raw candidate.
+                q['font_size']=max(1.,float(e.get('font_size',1.))*scale)
                 q['letter_spacing']=float(e.get('letter_spacing',0))*q['font_size']/max(1.,e.get('font_size',1.))
                 if 'line_height' in e:q['line_height']=e['line_height']
                 else:q.pop('line_height',None)
@@ -1487,13 +1614,14 @@ def project_container_tree(elements, tree, width, height):
             for eid in ids:
                 e=src[eid];q=out[eid]
                 # Only a shape that spans the group can absorb its free axis.
-                if e.get('type')=='shape' and e['width']>=.9*(sb[2]-sb[0]) and abs(e.get('rotation',0)%360)<.5:
+                if e.get('type')=='shape' and e.get('shape_type')!='ellipse' and e['width']>=.9*(sb[2]-sb[0]) and abs(e.get('rotation',0)%360)<.5:
                     delta=min(elastic_width-q['width'],2*min(q['x'],width-q['x']-q['width']))
                     if delta>0:q['x']-=delta/2;q['width']+=delta
         final_box=_frame([out[eid] for eid in ids])
         notes.append({'container_id':node['id'],'mode':node['mode'],'element_ids':ids,
                       'scale':scale,'target_box':[final_box[0],final_box[1],final_box[2]-final_box[0],final_box[3]-final_box[1]],
-                      'anchor_ids':[e['id'] for e in substantial]})
+                      'anchor_ids':[e['id'] for e in substantial],
+                      'position_anchors':position_anchors})
     return result,notes
 
 
@@ -1501,16 +1629,49 @@ def snap_source_axes(elements, source, width, height, tree=None):
     """Complete-link 1D source/target clusters; no transitive snap chains.
 
     Source axis diameter <=4px and target diameter <=3% of the dimension.
-    Competing left/center/right constraints claim an element deterministically;
-    impossible competing axes are recorded rather than successively drifting it.
+    Exact source peer rows/columns allow up to 8% target-axis drift before
+    treating it as a genuine reflow. If a peer row collapses or reverses its
+    left-to-right order, recover its source order and scaled spacing around
+    the source-proportional group center. Competing constraints claim an
+    element deterministically; impossible axes are not applied successively.
     """
+    from math import isfinite
     from engine.resize import _unintended_text_overlaps
     tree=tree or build_container_tree(source)
     src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
+    sw,sh=map(float,(tree['source_canvas']['width'],tree['source_canvas']['height']))
     pairs={frozenset(r[1:3]) for r in tree['relationships'] if r[0] in ('same-column','same-row','backing','overlap')}
     backings=[(r[1],r[2]) for r in tree['relationships'] if r[0]=='backing'
               and r[1] in out and r[2] in out]
     candidates=[]
+    # Source-explicit peer rows/columns are stronger than a generic nearby-axis
+    # cluster. Only use true shared source centers (4px). The target tolerance
+    # is intentionally wider than generic snapping: the held-out beer lockup
+    # keeps a source-exact pair on one row in its target JSON despite a larger
+    # provisional split. The rendered feasibility/overlap checks still gate
+    # the repaired candidate.
+    for relation,dimension in (('same-row','y'),('same-column','x')):
+        adjacency={}
+        for kind,a,b in tree['relationships']:
+            if kind!=relation or a not in out or b not in out:continue
+            if abs(_axis(src[a],(dimension,.5))-_axis(src[b],(dimension,.5)))>4:continue
+            adjacency.setdefault(a,set()).add(b);adjacency.setdefault(b,set()).add(a)
+        seen=set()
+        for start in sorted(adjacency):
+            if start in seen:continue
+            group=set();stack=[start]
+            while stack:
+                eid=stack.pop()
+                if eid in group:continue
+                group.add(eid);stack.extend(adjacency.get(eid,()))
+            seen.update(group)
+            if len(group)<2:continue
+            ids=sorted(group)
+            target_values=[_axis(out[eid],(dimension,.5)) for eid in ids]
+            spread=max(target_values)-min(target_values)
+            limit=.08*(width if dimension=='x' else height)
+            if spread<=limit:
+                candidates.append((0,-len(ids),spread,0,dimension,.5,ids))
     for dimension in ('x','y'):
         limit=.03*(width if dimension=='x' else height)
         for fraction in (0.,.5,1.):
@@ -1539,20 +1700,90 @@ def snap_source_axes(elements, source, width, height, tree=None):
                     spread=max(_axis(e,axis) for e in group)-min(_axis(e,axis) for e in group)
                     preference=sum(e.get('type')=='text' and dimension=='x' and
                                    e.get('text_align','left')=={0.:'left',.5:'center',1.:'right'}[fraction] for e in group)
-                    candidates.append((-len(group),spread,-preference,dimension,fraction,ids))
+                    candidates.append((1,-len(group),spread,-preference,dimension,fraction,ids))
     used={};notes=[]
     # All axes are derived from the original target; no order-dependent medians.
     initial={e['id']:e for e in elements}
-    for _,_,_,dimension,fraction,ids in sorted(candidates):
+    for priority,_,_,_,dimension,fraction,ids in sorted(candidates):
         axis=(dimension,fraction);target=median(_axis(initial[eid],axis) for eid in ids)
+        if (dimension=='x' and fraction==.5
+                and all(abs(_axis(src[eid],axis)-sw/2)<=max(4.,.02*sw) for eid in ids)
+                and abs(target-width/2)<=.18*width and width/height<1.8):
+            target=width/2.
         shifts={eid:target-_axis(out[eid],axis) for eid in ids}
         if any((eid,dimension) in used and abs(shifts[eid])>1e-6 for eid in ids):continue
         if max(abs(v) for v in shifts.values())<1e-7:
             for eid in ids:used[eid,dimension]=True
             continue
-        before={eid:out[eid][dimension] for eid in ids}
+        before={eid:{axis_name:out[eid][axis_name] for axis_name in ('x','y')}
+                for eid in ids}
         old_overlaps=set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))
         for eid,delta in shifts.items():out[eid][dimension]+=delta
+        peer_axis=None
+        if priority==0 and fraction==.5 and len(ids)>1:
+            # A source-exact row is a paired horizontal group, not permission
+            # for two peers to collapse onto one another or switch sides. Keep
+            # their source order and a scaled minimum gap when target proposals
+            # collapse/reverse the row. Center a source-centered peer group on
+            # the target canvas axis; otherwise preserve its proposed centroid.
+            peer_axis='x' if dimension=='y' else 'y'
+            ordered=sorted(ids,key=lambda eid:_axis(src[eid],(peer_axis,.5)))
+            centers=[_axis(out[eid],(peer_axis,.5)) for eid in ordered]
+            source_centers=[_axis(src[eid],(peer_axis,.5)) for eid in ordered]
+            axis_size=width if peer_axis=='x' else height
+            source_size=sw if peer_axis=='x' else sh
+            target_scale=min(width/max(1.,sw),height/max(1.,sh))
+            source_group_center=(source_centers[0]+source_centers[-1])/2.
+            target_group_center=sum(centers)/len(centers)
+            centered_source=abs(source_group_center-source_size/2.)<=max(4.,source_size*.02)
+            if centered_source:
+                target_group_center=axis_size/2.
+            else:
+                expected=source_group_center/source_size*axis_size
+                if abs(target_group_center-expected)<=axis_size*.25:
+                    target_group_center=expected
+            support_ids=[]
+            source_peer_low=min(src[eid]['y'] for eid in ids) if peer_axis=='x' else min(src[eid]['x'] for eid in ids)
+            source_peer_high=max(src[eid]['y']+src[eid]['height'] for eid in ids) if peer_axis=='x' else max(src[eid]['x']+src[eid]['width'] for eid in ids)
+            backing_members={item for pair in backings for item in pair}
+            for sid,se in src.items():
+                if sid in ids or sid not in out:continue
+                source_center=_axis(se,(peer_axis,.5))
+                if not source_centers[0]<source_center<source_centers[-1]:continue
+                source_low=se['y'] if peer_axis=='x' else se['x']
+                source_high=source_low+(se['height'] if peer_axis=='x' else se['width'])
+                if min(source_peer_high,source_high)<=max(source_peer_low,source_low):continue
+                if any(sid in pair and any(other not in ids for other in pair)
+                       for pair in backings):continue
+                if not centered_source:continue
+                extent='width' if peer_axis=='x' else 'height'
+                current_center=_axis(out[sid],(peer_axis,.5))
+                if abs(current_center-target_group_center)>axis_size*.25:continue
+                before.setdefault(sid,{dimension:out[sid][dimension],peer_axis:out[sid][peer_axis]})
+                out[sid][peer_axis]=target_group_center-out[sid][extent]/2.
+                support_ids.append(sid)
+            required=[]
+            for a,b in zip(ordered,ordered[1:]):
+                ea,eb=src[a],src[b]
+                extent='width' if peer_axis=='x' else 'height'
+                source_edge_gap=max(0.,_axis(eb,(peer_axis,.5))-_axis(ea,(peer_axis,.5))
+                                    -(ea[extent]+eb[extent])/2.)
+                target_half_sum=(out[a][extent]+out[b][extent])/2.
+                support_extent=max((out[sid][extent] for sid in support_ids),default=0.)
+                clearance=2.*min(width,height)*.01 if support_extent else 0.
+                required.append(max(0.,target_half_sum+source_edge_gap*target_scale,
+                                    target_half_sum+support_extent+clearance))
+            bad_order=any(b-a<gap-1e-5 for a,b,gap in zip(centers,centers[1:],required))
+            if bad_order and all(isfinite(v) for v in centers):
+                offsets=[(value-source_group_center)*target_scale for value in source_centers]
+                candidate_centers=[target_group_center+offset for offset in offsets]
+                if any(b-a<gap-1e-5 for a,b,gap in zip(candidate_centers,candidate_centers[1:],required)):
+                    candidate_centers=[target_group_center]
+                    for gap in required:candidate_centers.append(candidate_centers[-1]+gap)
+                    shift=target_group_center-(candidate_centers[0]+candidate_centers[-1])/2.
+                    candidate_centers=[value+shift for value in candidate_centers]
+                for eid,center in zip(ordered,candidate_centers):
+                    out[eid][peer_axis]=center-out[eid][extent]/2.
         in_bounds=all(0<=_rotated_bounds(out[eid])[0] and 0<=_rotated_bounds(out[eid])[1]
                       and _rotated_bounds(out[eid])[2]<=width+1e-5
                       and _rotated_bounds(out[eid])[3]<=height+1e-5 for eid in ids)
@@ -1565,7 +1796,8 @@ def snap_source_axes(elements, source, width, height, tree=None):
             if pid not in ids and cid not in ids:continue
             p,c=src[pid],src[cid]
             if any(min(e.get('rotation',0)%360,360-e.get('rotation',0)%360)>.5 for e in (p,c)):continue
-            p0=before.get(pid,out[pid][dimension]);c0=before.get(cid,out[cid][dimension])
+            p0=before.get(pid,{}).get(dimension,out[pid][dimension])
+            c0=before.get(cid,{}).get(dimension,out[cid][dimension])
             source_gaps=(c[dimension]-p[dimension],p[dimension]+p[length]-c[dimension]-c[length])
             before_gaps=(c0-p0,p0+out[pid][length]-c0-out[cid][length])
             after_gaps=(out[cid][dimension]-out[pid][dimension],
@@ -1576,9 +1808,14 @@ def snap_source_axes(elements, source, width, height, tree=None):
                 padding_preserved=False;break
         if (not in_bounds or not padding_preserved
                 or set(_unintended_text_overlaps(result,[{'items':list(src.values())}]))-old_overlaps):
-            for eid,value in before.items():out[eid][dimension]=value
+            for eid,coordinates in before.items():
+                for axis_name,value in coordinates.items():out[eid][axis_name]=value
             continue
         for eid in ids:used[eid,dimension]=True
+        if peer_axis and any(abs(out[eid][peer_axis]-before[eid][peer_axis])>1e-6 for eid in ids):
+            for eid in ids:used[eid,peer_axis]=True
+        for eid in before:
+            if eid not in ids:used[eid,peer_axis]=True
         notes.append({'axis':dimension,'fraction':fraction,'value':target,'element_ids':ids})
     return result,notes
 
@@ -1605,12 +1842,21 @@ def _contrast_text_lockup(weak_ids,tree,source):
                 aligned=any(r[0] in ('same-column','same-row') and {a,b}==set(r[1:3])
                             for r in tree['relationships'])
                 copy=original.get('type')=='text' and e.get('type')=='text' and aligned
-                backing=any(r[0]=='backing' and r[1]==b and r[2]==a
-                            for r in tree['relationships'])
+                backing=(original.get('type')=='text' and
+                         any(r[0]=='backing' and r[1]==b and r[2]==a
+                             for r in tree['relationships']))
                 ornament=(original.get('type')=='text' and e.get('type')!='text'
                           and e['width']*e['height']<.01*sw*sh
                           and min(e['width']/sw,e['height']/sh)<.025 and aligned)
-                if explicit or copy or backing or ornament:
+                lb=_frame([src[eid] for eid in ids])
+                area=max(1.,e['width']*e['height'])
+                padding=.025*min(sw,sh)
+                attachment=(e.get('type')!='text' and float(e.get('opacity',1.))>=.98
+                    and area<.12*sw*sh and
+                    (_overlap(_rotated_bounds(e),lb)>=.1*min(area,max(1.,(lb[2]-lb[0])*(lb[3]-lb[1])))
+                     or (lb[0]-padding<=e['x'] and e['x']+e['width']<=lb[2]+padding
+                         and lb[1]-padding<=e['y'] and e['y']+e['height']<=lb[3]+padding)))
+                if explicit or copy or backing or ornament or attachment:
                     ids.add(b);changed=True
     return ids
 
@@ -1622,7 +1868,7 @@ def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,u
     too large, retain nested copy containers and a source-coupled copy subgroup.
     Fonts, internal offsets, explicit membership and image ratios never change.
     """
-    from engine.resize import _feasible,_unintended_text_overlaps,_rgba,_luminance,_text_visible_bounds
+    from engine.resize import _physical_layout_safe,_unintended_text_overlaps,_rgba,_luminance,_text_visible_bounds
     tree=build_container_tree(source,units);weak=set(weak_ids);variants=[]
     by_id={e['id']:e for e in elements};groups=[]
     pad=min(width,height)*.035
@@ -1642,6 +1888,13 @@ def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,u
     for node in tree['children']:collect(node)
     seen=set()
     for ids in groups:
+        ids=_contrast_text_lockup(ids,tree,source)&by_id.keys()
+        # A nested backing set can intersect an explicit group without
+        # containing all its leaves. Such a set is not a movable lockup.
+        explicit={tree['source_elements'][eid].get('group_id') for eid in ids
+                  if tree['source_elements'][eid].get('group_id') is not None}
+        if any(e.get('group_id') in explicit and eid not in ids
+               for eid,e in tree['source_elements'].items()):continue
         if frozenset(ids) in seen:continue
         seen.add(frozenset(ids));members=[by_id[eid] for eid in ids]
         left=min(e['x'] for e in members);top=min(e['y'] for e in members)
@@ -1664,9 +1917,7 @@ def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,u
                 candidate=deepcopy(elements)
                 for e in candidate:
                     if e['id'] in ids:e['x']+=dx;e['y']+=dy
-                if (not _feasible(candidate,units,width,height,strict_margins=False,
-                                  gap_factor=.004,allow_text_visual_overlap=True)
-                        or _unintended_text_overlaps(candidate,units)):continue
+                if not _physical_layout_safe(candidate,units,source,width,height):continue
                 ratios=[]
                 for e in members:
                     if e.get('type')!='text' or e['id'] not in weak:continue
