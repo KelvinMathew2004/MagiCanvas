@@ -15,6 +15,25 @@ def assess_engine_layout(source,design,report):
     controls=_unintended_control_overlaps(design.get('elements',[]),source)
     from engine.layout_contracts import issues
     contracts=issues(design.get('elements',[]),source,design['canvas']['width'],design['canvas']['height'],units)
+    source_authored=[]
+    if design['canvas']==source['canvas']:
+        src={e['id']:e for e in source['elements']};out={e['id']:e for e in design['elements']}
+        baseline={(d['kind'],tuple(d.get('ids',[]))):d for d in issues(source['elements'],source,source['canvas']['width'],source['canvas']['height'],units)}
+        def unchanged(ids,rigid=False):
+            if not ids or any(i not in src or i not in out for i in ids):return False
+            scalars=('width','height','font_size','rotation')
+            if any(abs(float(src[i].get(k,0))-float(out[i].get(k,0)))>=.01 for i in ids for k in scalars):return False
+            offsets=[(out[i]['x']-src[i]['x'],out[i]['y']-src[i]['y']) for i in ids]
+            if not rigid:return all(abs(x)+abs(y)<.01 for x,y in offsets)
+            return all(abs(x-offsets[0][0])+abs(y-offsets[0][1])<.01 for x,y in offsets)
+        def inherited_contract(d):
+            old=baseline.get((d['kind'],tuple(d.get('ids',[]))))
+            return bool(old is not None and unchanged(d.get('ids',[]),rigid=True)
+                        and float(d.get('amount',0))<=float(old.get('amount',0))+1.)
+        inherited=[d for d in contracts if inherited_contract(d)]
+        inherited_controls=[d for d in controls if unchanged([d['a'],d['b']],rigid=True)]
+        source_authored=inherited+[dict(d,kind='source_control_collision') for d in inherited_controls]
+        contracts=[d for d in contracts if d not in inherited];controls=[d for d in controls if d not in inherited_controls]
     hero=_source_occlusion_defects(design.get('elements',[]),source)
     ratio=image_ratio_violations(source,design)
     visual=report.get('visual') or {}
@@ -48,7 +67,7 @@ def assess_engine_layout(source,design,report):
     if winner.get('invisible_text'):flags.append('invisible_text')
     if structural:flags.append('structural_check')
     return dict(flagged=bool(flags),defect_flags=flags,missing_ids=missing,extra_ids=extra,
-                duplicate_ids=duplicates,image_ratio_violations=ratio,
+                duplicate_ids=duplicates,image_ratio_violations=ratio,source_authored_issues=source_authored,
                 unintended_text_overlaps=overlaps,text_hero_occlusion=hero,control_collisions=controls,visual_contracts=contracts,
                 source_contrast_regressions=regression,glyph_overflow=overflow,
                 structural_errors=structural,layout_defect_cost=winner.get('layout_defect_cost'),

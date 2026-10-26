@@ -1837,6 +1837,11 @@ def _contrast_text_lockup(weak_ids,tree,source):
             for b,e in src.items():
                 if b in ids:continue
                 original=src[a]
+                # An ungrouped corner brand mark is an independent anchor,
+                # even when a broad inferred frame contains its rectangle.
+                if e.get('type')=='image' and not e.get('group_id'):
+                    corner=(e['x']<.18*sw or e['x']+e['width']>.82*sw) and (e['y']<.25*sh or e['y']+e['height']>.80*sh)
+                    if corner and e['width']*e['height']<.12*sw*sh:continue
                 explicit=(original.get('group_id') is not None
                           and original.get('group_id')==e.get('group_id'))
                 aligned=any(r[0] in ('same-column','same-row') and {a,b}==set(r[1:3])
@@ -1864,37 +1869,24 @@ def _contrast_text_lockup(weak_ids,tree,source):
 def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,under):
     """Propose rigid moves; full raster gates decide whether they improve ink.
 
-    Try complete functional containers first. When the inferred container is
-    too large, retain nested copy containers and a source-coupled copy subgroup.
-    Fonts, internal offsets, explicit membership and image ratios never change.
+    Move disjoint source-supported functional groups intact. Oversized groups
+    are not split into leaves. Fonts, internal offsets, explicit membership
+    and image ratios never change.
     """
     from engine.resize import _physical_layout_safe,_unintended_text_overlaps,_rgba,_luminance,_text_visible_bounds
-    tree=build_container_tree(source,units);weak=set(weak_ids);variants=[]
-    by_id={e['id']:e for e in elements};groups=[]
-    pad=min(width,height)*.035
-    def collect(node):
-        ids=set(node.get('element_ids',()))&by_id.keys()
-        if not ids&weak:return
-        members=[by_id[eid] for eid in ids]
-        left=min(e['x'] for e in members);top=min(e['y'] for e in members)
-        right=max(e['x']+e['width'] for e in members);bottom=max(e['y']+e['height'] for e in members)
-        if right-left<=width-2*pad and bottom-top<=height-2*pad:
-            groups.append(ids)
-        else:
-            for child in node.get('children',[]):
-                if child.get('kind')=='container':collect(child)
-            subgroup=_contrast_text_lockup(ids&weak,tree,source)&by_id.keys()
-            if subgroup:groups.append(subgroup)
-    for node in tree['children']:collect(node)
-    seen=set()
+    from engine.source_structure import groups as source_groups
+    spec=source_groups(source);weak=set(weak_ids);variants=[]
+    by_id={e['id']:e for e in elements}
+    # Relocation uses the same disjoint functional groups as projection and
+    # ranking. Expanding a weak word through a second transitive relationship
+    # graph can otherwise move half of a header and an unrelated footer.
+    groups=[set(ids)&by_id.keys() for ids in spec['members'] if set(ids)&weak]
+    pad=min(width,height)*.035;seen=set()
+    protected={ids[0] for ids in spec['members'] if len(ids)==1
+               and spec['semantics'].get(ids[0])=='logo'}
     for ids in groups:
-        ids=_contrast_text_lockup(ids,tree,source)&by_id.keys()
-        # A nested backing set can intersect an explicit group without
-        # containing all its leaves. Such a set is not a movable lockup.
-        explicit={tree['source_elements'][eid].get('group_id') for eid in ids
-                  if tree['source_elements'][eid].get('group_id') is not None}
-        if any(e.get('group_id') in explicit and eid not in ids
-               for eid,e in tree['source_elements'].items()):continue
+        ids=ids-protected
+        if not ids:continue
         if frozenset(ids) in seen:continue
         seen.add(frozenset(ids));members=[by_id[eid] for eid in ids]
         left=min(e['x'] for e in members);top=min(e['y'] for e in members)
@@ -1935,6 +1927,18 @@ def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,u
                     ratios.sort();score=ratios[len(ratios)//5]
                     probes.append((score,abs(dx)/width+abs(dy)/height,candidate,
                                    dict(repair_type='container-calm-cell',element_ids=sorted(ids),dx=dx,dy=dy)))
-        probes.sort(key=lambda row:(-row[0],row[1]))
+        # Once a sampled cell is readable, extra contrast is not a reason to
+        # teleport the lockup farther away. Full glyph metrics still gate it.
+        probes.sort(key=lambda row:(-min(4.5,row[0]),row[1]))
         variants.extend((candidate,[change]) for _,_,candidate,change in probes[:3])
+    best={}
+    for candidate,changes in variants:
+        best.setdefault(tuple(changes[0]['element_ids']),(candidate,changes[0]))
+    if len(best)>1:
+        combined=deepcopy(elements);combined_by={e['id']:e for e in combined};changes=[]
+        for _,change in best.values():
+            changes.append(change)
+            for eid in change['element_ids']:
+                combined_by[eid]['x']+=change['dx'];combined_by[eid]['y']+=change['dy']
+        if _physical_layout_safe(combined,units,source,width,height):variants.insert(0,(combined,changes))
     return variants[:3]

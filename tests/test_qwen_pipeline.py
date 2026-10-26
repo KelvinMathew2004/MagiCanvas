@@ -187,15 +187,18 @@ class QwenPipelineTests(unittest.TestCase):
         self.assertFalse(_qwen_contrast_safe(q,alternatives,True))
         self.assertFalse(_qwen_contrast_safe(dict(cost=8.,low_contrast=['a']),[dict(cost=1.,low_contrast=[])]))
 
-    def test_qwen_prior_can_select_a_repaired_sibling(self):
+    def test_qwen_tie_preference_can_select_a_repaired_sibling(self):
         entries=[dict(candidate=dict(name=n),cost=0.,low_contrast=[])
                  for n in ['split','qwen-proposal','qwen-font-fitted']]
-        r=_select_visual_candidate(entries,[1.,9.,9.2],[.8,.4,.9],True,True,False)
+        r=_select_visual_candidate(entries,[9.,9.,9.2],[.8,.4,.9],True,True,False)
         self.assertEqual(r['selected_index'],2)
         self.assertEqual(r['qwen_family_band'],[1,2])
         # A large objective regression is excluded even with a high image score.
-        r=_select_visual_candidate(entries,[1.,9.,90.],[.8,.4,1.],True,True,False)
+        r=_select_visual_candidate(entries,[9.,9.,90.],[.8,.4,1.],True,True,False)
         self.assertEqual(r['selected_index'],1)
+        # Model origin cannot override a materially worse exact defect cost.
+        r=_select_visual_candidate(entries,[1.,9.,9.2],[.1,.9,1.],True,True,False)
+        self.assertEqual(r['selected_index'],0)
 
     def test_strong_qwen_is_not_penalized_for_heuristic_display_font_shrink(self):
         def entry(name,cost,size,busy):

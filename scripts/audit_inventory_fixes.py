@@ -63,7 +63,7 @@ def main():
         records=[r for r in records if r['pair_id'] in selected];cached=[r for r in cached if r['pair_id'] in selected]
     if args.offset:records=records[args.offset:];cached=cached[args.offset:]
     if args.limit:records=records[:args.limit];cached=cached[:args.limit]
-    paths=['engine/resize.py','engine/qwen_refine.py','engine/qwen_seed.py','scripts/layout_defects.py']
+    paths=['engine/source_structure.py','engine/clean_zones.py','engine/structural_reflow.py','engine/layout_contracts.py','engine/resize.py','engine/qwen_refine.py','engine/qwen_seed.py','scripts/layout_defects.py']
     manifest={'kind':args.kind,'arm':args.arm if args.kind=='crello' else 'comparison','cases':len(records),'pair_ids':[r['pair_id'] for r in records],'code_sha256':{f:sha256((ROOT/f).read_bytes()).hexdigest() for f in paths},'raw_coordinates_reused':True}
     mp=args.output/'run_manifest.json'
     if mp.exists() and json.loads(mp.read_text())!=manifest:raise SystemExit('Code changed: select a new output directory.')

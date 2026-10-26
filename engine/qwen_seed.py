@@ -105,6 +105,7 @@ class QwenEarlyStoppingCriteria:
         self.expected_ids = set(expected_ids)
         self.N = len(self.expected_ids)
         self.stopped_early = False
+        self.reason = None
         self._counter = 0
 
     def __call__(self, input_ids, scores=None, **kwargs) -> bool:
@@ -148,6 +149,7 @@ class QwenEarlyStoppingCriteria:
         if self.expected_ids and self.expected_ids.issubset(set(unique_ids)):
             if s_depth == 0 and c_depth == 0 and len(text.strip()) > 10:
                 self.stopped_early = True
+                self.reason = 'all-expected-elements-closed'
                 return True
             if has_dup or len(matches) > self.N:
                 self.stopped_early = True
@@ -176,7 +178,7 @@ def _output_budget(tokenizer,source,version,prompt_tokens,context_limit=8192):
     estimated=len(tokenizer(json.dumps({'elements':rows},separators=(',',':')),
                             add_special_tokens=False)['input_ids'])
     available=max(0,context_limit-prompt_tokens)
-    return min(4096,available,max(512,int(estimated*1.5)+64))
+    return min(4096,available,max(512,96*len(rows)+256,int(estimated*1.75)+128))
 
 
 def _missing_proposal(original,source_by_id,proposals,fallback):
@@ -383,7 +385,9 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
         diagnostics.update(prompt_tokens=int(inputs['input_ids'].shape[1]),
                            generated_tokens=int(generated.shape[0]),output_token_budget=max_tokens,
                            hit_token_limit=int(generated.shape[0])>=max_tokens and not stop_criteria.stopped_early,prompt_version=prompt_version,
-                           json_complete=json_complete,duplicate_ids=[],unknown_ids=[])
+                           json_complete=json_complete,duplicate_ids=[],unknown_ids=[],
+                           expected_element_count=len(expected_ids),stop_reason=stop_criteria.reason,
+                           output_context_available=context_limit-int(inputs['input_ids'].shape[1]))
         payload = _extract_json(response)
         if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
             return None, "Qwen returned invalid JSON"

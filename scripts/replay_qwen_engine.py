@@ -18,13 +18,28 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
 
+def _prediction_queues(records,cached,completed=()):
+    """Keep distinct target-template pairs separate even at equal canvas sizes."""
+    from collections import defaultdict,deque
+    by_pair={r['pair_id']:r for r in cached};queues=defaultdict(deque)
+    for record in records:
+        if record['pair_id'] in completed:continue
+        row=by_pair[record['pair_id']]
+        key=(tuple(e['id'] for e in row['source_design']['elements']),
+             row['target_canvas']['width'],row['target_canvas']['height'])
+        queues[key].append(row)
+    return queues,by_pair
+
+
 def replay(records, cached, adapter, model, checkpoint):
     import torch
     from engine import qwen_seed
     from engine.qwen_prompt import font_reference
     from scripts.evaluate_qwen_adapter import read_sources,run_engine_mode
-    by_key={(tuple(e['id'] for e in r['source_design']['elements']),
-             r['target_canvas']['width'],r['target_canvas']['height']):r for r in cached}
+    completed=set()
+    if checkpoint and Path(checkpoint).is_file():
+        completed={r['pair_id'] for r in map(json.loads,Path(checkpoint).read_text().splitlines()) if not r.get('engine_error')}
+    queues,by_pair=_prediction_queues(records,cached,completed)
     original_generate=qwen_seed.generate_seed
     state={}
 
@@ -43,7 +58,7 @@ def replay(records, cached, adapter, model, checkpoint):
     load.cache_clear=lambda:None
 
     def generate(source,target,base_elements,diagnostics=None):
-        row=by_key[(tuple(e['id'] for e in source['elements']),target['width'],target['height'])]
+        row=queues[(tuple(e['id'] for e in source['elements']),target['width'],target['height'])].popleft()
         if not row.get('raw_proposal_valid',bool(row.get('official_path'))) or not row.get('qwen_model_elements'):
             raise ValueError(f"Cannot replay incomplete raw prediction: {row['pair_id']}")
         aliases={e['id']:f'e{i:03d}' for i,e in enumerate(source['elements'])}
@@ -60,8 +75,13 @@ def replay(records, cached, adapter, model, checkpoint):
         rows=run_engine_mode(records,read_sources(),Path(adapter),Path(model),checkpoint)
     for row in rows:
         if row.get('engine_error'):continue
-        old=by_key[(tuple(e['id'] for e in row['source_design']['elements']),row['target_canvas']['width'],row['target_canvas']['height'])]
-        if row.get('engine_error'):continue
+        old=by_pair[row['pair_id']]
+        expected={e['id']:e for e in old.get('qwen_model_elements',[])}
+        actual={e['id']:e for e in row.get('qwen_model_elements',[])}
+        if expected and actual:
+            if set(expected)!=set(actual) or any(abs(expected[eid].get(k,0)-actual[eid].get(k,0))>1e-6
+                    for eid in expected for k in ('x','y','width','height','font_size')):
+                raise ValueError(f"Saved prediction changed for pair {row['pair_id']}")
         if (row.get('raw_geometry_mae') is not None and old.get('raw_geometry_mae') is not None
                 and abs(row['raw_geometry_mae']-old['raw_geometry_mae'])>1e-8):
             raise ValueError(f"Raw coordinates changed while replaying {row['pair_id']}")

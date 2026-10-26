@@ -227,6 +227,7 @@ def _restore_attached_ornaments(elements,source,width,height):
         if ornament.get('type')=='text' or ornament['id'] not in out:continue
         if float(ornament.get('opacity',1.))<.98:continue
         area=ornament['width']*ornament['height']/(sw*sh)
+        if ornament['type']=='image' and not ornament.get('group_id') and area<.12 and (ornament['x']<sw*.18 or ornament['x']+ornament['width']>sw*.82) and (ornament['y']<sh*.25 or ornament['y']+ornament['height']>sh*.8):continue
         thin=min(ornament['width']/sw,ornament['height']/sh)<.02
         if area>=.025 or not (thin or max(ornament['width']/sw,ornament['height']/sh)<.15):continue
         ob=_rotated_bounds(ornament);anchors=[]
@@ -406,7 +407,7 @@ def _skyscraper_seed(units,width,height,source_size):
     roles={r:sorted((u for u in units if u['role']==r),key=_semantic_order)
            for r in ('header','copy','action','tag','visual','footer','decoration')}
     output=[];blocks=[]
-    specs=[('header',.09),('visual',.23),('copy',.30),('tag',.15),('action',.08),('footer',.06)]
+    specs=[('header',.09),('visual',.26),('tag',.14),('copy',.28),('action',.09),('footer',.06)]
     active=[(role,share) for role,share in specs if roles[role]]
     usable=height*.90-gap*max(0,len(active)-1);total=sum(share for _,share in active)
     scale=sqrt(width*height/max(1.,source_size[0]*source_size[1]))
@@ -443,6 +444,35 @@ def _calibrate_text_boxes(elements,source,width,height,tree=None):
     for e in result:
         if e.get('type')!='text' or not e.get('content','').strip():continue
         original=deepcopy(e);size=max(1.,float(e.get('font_size',1)))
+        authored=src.get(e['id'],e)
+        rotated_parent=next((out[sid] for sid,s in src.items() if sid in out and s['type']!='text'
+            and authored.get('group_id') is not None and s.get('group_id')==authored.get('group_id')
+            and s.get('z_index',0)<authored.get('z_index',0)
+            and abs(float(e.get('rotation',0)))>.5
+            and abs(float(out[sid].get('rotation',0))-float(e.get('rotation',0)))<.5),None)
+        if rotated_parent is not None:
+            # A shared rotated panel owns local glyph coordinates. Clamping
+            # its label into the global axis-aligned panel box shifts and
+            # shrinks correctly centered type on every fitting round.
+            ink=_render_text_ink(e)
+            if ink:
+                e['width']=max(e['width'],ceil(ink[2])+2.)
+                e['height']=max(e['height'],ceil(ink[3])+2.)
+            notes.append(dict(element_id=e['id'],rotated_control_local_fit=True,font_before=size,font_after=e['font_size']))
+            continue
+        if abs(float(e.get('rotation',0)))>.5:
+            # A vertical caption is measured in its local frame. Widening it
+            # against global X obstacles changes its pivot and can swing ink
+            # into a neighbouring headline even when the source lockup fits.
+            before=_text_visible_bounds(e);ink=_render_text_ink(e)
+            if ink:
+                if ink[2]>round(e['width']):e['width']=ceil(ink[2])+2.
+                if ink[3]>round(e['height']):e['height']=ceil(ink[3])+2.
+                after=_text_visible_bounds(e)
+                e['x']+=(before[0]+before[2]-after[0]-after[2])/2
+                e['y']+=(before[1]+before[3]-after[1]-after[3])/2
+            notes.append(dict(element_id=e['id'],rotated_text_local_fit=True,font_before=size,font_after=e['font_size']))
+            continue
         left,right,top,bottom=0.,float(width),0.,float(height)
         authored=src.get(e['id'],e)
         sw,sh=source['canvas']['width'],source['canvas']['height']
@@ -541,6 +571,21 @@ def _calibrate_text_boxes(elements,source,width,height,tree=None):
     return result,notes
 
 
+def _finish_candidate_text(elements,source,units,width,height,measured_stack=False):
+    """Fit with renderer metrics, then restore the final painted alignment axes."""
+    from engine.layout_contracts import _primary_axis,_copy_clearance
+    result,notes=_calibrate_text_boxes(elements,source,width,height)
+    if measured_stack:
+        from engine.structural_reflow import resolve_stack
+        result=resolve_stack(result,source,units,width,height)
+    _primary_axis(result,source,units,width,height,apply=True)
+    _copy_clearance(result,source,width,height)
+    from engine.source_structure import coherent_copy_axes
+    coherent_copy_axes(result,source,units,width,height)
+    _center_control_labels(result,source,width,height)
+    return result,notes
+
+
 def _backing_containment_defects(elements, source):
     """Painted labels retain their explicit source backing, including bearings."""
     out={e['id']:e for e in elements};defects=[]
@@ -566,6 +611,7 @@ def _backing_containment_defects(elements, source):
 
 def _physical_layout_safe(elements, units, source, width, height):
     """Hard raster/geometry checks, without inferred unit gaps or margins."""
+    from engine.layout_contracts import art_occlusions,image_collisions
     originals={e['id']:e for unit in units for e in unit['items']}
     if len(elements)!=len(originals) or {e['id'] for e in elements}!=set(originals):return False
     for e in elements:
@@ -580,6 +626,8 @@ def _physical_layout_safe(elements, units, source, width, height):
     return (not _backing_containment_defects(elements,source)
             and not _unintended_text_overlaps(elements,units)
             and not _unintended_control_overlaps(elements,source)
+            and not art_occlusions(elements,source)
+            and not image_collisions(elements,source)
             and _objective_layout_cost(elements,units,source,width,height,1.,True)<=1.)
 
 
@@ -2817,18 +2865,35 @@ def _enrich_units(source, units):
     labels = [u for u in units if u['label']]
     for u in units:
         x, y, r, b = u['bounds']
+        images=[e for e in u['items'] if e['type']=='image']
+        text=[e for e in u['items'] if e['type']=='text']
+        # Asset semantics supplement geometry across source orientations.
+        # Missing small media cannot become the largest available hero.
+        missing=images and all(e.get('asset_id') and not (_asset_root(e)/e['asset_id']).is_file() for e in images)
+        watermark=images and any('watermark' in e['id'].lower() or ('badge' in e.get('asset_id','').lower() and e.get('z_index',0)<=2) for e in images)
+        if images and (r-x)*(b-y)<sw*sh*.12 and (watermark or missing and (y>sh*.5 or x>sw*.8)):
+            u.update(role='footer',semantic='footer',footer_anchor='right' if (x+r)/2>sw/2 else 'left',missing_asset=bool(missing),confidence=.95)
+            continue
+        named_logo=images and any('logo' in e.get('asset_id','').lower() or e['id'].lower()=='logo' for e in images)
+        side_logo=bool(sw/sh>=2.5 and images and not text and x<sw*.18 and (r-x)/max(1.,b-y)>=1.8 and (r-x)*(b-y)<sw*sh*.12 and all(e.get('fit','contain')=='contain' for e in images))
+        if named_logo or side_logo:
+            u.update(role='header',semantic='logo',confidence=.95)
+            continue
+        if text and not images and not u['label'] and b>=sh*.82 and max(e['font_size'] for e in text)<=min(10.,head_font*.40) and all(float(e.get('opacity',1.))<.8 or _rgba(e.get('color','')) and _rgba(e['color'])[3]<.8 for e in text):
+            u.update(role='footer',semantic='footer',confidence=.9)
+            continue
         # Repeated compact pills on the same source row are badges, rather
         # than multiple CTAs. A taller, distinct button remains an action.
         angle=sum(e.get('rotation',0) for e in u['items'])/len(u['items'])
         size=max((e.get('font_size',0) for e in u['items']),default=0)
-        peers = [v for v in labels if v is not u and abs(v['bounds'][1]-y) < sh*.025
+        peers = [v for v in labels if v is not u and (abs(v['bounds'][1]-y) < sh*.025 or abs(sum(v['bounds'][::2])/2-(x+r)/2)<sw*.025)
                  and .85 < (v['bounds'][3]-v['bounds'][1])/max(1,b-y) < 1.15
                  and abs(sum(e.get('rotation',0) for e in v['items'])/len(v['items'])-angle)<=2
                  and .85 < max((e.get('font_size',0) for e in v['items']),default=0)/max(1,size) < 1.15]
         # A single label placed in a source corner is an accent even when it
         # is not rotated. Keep it anchored to that corner when the canvas
         # changes shape; a repeated row of similar labels remains a badge set.
-        source_corner_label=bool(u['label'] and y<sh*.25 and (x<sw*.2 or r>sw*.8))
+        source_corner_label=bool(u['label'] and y<sh*.28 and (x<sw*.18 or r>sw*.8))
         u['corner_callout']=bool(source_corner_label and (abs(angle)>2 or not peers))
         if u['corner_callout']:
             # It is still a content badge: preserve its corner preference by
@@ -2844,14 +2909,15 @@ def _enrich_units(source, units):
             continue
         if u['label'] and peers:
             u['peer_ids']=tuple(sorted(v['items'][0]['id'] for v in [u]+peers))
-        if u['label'] and peers and b-y < sh*.09:
+        if u['label'] and peers:
             u['role'] = 'tag'
         images = [e for e in u['items'] if e['type'] == 'image']
         small_image = images and not any(e['type'] == 'text' for e in u['items']) and (r-x)*(b-y) < sw*sh*.09
         near_top = (y+b)/2 < sh*.22
         near_corner = min(abs(x), abs(sw-r)) < sw*.12 and y < sh*.28
         relative_small = ((r-x)*(b-y)<sw*sh*.12 if len(image_units)==1 else max((_area(e) for e in images), default=0) < largest_image*.55)
-        if u['role'] == 'header' or small_image and (near_top or near_corner) and (relative_small or b-y < sh*.15):
+        if u['role']=='header' and images:u['role']='visual'
+        if small_image and (near_top or near_corner) and relative_small:
             u['role'], semantic, confidence = 'header', 'logo', .72
         elif u is headline:
             semantic, confidence = 'headline', .88
@@ -3021,23 +3087,6 @@ def _stack_seed(units, width, height, scale, visual_share, hero_first, source_si
                 move_corner_callouts=False):
     """Story/square flow with separate top badges and bottom CTA/footer bands."""
     working = deepcopy(units)
-    if move_corner_callouts:
-        for unit in working:
-            if unit.get('corner_callout'):
-                # Preserve the source's top-corner intent: when moved inward,
-                # an accent remains an upper kicker instead of joining the CTA.
-                unit.update(role='tag',semantic='badge',corner_callout=False,
-                            source_upper=True,inflow_callout=True,confidence=.78)
-                for item in unit['items']:
-                    item['rotation']=0
-                unit['bounds']=_bounds(unit['items'])
-            elif (unit['role']=='footer' and unit.get('source_footer_anchor',unit.get('footer_anchor')) in ('left','right')
-                  and any(item['type']=='image' for item in unit['items'])):
-                # Free the legal footer's corner by putting its small image
-                # beside the primary action in the main content flow.
-                unit.update(role='action',semantic='badge',inflow_footer_asset=True,confidence=.78)
-                unit.pop('footer_anchor',None)
-                unit.pop('source_footer_anchor',None)
     # Use the existing text-aware packing mechanics, but keep top badges out
     # of the CTA row and preserve headline/body order independently of grouping.
     sw, sh = source_size
@@ -3050,6 +3099,8 @@ def _safe_grid(units, width, height, scale):
     """Last-resort disjoint slots, retaining every element and atomic group."""
     if not units:
         return []
+    if width/height<=.4:
+        return _skyscraper_seed(units,width,height,next((u.get('source_canvas') for u in units if u.get('source_canvas')),(width,height)))
     margin = min(width,height)*.025
     count = len(units)
     cols = max(1, min(count, round(sqrt(count*width/height))))
@@ -3849,6 +3900,66 @@ def _banner_centerline(records,width,height):
     return (margin+max(margin,bottom))/2
 
 
+@lru_cache(maxsize=2048)
+def _text_visual_coverage_cached(payload):
+    """Intersect actual Skia glyph pixels with the later asset's alpha mask."""
+    import json
+    import numpy as np
+    import skia
+    from PIL import Image
+    from math import floor,ceil,radians,cos,sin
+    from cr_renderer.schema import TextElement
+    from cr_renderer.text_utils import generate_map,render_text
+    from renderer.converter.convert import convert_chameleon_to_crello
+    text,visual=json.loads(payload)
+    box=_text_visible_bounds(text);x,y=floor(box[0]),floor(box[1]);w,h=ceil(box[2])-x,ceil(box[3])-y
+    if min(w,h)<=0:return 0.
+    manager=_layout_font_manager()
+    if manager is None or w*h>16_000_000:return _overlap(box,_bounds([visual]))/max(1,w*h)
+    e=deepcopy(text)
+    for run in e.get('style_runs') or []:run['end']=int(run['end'])-1
+    example,_=convert_chameleon_to_crello({'canvas':{'width':1,'height':1},'elements':[e]},manager)
+    prop=TextElement(uuid='',type='textElement',width=e['width'],height=e['height'],
+        text=example['text'][0],fontSize=example['font_size'][0],font=example['font'][0],
+        lineHeight=example['line_height'][0],textAlign=example['text_align'][0],
+        capitalize=example['capitalize'][0],letterSpacing=example['letter_spacing'][0],
+        boldMap=generate_map(example['font_bold'][0]),italicMap=generate_map(example['font_italic'][0]),
+        colorMap=generate_map(['#ffffff']*len(example['text'][0])),lineMap=generate_map(example['text_line'][0]))
+    surface=skia.Surface(w,h);canvas=surface.getCanvas();canvas.clear(0)
+    canvas.translate(e['x']-x+e['width']/2,e['y']-y+e['height']/2)
+    canvas.rotate(float(e.get('rotation',0)));canvas.translate(-e['width']/2,-e['height']/2)
+    render_text(canvas,manager,prop)
+    yy,xx=np.nonzero(surface.makeImageSnapshot().toarray()[:,:,3]>32)
+    if not len(xx):return 0.
+    try:
+        if visual.get('type')=='shape':
+            from renderer.converter.shapes import render_shape,shape_fill_alpha
+            alpha=np.asarray(render_shape(visual).getchannel('A'))*shape_fill_alpha(visual)
+        else:
+            with Image.open(_asset_root(visual)/visual['asset_id']) as im:
+                alpha=np.asarray(im.convert('RGBA').getchannel('A'))
+    except (OSError,KeyError):return _overlap(box,_bounds([visual]))/max(1,w*h)
+    vh,vw=alpha.shape;ew,eh=visual['width'],visual['height']
+    dx=xx+x+.5-(visual['x']+ew/2);dy=yy+y+.5-(visual['y']+eh/2)
+    a=radians(float(visual.get('rotation',0)));lx=dx*cos(a)+dy*sin(a)+ew/2;ly=-dx*sin(a)+dy*cos(a)+eh/2
+    inside=(lx>=0)&(lx<ew)&(ly>=0)&(ly<eh)
+    fit=visual.get('fit','contain')
+    if fit=='fill':px=lx*vw/ew;py=ly*vh/eh
+    else:
+        scale=(max if fit=='cover' else min)(ew/vw,eh/vh)
+        px=(lx-(ew-vw*scale)/2)/scale;py=(ly-(eh-vh*scale)/2)/scale
+    inside &= (px>=0)&(px<vw)&(py>=0)&(py<vh)
+    active=np.zeros(len(xx),dtype=bool)
+    active[inside]=alpha[py[inside].astype(int),px[inside].astype(int)]*float(visual.get('opacity',1.))>32
+    return float(active.mean())
+
+
+def _text_visual_coverage(text,visual):
+    import json
+    if _overlap(_text_visible_bounds(text),_bounds([visual]))<=0:return 0.
+    return _text_visual_coverage_cached(json.dumps([text,visual],sort_keys=True))
+
+
 def _source_occlusion_defects(elements,source):
     """Detect text newly buried by a later-painted visual layer.
 
@@ -3873,8 +3984,8 @@ def _source_occlusion_defects(elements,source):
             if original_visual.get('z_index',0)<=original_text.get('z_index',0):continue
             visual=candidate.get(original_visual['id'])
             if visual is None:continue
-            source_fraction=_overlap(source_text_box,_bounds([original_visual]))/source_text_area
-            candidate_fraction=_overlap(text_box,_bounds([visual]))/text_area
+            source_fraction=_text_visual_coverage(original_text,original_visual)
+            candidate_fraction=_text_visual_coverage(text,visual)
             allowed=max(source_fraction*1.5,source_fraction+.20)
             if candidate_fraction>allowed and candidate_fraction>.15:
                 defects.append(dict(text_id=text['id'],visual_id=visual['id'],
@@ -4423,6 +4534,12 @@ def _luminance(rgb):
     return sum((v/12.92 if v<=.04045 else ((v+.055)/1.055)**2)*w for v,w in zip(channels,(.2126,.7152,.0722)))
 
 
+def _contrast_floor_deficit(source_value,target_value):
+    """Do not relocate weak authored type for a sub-0.4 contrast variation."""
+    if source_value<3. and target_value>=max(1.75,source_value-.40):return 0.
+    return max(0.,source_value*.90-target_value)
+
+
 def _qwen_contrast_safe(candidate, baseline, qwen_primary=False, source_contrast=None):
     """Compare soft warnings against available alternatives; invisible ink is hard."""
     if candidate is None or candidate.get('invisible_text') or 'error' in candidate:
@@ -4525,6 +4642,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         families.add(family);shortlist.append(candidate)
         if len(shortlist)>=(4 if qwen_candidates else 8):break
     # Keep combined font+position siblings available to the visual judge.
+    shortlist.extend(c for c in candidates if c.get('measured_stack') and c not in shortlist)
+    shortlist.extend(c for c in candidates if c.get('source_attached') and c not in shortlist)
     shortlist.extend(qwen_candidates[:6])
     shortlist.extend(c for c in qwen_candidates
                      if c['name'] in ('qwen-pre-container-font-fitted','qwen-raw-constraint-repaired') and c not in shortlist)
@@ -4584,7 +4703,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     relationship_context=_visual_relationship_context(units,source,width,height)
     primary_regressions=[]
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
-        reference_image=None;source_under=None;source_contrast={}
+        reference_image=None;source_under=None;source_contrast={};clean_zones=[]
         try:
             reference_path=Path(directory)/'source.png'
             render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
@@ -4621,19 +4740,41 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         ratios.append((max(a,b)+.05)/(min(a,b)+.05))
                     ratios.sort();lower=ratios[max(0,len(ratios)//5)]
                     threshold=3. if e.get('font_size',0)>=24 or e.get('font_weight')=='bold' and e.get('font_size',0)>=18 else 4.5
-                    source_contrast[e['id']]=dict(lower_quintile=lower,
+                    source_contrast[e['id']]=dict(lower_quintile=lower,p05=ratios[max(0,len(ratios)//20)],
                         low=lower<threshold*.97,near_threshold=lower<threshold*1.20)
         except Exception:
             # Identity continuity is a soft cue; candidate diagnostics remain
             # useful if the source render fails for an unrelated renderer issue.
             pass
+        try:
+            from engine.clean_zones import source_zones
+            source_background=dict(canvas=source['canvas'],elements=[e for e in source['elements'] if e['id'] in {b['id'] for b in backgrounds}])
+            source_background_path=Path(directory)/'source-background-only.png'
+            render_diagnostic(source_background,diagnostic_assets,source_background_path,max_size=640)
+            with Image.open(source_background_path) as image:
+                clean_zones=source_zones(source,image.convert('RGB'),source_contrast,units)
+        except (OSError,ValueError,ImportError):
+            clean_zones=[]
         for index,candidate in enumerate(shortlist):
-            if candidate['name']!='qwen-pre-container-font-fitted':
-                from engine.layout_contracts import repair
-                repaired=repair(candidate['elements'],source,units,width,height)
+            from engine.layout_contracts import repair
+            repaired=(deepcopy(candidate['elements']) if candidate.get('source_attached')
+                      else repair(candidate['elements'],source,units,width,height))
+            from engine.qwen_refine import snap_source_axes
+            if not candidate.get('source_attached'):
+                repaired,_=snap_source_axes(repaired,source,width,height)
+            if candidate.get('measured_stack'):
+                from engine.structural_reflow import resolve_stack
+                repaired=resolve_stack(repaired,source,units,width,height)
+            if candidate.get('source_attached'):
                 repaired,contract_fonts=_calibrate_text_boxes(repaired,source,width,height)
-                candidate=dict(candidate,elements=repaired,contract_font_calibration=contract_fonts)
-                shortlist[index]=candidate
+                from engine.source_structure import fit_groups_to_canvas
+                from engine.layout_contracts import _primary_axis
+                _primary_axis(repaired,source,units,width,height,apply=True)
+                fit_groups_to_canvas(repaired,source,width,height)
+            else:
+                repaired,contract_fonts=_finish_candidate_text(repaired,source,units,width,height,candidate.get('measured_stack',False))
+            candidate=dict(candidate,elements=repaired,contract_font_calibration=contract_fonts)
+            shortlist[index]=candidate
             candidate_backgrounds=candidate.get('backgrounds',backgrounds)
             doc=_assemble(candidate['elements'],candidate_backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
@@ -4682,7 +4823,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     low=sorted_contrasts[max(0,len(sorted_contrasts)//5)]
                     minimum=sorted_contrasts[0]
                     contrast_by_text[e['id']]=dict(minimum=round(minimum,3),
-                                                   lower_quintile=round(low,3),
+                                                   lower_quintile=round(low,3),p05=round(sorted_contrasts[max(0,len(sorted_contrasts)//20)],3),
+                                                   background_rgb_jump=float(max(max(p[k] for p in backing_pixels)-min(p[k] for p in backing_pixels) for k in range(3))),
                                                    ink_pixels=len(active_pixels))
                     deficit=max(0,(target-low)/target)
                     cost+=deficit*5
@@ -4722,6 +4864,15 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         structural_errors.append(f"{element['id']}: image aspect distortion")
                 structural_errors.extend(_backing_containment_defects(doc['elements'],source))
                 entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,occlusion_defects=occlusion_defects,structural_errors=structural_errors,warnings=warnings,image=full.copy()))
+                if clean_zones and 'clean-zone-fitted' not in candidate['name'] and sum('clean-zone-fitted' in c['name'] for c in shortlist)<3:
+                    from engine.clean_zones import fitted_variant
+                    fitted=fitted_variant(candidate['elements'],source,units,
+                        [e for e in doc['elements'] if e['id'] in {b['id'] for b in backgrounds}],
+                        clean_zones,contrast_by_text,width,height,diagnostic_assets)
+                    if fitted:
+                        repaired,change=fitted
+                        shortlist.append(dict(candidate,name=candidate['name']+'-clean-zone-fitted',
+                                              elements=repaired,clean_zone_repairs=[change]))
                 regressions=[eid for eid in weak if not source_contrast.get(eid,{}).get('low',True)]
                 if candidate['name']=='qwen-container-locked-font-fitted':
                     primary_regressions=regressions
@@ -4860,6 +5011,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         entry['source_lockup_error']=source_emblem_error(entry['candidate']['elements'],units)
         entry['source_relationship_error']=relationship_variant(
             entry['candidate']['elements'],units,source,width,height)[2]
+        from engine.source_structure import relationship_cost
+        entry['attachment_error']=relationship_cost(entry['candidate']['elements'],source,width,height)
         entry['contrast_regressions']=[];entry['mild_contrast_regressions']=[]
         penalty=0.
         for eid,metrics in entry.get('contrast_by_text',{}).items():
@@ -4867,8 +5020,11 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             if floor is not None:floor=min(4.5,floor)
             low=metrics.get('lower_quintile');minimum=metrics.get('minimum')
             if floor is None or low is None:continue
-            deficit=max(0.,floor*.90-low)
+            deficit=_contrast_floor_deficit(floor,low)
             penalty+=12.*deficit
+            if eid in {z['text_id'] for z in clean_zones} and metrics.get('p05',99)<2.0:
+                entry['contrast_regressions'].append(eid)
+                penalty+=25.*(2.-metrics['p05'])
             if not source_contrast.get(eid,{}).get('low',True):
                 if low<min(2.2,floor*.72):
                     entry['contrast_regressions'].append(eid)
@@ -4927,13 +5083,21 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 ratio=float(e['font_size'])/max(1.,old['font_size']*reference)
                 hierarchy.append(max(0.,.60-ratio)/.60)
         hierarchy_cost=20.*sum(hierarchy)/max(1,len(hierarchy))
+        # Aspect changes should not reward uniformly tiny source-preserving
+        # cards. Compare type scale to a bounded area-based scale, retaining
+        # the source hierarchy rather than enlarging every caption to 14px.
+        if ratio_shift>=1.8:
+            readable_reference=min(sqrt(width*height/(source['canvas']['width']*source['canvas']['height'])),reference*1.8)*.8
+            relative=[max(0.,1.-float(e['font_size'])/max(1.,original_text[e['id']]['font_size']*readable_reference))
+                      for e in entry['candidate']['elements'] if e.get('type')=='text' and e['id'] in original_text]
+            hierarchy_cost+=18.*sum(relative)/max(1,len(relative))
         entry['readability_penalty']+=hierarchy_cost;entry['cost']+=hierarchy_cost
         entry['physical_eligible']=(not entry.get('structural_errors')
                 and not _unintended_text_overlaps(entry['candidate']['elements'],units)
                 and not entry.get('invisible_text') and not entry.get('occlusion_defects')
                 and layout_cost<=1.)
         entry['has_layout_defects']=(not entry['physical_eligible'] or bool(entry['contrast_regressions']))
-    objective_cost=lambda e:(e['layout_defect_cost']+e['cost']+25.*e.get('source_relationship_error',0.)/max(1.,ratio_shift)
+    objective_cost=lambda e:(e['layout_defect_cost']+e['cost']+100.*e.get('attachment_error',0.)
                              +60.*_simple_stack_axis_error(e['candidate']['elements'],units,source,width))
     qwen_feasible={e['candidate']['name']:e['physical_eligible']
                    for e in valid if e['candidate']['name'].startswith('qwen-')}
@@ -5281,10 +5445,12 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
     if readable_heur:
         floor=min(readable_heur)+1.25
         clean_qwen=[i for i in clean_qwen if valid[i].get('readability_penalty',0.)<=floor]
-    # A safe learned reflow is not vetoed by a deterministic template prior.
-    # A defective learned layout still competes on the same hard metrics.
+    # Learned preference is a tie-break, not a bypass of measured attachment,
+    # readability and raster costs. Otherwise a "clean" but fractured model
+    # layout hides a substantially better source-consistent alternative.
     clean_qwen=[i for i in clean_qwen if i not in dominated]
-    pool=clean_qwen if qwen_primary and clean_qwen else global_band
+    tied_qwen=[i for i in clean_qwen if i in global_band]
+    pool=tied_qwen if qwen_primary and tied_qwen else global_band
     chosen=max(pool,key=lambda i:(scores[i],-selection_costs[i],-i))
     qchoice=max(family_band,key=lambda i:(scores[i],-selection_costs[i],-i)) if family_band else None
     best_heuristic=min(heur,key=lambda i:costs[i]) if heur else None
@@ -5575,9 +5741,20 @@ def _adapt_with_diagnostics(source,target_canvas):
             if factor<1. or abs(dx)+abs(dy)>1e-7:
                 for e in members:e['x']+=dx;e['y']+=dy
                 adjustments.append([e['id'] for e in members])
-        name='identity-source-bounds' if adjustments else 'identity'
+        # Preserve authored art overlap, but a separate paragraph touching a
+        # control is a readability defect, not a required artistic lockup.
+        from engine.layout_contracts import _clear_controls
+        before_clearance=deepcopy(result['elements'])
+        _clear_controls(result['elements'],source,width,height)
+        readability_changed=result['elements']!=before_clearance
+        if readability_changed:
+            bg,identity_units=_analyze(source)
+            candidate=[e for e in result['elements'] if e['id'] not in {b['id'] for b in bg}]
+            if _unintended_text_overlaps(candidate,identity_units):
+                result['elements']=before_clearance;readability_changed=False
+        name='identity-control-clearance' if readability_changed else 'identity-source-bounds' if adjustments else 'identity'
         return result,dict(winner=name,generated=1,feasible=1,starts=1,
-            candidates=[],visual={'used':False,'reason':'Identity: preserve source, legalize only invalid frames'},
+            candidates=[],visual={'used':False,'reason':'Identity: preserve source art; legalize frames and separate unrelated copy from controls'},
             qwen='not needed for identity resize',qwen_diagnostics={'proposal_received':False,'bounded_source_groups':adjustments},
             hard_constraints_passed=True,seconds={'total':round(perf_counter()-start,4)})
     backgrounds,units=_analyze(source)
@@ -6095,12 +6272,26 @@ def _adapt_with_diagnostics(source,target_canvas):
     qwen_diagnostics['structural_rejected_candidates']=structural_rejections
     if incomplete_seed_names:
         qwen_diagnostics['incomplete_seed_candidates']=incomplete_seed_names
+    from engine.structural_reflow import stack_seed
+    measured_stack=stack_seed(source,units,width,height)
+    if measured_stack:
+        optimized.append(dict(name='measured-semantic-stack',elements=measured_stack,
+                              energy=_energy(measured_stack,units,source,width,height,desired),measured_stack=True))
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     for candidate in optimized:
         if candidate['name']=='qwen-pre-container-font-fitted':continue
         candidate['elements']=_source_geometry_safety(candidate['elements'],source,units,width,height)
         candidate['elements'],_= _calibrate_text_boxes(candidate['elements'],source,width,height)
         candidate['energy']=_energy(candidate['elements'],units,source,width,height,desired)
+    # Independent source-attached alternatives bypass leaf-level topology
+    # search. Their groups still undergo the same render and defect gates.
+    from engine.source_structure import seed as attached_seed
+    for flow in (False,True):
+        attached=attached_seed(source,units,width,height,flow=flow)
+        if attached:
+            optimized.append(dict(name='source-attached-flow' if flow else 'source-attached-proportional',
+                                  elements=attached,source_attached=True,
+                                  energy=_energy(attached,units,source,width,height,desired)))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
     # No geometry mutations after render verification. Store the selected

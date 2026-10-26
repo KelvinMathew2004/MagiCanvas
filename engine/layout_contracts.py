@@ -6,7 +6,7 @@ axes and an edge photograph's visible subject from generic layer overlap.
 """
 from copy import deepcopy
 from functools import lru_cache
-from math import ceil
+from math import ceil,radians,cos,sin
 import json
 
 
@@ -66,8 +66,7 @@ def _controls_cached(payload):
     for panel in items:
         if (panel.get('type') not in ('shape','image') or float(panel.get('opacity',1.))<.9
                 or panel['width']*panel['height']>.17*sw*sh
-                or panel['width']/max(1.,panel['height'])<1.6
-                or abs(float(panel.get('rotation',0.)))>.5):continue
+                or panel['width']/max(1.,panel['height'])<1.6):continue
         pb=_rotated_bounds(panel);labels=[]
         for text in items:
             if text.get('type')!='text' or not text.get('content','').strip() or len(text['content'])>80:continue
@@ -88,6 +87,17 @@ def controls(source):
     return _controls_cached(json.dumps(source,sort_keys=True,separators=(',',':')))
 
 
+def control_font_floor(source,tid,width,height):
+    from engine.source_structure import groups
+    original=next(e for e in source['elements'] if e['id']==tid)
+    scaled=original['font_size']*min(width/source['canvas']['width'],height/source['canvas']['height'])
+    # Date/price annotations on illustrated panels are not action buttons.
+    # Their source hierarchy supplies the floor; CTA/badge labels retain the
+    # stronger minimum used for small interactive controls.
+    interactive=groups(source)['semantics'].get(tid) in ('cta','badge')
+    return max(scaled,min(14.,min(width,height)*.06)) if interactive else scaled
+
+
 def center_control_labels(elements,source,width,height):
     """Center painted labels on the actual control body, including ribbon cores."""
     from engine.resize import _render_text_ink
@@ -96,8 +106,14 @@ def center_control_labels(elements,source,width,height):
         if pid not in out or tid not in out:continue
         panel,label=out[pid],out[tid];body=control_body(panel);ink=_render_text_ink(label)
         if ink is None:continue
-        label['x']=(body[0]+body[2]-ink[0]-ink[2])/2
-        label['y']=(body[1]+body[3]-ink[1]-ink[3])/2
+        angle=radians(float(panel.get('rotation',0.)))
+        cx,cy=panel['x']+panel['width']/2,panel['y']+panel['height']/2
+        dx,dy=(body[0]+body[2])/2-cx,(body[1]+body[3])/2-cy
+        target_x,target_y=cx+dx*cos(angle)-dy*sin(angle),cy+dx*sin(angle)+dy*cos(angle)
+        label['rotation']=float(panel.get('rotation',0.))
+        dx,dy=(ink[0]+ink[2]-label['width'])/2,(ink[1]+ink[3]-label['height'])/2
+        label['x']=target_x-label['width']/2-dx*cos(angle)+dy*sin(angle)
+        label['y']=target_y-label['height']/2-dx*sin(angle)-dy*cos(angle)
         label['x']=max(0.,min(width-label['width'],label['x']))
         label['y']=max(0.,min(height-label['height'],label['y']))
 
@@ -109,17 +125,23 @@ def _grow_controls(elements,source,width,height):
     for pid,tid in controls(source):
         if pid not in out or tid not in out:continue
         panel,label=out[pid],out[tid];original=src[tid]
-        floor=max(original['font_size']*reference*.85,min(14.,min(width,height)*.06))
+        floor=control_font_floor(source,tid,width,height)
         desired=max(label['font_size'],floor)
         probe=deepcopy(label);_set_font_size(probe,desired)
         natural=_text_info(probe,1e9)[1]
         probe.update(width=natural+4.,height=max(probe['height'],desired*2.5))
         ink=_render_text_ink(probe)
         if ink is None:continue
-        padding=max(3.,desired*.55)
+        source_body=control_body(src[pid]);source_ink=_render_text_ink(original)
+        source_ink_world=(original['x']+source_ink[0],original['y']+source_ink[1],original['x']+source_ink[2],original['y']+source_ink[3]) if source_ink else source_body
+        authored_pad=max(3.,min(source_ink_world[0]-source_body[0],source_body[2]-source_ink_world[2]))
+        padding=max(3.,min(desired*.55,authored_pad*desired/max(1.,original['font_size'])))
         old_body=control_body(panel);fx=(old_body[2]-old_body[0])/max(1.,panel['width']);fy=(old_body[3]-old_body[1])/max(1.,panel['height'])
         wanted_w=max(panel['width'],(ink[2]-ink[0]+2*padding)/max(.2,fx))
         wanted_h=max(panel['height'],(ink[3]-ink[1]+max(4.,desired*.45))/max(.2,fy))
+        if panel['type']=='shape':
+            wanted_h=max(src[pid]['height']*desired/max(1.,original['font_size']),
+                         (ink[3]-ink[1]+max(4.,desired*.45))/max(.2,fy))
         if panel['type']=='image':
             aspect=src[pid]['width']/src[pid]['height'];wanted_w=max(wanted_w,wanted_h*aspect);wanted_h=wanted_w/aspect
         if wanted_w>width-2*margin or wanted_h>height*.3:continue
@@ -177,8 +199,25 @@ def _card_gutters(elements,source,units,width,height):
         ids=[i for i in node['element_ids'] if i in out]
         if len(ids)<2:continue
         old=[tree['source_elements'][i] for i in ids];sb=_raw_bounds(old);area=(sb[2]-sb[0])*(sb[3]-sb[1])
-        if not any(e['type']!='text' and e['width']*e['height']>=.65*area for e in old):continue
-        members=[out[i] for i in ids];box=_raw_bounds(members);g=.04*min(width,height)
+        if not any(e['type']!='text' and e['width']*e['height']>=.65*area
+                   and any(t['type']=='text' and t.get('z_index',0)>e.get('z_index',0)
+                           and t['x']>=e['x'] and t['y']>=e['y']
+                           and t['x']+t['width']<=e['x']+e['width']+1
+                           and t['y']+t['height']<=e['y']+e['height']+1 for t in old) for e in old):continue
+        members=[out[i] for i in ids]
+        # A real containing card is a lockup, not a bag of leaves. Recover
+        # authored internal offsets before applying the common gutter scale.
+        backing=max((e for e in old if e['type']!='text'),key=lambda e:e['width']*e['height'])
+        target=out[backing['id']]
+        scale=min(target['width']/backing['width'],target['height']/backing['height'])
+        x0=target['x']+(sb[0]-backing['x'])*scale;y0=target['y']+(sb[1]-backing['y'])*scale
+        source_by={e['id']:e for e in old}
+        for e in members:
+            authored=source_by[e['id']]
+            e.update(x=x0+(authored['x']-sb[0])*scale,y=y0+(authored['y']-sb[1])*scale,
+                     width=authored['width']*scale,height=authored['height']*scale)
+            if e['type']=='text':_set_font_size(e,authored['font_size']*scale)
+        box=_raw_bounds(members);g=.04*min(width,height)
         left=g if sb[0]>.02*sw else 0.;right=width-g if sb[2]<.98*sw else width
         top=g if sb[1]>.02*sh else 0.;bottom=height-g if sb[3]<.98*sh else height
         factor=min(1.,(right-left)/max(1.,box[2]-box[0]),(bottom-top)/max(1.,box[3]-box[1]))
@@ -190,22 +229,27 @@ def _card_gutters(elements,source,units,width,height):
 
 
 def _primary_axis(elements,source,units,width,height,apply=False):
+    """Shared canvas axes belong to functional groups, never their suffixes."""
     from engine.resize import _bounds,_text_visible_bounds
+    from engine.source_structure import groups
     if width/height>=1.8:return []
-    sw=source['canvas']['width'];out={e['id']:e for e in elements};candidates=[]
-    for u in units:
-        if u.get('semantic') not in ('logo','hero','headline','subheading','body','cta'):continue
-        if abs((u['bounds'][0]+u['bounds'][2])/2-sw/2)>.02*sw:continue
-        es=[out[e['id']] for e in u['items'] if e['id'] in out]
-        if not es:continue
-        box=_text_visible_bounds(es[0]) if len(es)==1 and es[0]['type']=='text' else _bounds(es)
-        delta=width/2-(box[0]+box[2])/2
-        if abs(delta)<=.18*width:candidates.append((es,delta))
+    sw=source['canvas']['width'];out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']}
+    semantics={e['id']:u.get('semantic') for u in units for e in u['items']};candidates=[]
+    def painted(es):
+        boxes=[_text_visible_bounds(e) if e['type']=='text' else _bounds([e]) for e in es]
+        return (min(b[0] for b in boxes),min(b[1] for b in boxes),max(b[2] for b in boxes),max(b[3] for b in boxes))
+    for ids in groups(source)['members']:
+        if not any(semantics.get(i) in ('logo','hero','headline','subheading','body','cta') for i in ids):continue
+        if not all(i in out for i in ids):continue
+        before=painted([src[i] for i in ids])
+        if abs((before[0]+before[2])/2-sw/2)>.025*sw:continue
+        es=[out[i] for i in ids];box=painted(es);delta=width/2-(box[0]+box[2])/2
+        if abs(delta)<=.18*width or width/height<.85:candidates.append((es,delta))
     if len(candidates)<2:return []
     issues=[]
     for es,delta in candidates:
         if abs(delta)>.004*width:issues.append(dict(kind='primary_axis',ids=[e['id'] for e in es],amount=abs(delta)))
-        if apply:
+        if apply and all(e['x']+delta>=0 and e['x']+e['width']+delta<=width for e in es):
             for e in es:e['x']+=delta
     return issues
 
@@ -236,6 +280,100 @@ def _clear_controls(elements,source,width,height):
                 if dy>0 and text['y']+text['height']+dy<=height:text['y']+=dy
 
 
+def _source_edge_attachments(elements,source,width,height):
+    """Retain visible foreground edge contact in a comparable aspect regime."""
+    from engine.resize import _bounds,_text_visual_coverage
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    if max(width/height,sw/sh)/min(width/height,sw/sh)>=1.4:return
+    out={e['id']:e for e in elements};originals={e['id']:e for e in source['elements']}
+    for original in source['elements']:
+        if original['type']!='image' or original['width']*original['height']>.65*sw*sh:continue
+        sb=_bounds([original])
+        if abs(sb[3]-sh)>max(2.,.004*sh):continue
+        e=out.get(original['id'])
+        if e is None:continue
+        box=_bounds([e]);dy=height-box[3]
+        if abs(dy)<.5:continue
+        probe=dict(e,y=e['y']+dy)
+        if probe['y']<0:continue
+        # A source attachment is weaker than readable copy. Skip the anchor
+        # when reflow makes its old edge incompatible with the new copy.
+        blocked=False
+        for t in elements:
+            if t['type']!='text':continue
+            old=_text_visual_coverage(originals[t['id']],original)
+            if _text_visual_coverage(t,probe)>max(old+.2,.25):blocked=True;break
+        if not blocked:
+            group=e.get('group_id')
+            for member in elements:
+                if member['id']==e['id'] or (group is not None and member.get('group_id')==group):member['y']+=dy
+
+
+def _control_visual_clearance(elements,source,width,height):
+    """Keep source-disjoint compact controls clear of a brand/hero image."""
+    from engine.resize import _bounds,_overlap
+    out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']}
+    pairs=controls(source);owners={p for p,_ in pairs};sw,sh=source['canvas']['width'],source['canvas']['height']
+    gap=max(3.,.012*min(width,height))
+    for pid,tid in pairs:
+        if pid not in out or tid not in out:continue
+        panel,label=out[pid],out[tid]
+        for e in elements:
+            old=src[e['id']]
+            if e['type']!='image' or e['id'] in owners or old['width']*old['height']>.5*sw*sh:continue
+            if _overlap(_bounds([src[pid]]),_bounds([old]))>1:continue
+            pb,eb=_bounds([panel]),_bounds([e])
+            if _overlap(pb,eb)<=1:continue
+            if width<height:
+                dy=eb[3]+gap-pb[1]
+                if pb[3]+dy<=height-gap:panel['y']+=dy;label['y']+=dy
+            else:
+                dx=eb[2]+gap-pb[0]
+                if pb[2]+dx<=width-gap:panel['x']+=dx;label['x']+=dx
+
+
+def _control_peer_clearance(elements,source,width,height):
+    """Growing readable labels must not make neighboring controls collide."""
+    from engine.resize import _overlap
+    out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']}
+    pairs=[(out[p],out[t]) for p,t in controls(source) if p in out and t in out]
+    pairs.sort(key=lambda pair:(pair[0]['y'],pair[0]['x']))
+    gap=max(3.,min(width,height)*.012)
+    for i,(a,_) in enumerate(pairs):
+        ab=(a['x'],a['y'],a['x']+a['width'],a['y']+a['height'])
+        for b,label in pairs[i+1:]:
+            sa,sb=src[a['id']],src[b['id']]
+            if _overlap((sa['x'],sa['y'],sa['x']+sa['width'],sa['y']+sa['height']),
+                        (sb['x'],sb['y'],sb['x']+sb['width'],sb['y']+sb['height']))>1:continue
+            bb=(b['x'],b['y'],b['x']+b['width'],b['y']+b['height'])
+            if _overlap(ab,bb)<=0:continue
+            dx=abs((ab[0]+ab[2]-bb[0]-bb[2])/2)/max(a['width'],b['width'])
+            dy=abs((ab[1]+ab[3]-bb[1]-bb[3])/2)/max(a['height'],b['height'])
+            if dy>=dx:
+                shift=ab[3]+gap-b['y']
+                if bb[3]+shift<=height-gap:b['y']+=shift;label['y']+=shift
+            else:
+                shift=ab[2]+gap-b['x']
+                if bb[2]+shift<=width-gap:b['x']+=shift;label['x']+=shift
+
+
+def _copy_clearance(elements,source,width,height):
+    """Axis projection must not turn separate source copy into intersecting ink."""
+    from engine.resize import _text_visible_bounds,_overlap
+    src={e['id']:e for e in source['elements']}
+    labels={tid for _,tid in controls(source)}
+    copy=[e for e in elements if e['type']=='text' and e['id'] not in labels]
+    copy.sort(key=lambda e:src[e['id']]['y'])
+    gap=max(3.,min(width,height)*.012)
+    for i,a in enumerate(copy):
+        ab=_text_visible_bounds(a);sa=_text_visible_bounds(src[a['id']])
+        for b in copy[i+1:]:
+            sb=_text_visible_bounds(src[b['id']]);bb=_text_visible_bounds(b)
+            if sa[3]>sb[1]+1 or min(ab[2],bb[2])<=max(ab[0],bb[0]):continue
+            dy=ab[3]+gap-bb[1]
+            if dy>0 and bb[3]+dy<=height-gap:b['y']+=dy
+
+
 def _brand_order(elements,source,units,width,height,apply=False):
     from engine.resize import _raw_bounds,_set_font_size
     if width/height<2.5:return []
@@ -261,14 +399,130 @@ def _brand_order(elements,source,units,width,height,apply=False):
     return issues
 
 
+def art_occlusions(elements,source):
+    """New glyph intersections with opaque foreground art, in either paint order."""
+    from engine.resize import _analyze,_text_visual_coverage,_overlap,_bounds
+    background={e['id'] for e in _analyze(source)[0]};src={e['id']:e for e in source['elements']};defects=[]
+    for text in elements:
+        if text['type']!='text':continue
+        for art in elements:
+            if art['type'] not in ('image','shape') or art['id'] in background or float(art.get('opacity',1))<.9:continue
+            if text.get('group_id') is not None and text.get('group_id')==art.get('group_id'):continue
+            old_text,old_art=src[text['id']],src[art['id']]
+            if _overlap(_bounds([text]),_bounds([art]))<=0:continue
+            authored=_text_visual_coverage(old_text,old_art)
+            if authored>.05:continue
+            coverage=_text_visual_coverage(text,art)
+            # Even a narrow ring/rule can cross several glyphs while covering
+            # less than five percent of an entire paragraph's ink.
+            if coverage>max(.02,authored+.01):defects.append(dict(kind='text_art_occlusion',ids=[text['id'],art['id']],coverage=coverage))
+    return defects
+
+
+def image_collisions(elements,source):
+    from engine.resize import _analyze,_bounds,_overlap
+    background={e['id'] for e in _analyze(source)[0]};src={e['id']:e for e in source['elements']};defects=[]
+    images=[e for e in elements if e['type']=='image' and e['id'] not in background]
+    for i,a in enumerate(images):
+        for b in images[:i]:
+            if a.get('group_id') is not None and a.get('group_id')==b.get('group_id'):continue
+            if _overlap(_bounds([src[a['id']]]),_bounds([src[b['id']]]))>1:continue
+            overlap=_overlap(_bounds([a]),_bounds([b]))
+            if overlap>1:defects.append(dict(kind='image_on_image',ids=[a['id'],b['id']],area=overlap))
+    return defects
+
+
+def _separate_art(elements,source,width,height):
+    from engine.resize import _bounds,_text_visible_bounds,_text_visual_coverage
+    out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']};pad=.025*min(width,height)
+    for defect in art_occlusions(elements,source):
+        text,art=(out[i] for i in defect['ids'])
+        if art.get('group_id') is not None:continue
+        tb=_text_visible_bounds(text);old=src[art['id']];sw,sh=source['canvas']['width'],source['canvas']['height']
+        probes=[(old['x']/sw*width,old['y']/sh*height),(tb[2]+pad,art['y']),(tb[0]-pad-art['width'],art['y']),
+                (art['x'],tb[3]+pad),(art['x'],tb[1]-pad-art['height'])]
+        valid=[]
+        for x,y in probes:
+            candidate=dict(art,x=min(width-art['width']-pad,max(pad,x)),y=min(height-art['height']-pad,max(pad,y)))
+            if candidate['x']<0 or candidate['y']<0:continue
+            if all(_text_visual_coverage(t,candidate)<=.05 or _text_visual_coverage(src[t['id']],old)>.05 for t in elements if t['type']=='text'):
+                valid.append(candidate)
+        if valid:
+            chosen=min(valid,key=lambda e:abs(e['x']-art['x'])+abs(e['y']-art['y']));art.update(chosen)
+
+
+def _pin_corners(elements,source,units,width,height):
+    from engine.resize import _callout_block,_fit_raw_block,_raw_bounds,_shift
+    out={e['id']:e for e in elements};sw,sh=source['canvas']['width'],source['canvas']['height'];margin=.045*min(width,height)
+    for u in units:
+        if not u.get('corner_callout') or u['role']!='decoration':continue
+        from engine.resize import _set_font_size,_render_text_ink,_text_info
+        block=_callout_block(u,width,height,sw,sh)
+        panels=[e for e in block if e['type']=='shape'];labels=[e for e in block if e['type']=='text']
+        if len(panels)==1 and len(labels)==1:
+            p,t=panels[0],labels[0];original=next(e for e in u['items'] if e['type']=='text')
+            desired=max(original['font_size']*min(width/sw,height/sh),min(14.,min(width,height)*.06))
+            _set_font_size(t,desired);natural=_text_info(t,1e9)[1];t.update(width=natural+4.,height=desired*2.)
+            ink=_render_text_ink(t)
+            if ink:
+                p.update(x=0.,y=0.,width=max(natural+desired*1.4,ink[2]-ink[0]+desired*1.4),height=ink[3]-ink[1]+desired*.8)
+                t.update(x=(p['width']-t['width'])/2,y=(p['height']-t['height'])/2)
+        block=_fit_raw_block(block,width-2*margin if width/height<=.4 else width*.30,height*.45);b=_raw_bounds(block)
+        x=width-margin-b[2]+b[0] if sum(u['bounds'][::2])/2>sw/2 else margin
+        for e in _shift(block,x-b[0],margin-b[1]):
+            if e['id'] in out:out[e['id']].update(e)
+
+
+def _footer_caps(elements,units,width):
+    from engine.resize import _raw_bounds,_set_font_size
+    out={e['id']:e for e in elements}
+    for u in units:
+        if u['role']!='footer' or not any(e['type']=='image' for e in u['items']):continue
+        members=[out[e['id']] for e in u['items'] if e['id'] in out];l,t,r,b=_raw_bounds(members)
+        scale=min(1.,.14*width/max(1,r-l))
+        for e in members:
+            e.update(x=l+(e['x']-l)*scale,y=t+(e['y']-t)*scale,width=e['width']*scale,height=e['height']*scale)
+            if e['type']=='text':_set_font_size(e,e['font_size']*scale)
+
+
+def _spread_story_copy(elements,source,units,width,height):
+    from engine.resize import _bounds,_raw_bounds
+    if height/width<1.5:return
+    heroes=[u for u in units if u.get('semantic')=='hero'];copy=[u for u in units if u['role'] in ('copy','action')]
+    if len(heroes)!=1 or not 1<=len(copy)<=4:return
+    out={e['id']:e for e in elements};hero=_bounds([out[e['id']] for e in heroes[0]['items'] if e['id'] in out])
+    copy.sort(key=lambda u:(u['role']=='action',u['bounds'][1]));blocks=[[out[e['id']] for e in u['items'] if e['id'] in out] for u in copy]
+    if any(not b for b in blocks):return
+    bounds=_raw_bounds([e for b in blocks for e in b]);font=max((e.get('font_size',0) for e in blocks[0]),default=24)
+    if bounds[3]-bounds[1]>=height*.15 or bounds[1]-hero[3]<=height*.3:return
+    gaps=[(.85 if copy[i+1]['role']=='action' else .65)*font for i in range(len(blocks)-1)]
+    total=sum(_raw_bounds(b)[3]-_raw_bounds(b)[1] for b in blocks)+sum(gaps)
+    cursor=min(height-width*.05-total,(hero[3]+height-total)/2)
+    for i,block in enumerate(blocks):
+        b=_raw_bounds(block)
+        for e in block:e['y']+=cursor-b[1]
+        cursor+=b[3]-b[1]+(gaps[i] if i<len(gaps) else 0)
+
+
 def repair(elements,source,units,width,height):
     result=deepcopy(elements)
     _scene_reflow(result,source,width,height)
     _card_gutters(result,source,units,width,height)
+    _source_edge_attachments(result,source,width,height)
     _primary_axis(result,source,units,width,height,apply=True)
     _grow_controls(result,source,width,height)
-    _clear_controls(result,source,width,height)
+    # A control cleared away from an image can enter the copy band. Alternate
+    # these shared constraints until the short dependent chain settles.
+    for _ in range(3):
+        _control_visual_clearance(result,source,width,height)
+        _copy_clearance(result,source,width,height)
+        _clear_controls(result,source,width,height)
+        _control_peer_clearance(result,source,width,height)
+    _separate_art(result,source,width,height)
     _brand_order(result,source,units,width,height,apply=True)
+    _footer_caps(result,units,width)
+    _spread_story_copy(result,source,units,width,height)
+    _pin_corners(result,source,units,width,height)
     center_control_labels(result,source,width,height)
     return result
 
@@ -280,9 +534,12 @@ def issues(elements,source,width,height,units=None):
         if pid not in out or tid not in out:continue
         p,t=out[pid],out[tid];body=control_body(p);ink=_text_visible_bounds(t);size=t['font_size']
         ref=min(width/source['canvas']['width'],height/source['canvas']['height'])
-        floor=max(src[tid]['font_size']*ref*.85,min(14.,min(width,height)*.06))
+        floor=control_font_floor(source,tid,width,height)
         if size<floor*.94:result.append(dict(kind='control_readability',ids=[pid,tid],amount=floor-size))
-        pad=min((ink[0]-body[0]),body[2]-ink[2]);expected=max(2.,size*.35)
+        pad=min((ink[0]-body[0]),body[2]-ink[2])
+        source_body=control_body(src[pid]);source_ink=_text_visible_bounds(src[tid])
+        authored_pad=max(3.,min(source_ink[0]-source_body[0],source_body[2]-source_ink[2]))
+        expected=max(2.,min(size*.35,authored_pad*size/max(1.,src[tid]['font_size'])))
         if pad<expected-.5:result.append(dict(kind='control_padding',ids=[pid,tid],amount=expected-pad))
         if abs((ink[1]+ink[3]-body[1]-body[3])/2)>max(1.,.02*p['height']):result.append(dict(kind='control_label_axis',ids=[pid,tid]))
         for e in elements:
@@ -297,10 +554,30 @@ def issues(elements,source,width,height,units=None):
     units=units if units is not None else _analyze(source)[1]
     result.extend(_primary_axis(elements,source,units,width,height))
     result.extend(_brand_order(elements,source,units,width,height))
+    from engine.qwen_refine import build_container_tree
+    tree=build_container_tree(source,units);sw,sh=source['canvas']['width'],source['canvas']['height']
+    for node in tree['children']:
+        ids=[i for i in node['element_ids'] if i in out]
+        if len(ids)<2:continue
+        old=[tree['source_elements'][i] for i in ids];sb=_raw_bounds(old);area=(sb[2]-sb[0])*(sb[3]-sb[1])
+        if not any(e['type']!='text' and e['width']*e['height']>=.65*area
+                   and any(t['type']=='text' and t.get('z_index',0)>e.get('z_index',0)
+                           and t['x']>=e['x'] and t['y']>=e['y']
+                           and t['x']+t['width']<=e['x']+e['width']+1
+                           and t['y']+t['height']<=e['y']+e['height']+1 for t in old) for e in old):continue
+        box=_raw_bounds([out[i] for i in ids]);g=.04*min(width,height)
+        gaps=(box[0],box[1],width-box[2],height-box[3])
+        authored=(sb[0]>.02*sw,sb[1]>.02*sh,sb[2]<.98*sw,sb[3]<.98*sh)
+        if any(needed and gap_<g-.5 for needed,gap_ in zip(authored,gaps)):
+            result.append(dict(kind='foreground_gutter',ids=ids))
     scene=edge_scene(source,width,height)
     if scene:
         for e in elements:
             if e['type']=='text':
                 box=_text_visible_bounds(e)
                 if _overlap(box,scene['subject'])>1:result.append(dict(kind='background_subject_overlap',ids=[e['id'],scene['photo']['id']]))
+    result.extend(art_occlusions(elements,source))
+    result.extend(image_collisions(elements,source))
+    from engine.source_structure import containment_issues
+    result.extend(containment_issues(elements,source))
     return result

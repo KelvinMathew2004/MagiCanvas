@@ -140,3 +140,9 @@ in this repository. See [docs/CRELLO_DATA_AND_TRAINING.md](docs/CRELLO_DATA_AND_
 before sharing data or training artifacts.
 
 Current engine repair evidence and repeatable replay commands are documented in [docs/INVENTORY_REPAIR_AUDIT.md](docs/INVENTORY_REPAIR_AUDIT.md).
+
+The October 26 visual-contract revision adds source-inferred control padding, painted ribbon-body centering, foreground-card gutters, brand reading order, and stacked primary axes. Text/image occlusion now measures glyph pixels against image alpha instead of transparent image envelopes. See [docs/VISUAL_CONTRACT_REPAIRS.md](docs/VISUAL_CONTRACT_REPAIRS.md) for scope, replay commands, and limitations.
+
+The earlier [source-evidence review](docs/SOURCE_EVIDENCE_REVIEW.md) documents crop-aware negative-space candidates, orientation-independent roles, measured semantic fallback, final glyph-axis calibration, and the expanded dataset viewers. That checkpoint covered 139 replayed outputs and 12 freshly inferred designs. The current verification is linked below.
+
+The current [source-attachment review](docs/SOURCE_ATTACHMENT_REVIEW.md) records shared functional groups, cost-tie-only Qwen selection, rotated-caption calibration and 151 frozen-proposal regression outputs. Four independently authored designs now add eight actual model ON/OFF tests with different content, photographs, source formats and neutral IDs; the older Solstice-element variants remain regression fixtures. These new fixtures are never training data, and the viewer distinguishes raw predictions, learned-family winners and deterministic fallback.
