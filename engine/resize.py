@@ -149,6 +149,14 @@ def _set_font_size(element,size):
     element['letter_spacing']=float(element.get('letter_spacing',0))*element['font_size']/old
 
 
+def _source_ink_overhang(element,authored):
+    """Allow authored font bearings, which the renderer paints without clipping."""
+    ink=_render_text_ink(authored) if authored else None
+    if ink is None:return (0.,0.)
+    scale=float(element.get('font_size',1))/max(1.,float(authored.get('font_size',1)))
+    return (max(0.,-ink[0])*scale,max(0.,-ink[1])*scale)
+
+
 def _calibrate_text_boxes(elements,source,width,height,tree=None):
     """Widen into empty space, then adjust height, then shrink only as needed."""
     result=deepcopy(elements);out={e['id']:e for e in result};src={e['id']:e for e in source['elements']}
@@ -191,6 +199,14 @@ def _calibrate_text_boxes(elements,source,width,height,tree=None):
                 if other['x']+other['width']<=e['x']+1:left=max(left,other['x']+other['width']+gap)
             if other['x']<e['x']+e['width'] and other['x']+other['width']>e['x']:
                 if other['y']>=e['y']+e['height']-1:bottom=min(bottom,other['y']-gap)
+        # A misplaced alignment anchor cannot be repaired by reducing the font:
+        # right-aligned ink keeps its right edge at the same coordinate at every
+        # size. Move the frame into its available backing before fitting glyphs.
+        if right>left and bottom>top:
+            e['width']=min(e['width'],right-left)
+            e['height']=min(e['height'],bottom-top)
+            e['x']=min(max(e['x'],left),right-e['width'])
+            e['y']=min(max(e['y'],top),bottom-e['height'])
         align=e.get('text_align','left');anchor=e['x']+(e['width']/2 if align=='center' else e['width'] if align=='right' else 0)
         room=(2*min(anchor-left,right-anchor) if align=='center' else anchor-left if align=='right' else right-anchor)
         natural=_text_info(e,1e9,size)[1]+max(1.,size*.03)
@@ -207,17 +223,27 @@ def _calibrate_text_boxes(elements,source,width,height,tree=None):
             bounds=_render_text_ink(probe)
             if bounds is None:
                 h,w,_=_text(probe);bounds=(0.,0.,w,h)
-            return (bounds[0]>=-max(1.,probe['font_size']*.03) and bounds[2]<=probe['width']+1
+            bearing_x,bearing_y=_source_ink_overhang(probe,authored)
+            return (bounds[0]>=-max(1.,probe['font_size']*.03,bearing_x+1) and bounds[2]<=probe['width']+1
                     and bounds[3]<=probe['height']+1 and probe['y']+bounds[3]<=bottom+1
-                    and probe['x']+bounds[2]<=right+1)
+                    and probe['x']+bounds[2]<=right+1
+                    and probe['x']+bounds[0]>=max(0.,left-bearing_x)-1
+                    and probe['y']+bounds[1]>=max(0.,top-bearing_y)-1)
         if not fits(e):
             low,high=1.,size
-            for _ in range(12):
-                mid=(low+high)/2;probe=deepcopy(e);_set_font_size(probe,mid)
-                if fits(probe):low=mid
-                else:high=mid
-            _set_font_size(e,low)
-        if any(abs(float(e.get(k,0))-float(original.get(k,0)))>1e-5 for k in ('x','width','height','font_size','letter_spacing')):
+            minimum=deepcopy(e);_set_font_size(minimum,low)
+            if fits(minimum):
+                for _ in range(12):
+                    mid=(low+high)/2;probe=deepcopy(e);_set_font_size(probe,mid)
+                    if fits(probe):low=mid
+                    else:high=mid
+                _set_font_size(e,low)
+            else:
+                # No feasible lower bound means the search is invalid. Preserve
+                # readable copy and let the defect gate reject this candidate.
+                notes.append({'element_id':e['id'],'unfittable':True,
+                              'reason':'no feasible glyph fit in available region'})
+        if any(abs(float(e.get(k,0))-float(original.get(k,0)))>1e-5 for k in ('x','y','width','height','font_size','letter_spacing')):
             notes.append({'element_id':e['id'],'widened':e['width']>original['width']+1e-5,
                           'font_before':size,'font_after':e['font_size'],
                           'measured_with':'skia-render' if _render_text_ink(e) is not None else 'font-metrics-fallback'})
@@ -286,6 +312,11 @@ def _intentional_stack_pair(a, b, a_box=None, b_box=None):
     if a.get('z_index', 0) == b.get('z_index', 0):
         return False
     back, front = (a, b) if a.get('z_index', 0) < b.get('z_index', 0) else (b, a)
+    # A translucent decorative wash may cross copy without becoming its
+    # semantic parent. Explicit groups are already joined by the analyzer.
+    if (back.get('type')=='shape' and back.get('opacity',1.)<.4
+            and back.get('shape_type') in ('ellipse','line')):
+        return False
     if back['type'] not in ('image', 'shape', 'text') or front['type'] not in ('image', 'shape', 'text'):
         return False
     def visible_box(item, box):
@@ -599,6 +630,46 @@ def _contain(items, width, height):
     return _scale(items, min(1, width/max(1e-9, r-l), height/max(1e-9, b-t)))
 
 
+def _edge_backdrop(element,source):
+    """Recognize large lowest-layer images authored across a canvas edge.
+
+    Use the rotated frame, not its unrotated width/height. A quarter-turn
+    photograph may cover the whole height while only occupying one side.
+    Grouped artwork and small edge ornaments remain foreground units.
+    """
+    if element.get('type')!='image' or element.get('group_id') is not None:return None
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    if element.get('z_index',0)!=min((e.get('z_index',0) for e in source['elements']),default=0):return None
+    from engine.qwen_refine import _rotated_bounds
+    l,t,r,b=_rotated_bounds(element)
+    visible=max(0.,min(sw,r)-max(0.,l))*max(0.,min(sh,b)-max(0.,t))
+    if visible<.25*sw*sh:return None
+    if t<=.02*sh and b>=.98*sh:
+        if l<-.02*sw and r<.98*sw:return 'left'
+        if r>1.02*sw and l>.02*sw:return 'right'
+    if l<=.02*sw and r>=.98*sw:
+        if t<-.02*sh and b<.98*sh:return 'top'
+        if b>1.02*sh and t>.02*sh:return 'bottom'
+    return None
+
+
+def _fit_edge_backdrop(element,source,width,height):
+    """Keep a backdrop on its authored side with legal raw and rotated bounds."""
+    from engine.qwen_refine import _rotated_bounds
+    edge=_edge_backdrop(element,source)
+    e=deepcopy(element);l,t,r,b=_rotated_bounds(e)
+    factor=min(width/e['width'],height/e['height'],width/(r-l),height/(b-t))
+    e['width']*=factor;e['height']*=factor
+    rw,rh=(r-l)*factor,(b-t)*factor
+    # Both raw and painted rectangles must fit. At quarter turns their
+    # extents differ; the nearest legal center may leave an unavoidable inset.
+    mx,my=max(e['width'],rw)/2,max(e['height'],rh)/2
+    cx=mx if edge=='left' else width-mx if edge=='right' else width/2
+    cy=my if edge=='top' else height-my if edge=='bottom' else height/2
+    e.update(x=cx-e['width']/2,y=cy-e['height']/2)
+    return e
+
+
 def _analyze(source):
     elements = source['elements']
     sw, sh = source['canvas']['width'], source['canvas']['height']
@@ -608,7 +679,7 @@ def _analyze(source):
     for e in elements:
         full = e['x'] <= sw*.02 and e['y'] <= sh*.02 and e['x']+e['width'] >= sw*.98 and e['y']+e['height'] >= sh*.98
         behind = all(e.get('z_index', 0) <= f.get('z_index', 0) for f in elements if f['type']=='text')
-        if full and behind and not e.get('group_id') and e['type']!='text':
+        if (full and behind and not e.get('group_id') and e['type']!='text') or _edge_backdrop(e,source):
             background_candidates.append(e)
         else:
             rest.append(e)
@@ -979,6 +1050,20 @@ def _badge_row(units,width,height,scale,gap,align='center'):
     # Keep verified peers on one row by sharing a fitting scale when possible.
     shared_peers=(len(units)>1 and units[0].get('peer_ids') and
                   all(u.get('peer_ids')==units[0]['peer_ids'] for u in units))
+    if (shared_peers and units[0].get('target_aspect_ratio',1.)<.35
+            and width<=units[0].get('target_short_side',width)*1.5):
+        row_gap=min(gap,width*.034)
+        available=max(.001,(height-row_gap*(len(units)-1))/len(units))
+        blocks=[_unit(u,width,available,scale) for u in units]
+        total=sum(_bounds(b)[3]-_bounds(b)[1] for b in blocks)+row_gap*(len(blocks)-1)
+        factor=min(1.,height/max(.001,total))
+        output=[];cursor=0.
+        for block in blocks:
+            block=_scale(block,factor);box=_bounds(block)
+            bw,bh=box[2]-box[0],box[3]-box[1]
+            x=0. if align=='left' else width-bw if align=='right' else (width-bw)/2
+            output.extend(_move(block,x,cursor));cursor+=bh+row_gap*factor
+        return output,max(0.,cursor-row_gap*factor)
     wrap_without_scaling=False
     if shared_peers:
         widths=[]
@@ -1492,6 +1577,49 @@ def _micro_snap_qwen_proposal(elements, units, width, height,source=None):
     return result,report['containers']+report['axes']+report['font_calibration']
 
 
+@lru_cache(maxsize=2048)
+def _text_pair_ink_overlap_cached(payload):
+    """Measure shared painted pixels; intersecting glyph envelopes are insufficient."""
+    import json
+    import numpy as np
+    import skia
+    from math import floor,ceil
+    from cr_renderer.schema import TextElement
+    from cr_renderer.text_utils import generate_map,render_text
+    from renderer.converter.convert import convert_chameleon_to_crello
+    a,b=json.loads(payload);ba,bb=_text_visible_bounds(a),_text_visible_bounds(b)
+    x,y=floor(max(ba[0],bb[0])),floor(max(ba[1],bb[1]))
+    w,h=ceil(min(ba[2],bb[2]))-x,ceil(min(ba[3],bb[3]))-y
+    if min(w,h)<=0:return 0
+    if w*h>16_000_000:return _overlap(ba,bb)
+    manager=_layout_font_manager()
+    if manager is None:return _overlap(ba,bb)
+    masks=[]
+    for e in (a,b):
+        e=deepcopy(e)
+        for run in e.get('style_runs') or []:run['end']=int(run['end'])-1
+        example,_=convert_chameleon_to_crello({'canvas':{'width':1,'height':1},'elements':[e]},manager)
+        prop=TextElement(uuid='',type='textElement',width=e['width'],height=e['height'],
+            text=example['text'][0],fontSize=example['font_size'][0],font=example['font'][0],
+            lineHeight=example['line_height'][0],textAlign=example['text_align'][0],
+            capitalize=example['capitalize'][0],letterSpacing=example['letter_spacing'][0],
+            boldMap=generate_map(example['font_bold'][0]),italicMap=generate_map(example['font_italic'][0]),
+            colorMap=generate_map(['#ffffff']*len(example['text'][0])),lineMap=generate_map(example['text_line'][0]))
+        surface=skia.Surface(w,h);canvas=surface.getCanvas();canvas.clear(0)
+        canvas.translate(e['x']-x+e['width']/2,e['y']-y+e['height']/2)
+        canvas.rotate(float(e.get('rotation',0)))
+        canvas.translate(-e['width']/2,-e['height']/2)
+        render_text(canvas,manager,prop)
+        masks.append(surface.makeImageSnapshot().toarray()[:,:,3]>32)
+    return int(np.count_nonzero(masks[0]&masks[1]))
+
+
+def _text_pair_ink_overlap(a,b):
+    import json
+    if _overlap(_text_visible_bounds(a),_text_visible_bounds(b))<=1.:return 0
+    return _text_pair_ink_overlap_cached(json.dumps([a,b],sort_keys=True))
+
+
 def _unintended_text_overlaps(elements, units):
     """Return overlapping text pairs unless that overlap was present in source."""
     source_text={e['id']:e for unit in units for e in unit['items']
@@ -1500,7 +1628,7 @@ def _unintended_text_overlaps(elements, units):
     source_values=list(source_text.values())
     for i,a in enumerate(source_values):
         for b in source_values[:i]:
-            if _overlap(_text_visible_bounds(a),_text_visible_bounds(b))>1.:
+            if _text_pair_ink_overlap(a,b)>1.:
                 intentional.add(frozenset((a['id'],b['id'])))
     candidate=[e for e in elements if e.get('type')=='text' and e.get('content','').strip()]
     collisions=[]
@@ -1510,7 +1638,7 @@ def _unintended_text_overlaps(elements, units):
             pair=frozenset((a['id'],b['id']))
             if pair in intentional:
                 continue
-            if _overlap(box_a,_text_visible_bounds(b))>1.:
+            if _overlap(box_a,_text_visible_bounds(b))>1. and _text_pair_ink_overlap(a,b)>1.:
                 collisions.append(tuple(sorted((a['id'],b['id']))))
     return collisions
 
@@ -1667,6 +1795,11 @@ def _editorial_copy(roles,width,height,scale,gap):
                     max(secondary_words)<=min(secondary_words)*2.2)
     grid_flow=(width/max(1.,copy_height)>=1.5 and width>=320 and copy_height>=120
                and len(headline)==1 and len(secondary)>=3 and similar_length
+               # The two-column treatment only lays out headline and
+               # secondary copy. A kicker or other semantic in the same copy
+               # stack must stay on the ordinary complete-copy path below;
+               # otherwise it silently disappears from this seed.
+               and len(copy_units)==1+len(secondary)
                and all(len(u['items'])==1 and u['items'][0]['type']=='text' and
                        not u['items'][0].get('group_id') for u in secondary))
     if grid_flow:
@@ -2206,6 +2339,7 @@ def _repair_banner_logo_column_balance(elements, units, width, height):
     margin=min(width,height)*.05
     gap=min(width,height)*.025
     moved=[]
+    before_violation=_constraint_violation(elements,units,width,height)
     for _,items in logos:
         if not items:
             continue
@@ -2223,7 +2357,7 @@ def _repair_banner_logo_column_balance(elements, units, width, height):
         moved.extend((e,e['x']) for e in items)
         for e in items:
             e['x']+=dx
-    if moved and not _feasible(elements,units,width,height):
+    if moved and _constraint_violation(elements,units,width,height)>before_violation+1e-6:
         for e,x in moved:
             e['x']=x
 
@@ -2791,6 +2925,20 @@ def _constrain(elements, units, width, height, topology='nearest', strict_margin
         import kiwisolver as kiwi
     except ImportError:
         return None
+    elements=deepcopy(elements)
+    # Alpha-cropped artwork can fit visibly while its transparent raw frame
+    # is taller than the canvas. Translation cannot fix that contradiction.
+    # Uniformly fit the complete unit before solving its placement.
+    for unit,items in _records(elements,units):
+        left=min(e['x'] for e in items);top=min(e['y'] for e in items)
+        right=max(e['x']+e['width'] for e in items)
+        bottom=max(e['y']+e['height'] for e in items)
+        margin=min(width,height)*.055 if strict_margins and unit['role']!='decoration' else 0.
+        factor=min(1.,(width-2*margin)/max(.001,right-left),
+                   (height-2*margin)/max(.001,bottom-top))
+        if factor<1.:
+            scaled=_scale(items,factor)
+            for item,fitted in zip(items,scaled):item.update(fitted)
     records = _records(elements, units)
     boxes = [_bounds(items) for _,items in records]
     solver = kiwi.Solver()
@@ -3638,15 +3786,32 @@ def _energy(elements,units,source,width,height,desired):
 def _objective_layout_cost(elements,units,source,width,height,desired,
                            allow_text_visual_overlap=False):
     """Score geometry and text defects without template or style preferences."""
-    terms=_energy_terms(elements,units,source,width,height,desired,
-                        allow_text_visual_overlap=allow_text_visual_overlap)
-    defect_terms=('overlap','occlusion','boundary','text_fit')
-    cost=sum(terms.get(name,0.)*_ENERGY_WEIGHTS.get(name,1.) for name in defect_terms)
-    minimum_font=min(8.,min(width,height)*.065)
-    for _,items in _records(elements,units):
-        for element in items:
-            if element['type']=='text':
-                cost+=max(0.,minimum_font-element['font_size'])*2.
+    originals={e['id']:e for e in source['elements']}
+    cost=1000.*len(_unintended_text_overlaps(elements,units))
+    cost+=180.*sum(max(0.,d['fraction']-d['allowed_fraction'])
+                   for d in _source_occlusion_defects(elements,source))
+    # Inferred emblem similarity is reported separately by the selector. A
+    # legitimate reflow can change its offsets without clipping or collisions;
+    # folding that preference into this cost falsely labels clean layouts.
+    for e in elements:
+        if min(e['width'],e['height'])<=0:return 1e9
+        if not _authored_image_bleed(e,originals.get(e['id']),
+                                    (source['canvas']['width'],source['canvas']['height']),width,height):
+            cost+=1500.*(max(0.,-e['x'],e['x']+e['width']-width)/width
+                         +max(0.,-e['y'],e['y']+e['height']-height)/height)
+        if e.get('type')=='text':
+            ink=_render_text_ink(e)
+            if ink is None:
+                h,w,_=_text(e);ink=(0.,0.,w,h)
+            # Raster ink, not nominal line-height, determines clipping. Small
+            # antialiasing overhangs receive the same one-pixel tolerance.
+            bearing_x,bearing_y=_source_ink_overhang(e,originals.get(e['id']))
+            cost+=500.*(max(0.,-ink[0]-bearing_x-1.,ink[2]-e['width']-1.)/max(1.,e['width'])
+                         +max(0.,-ink[1]-bearing_y-1.,ink[3]-e['height']-1.)/max(1.,e['height']))
+            cost+=500.*(max(0.,-e['x']-ink[0],e['x']+ink[2]-width)/width
+                         +max(0.,-e['y']-ink[1],e['y']+ink[3]-height)/height)
+            if e.get('max_lines'):
+                cost+=500.*max(0.,_text(e)[2]-e['max_lines'])
     return cost
 
 
@@ -3913,9 +4078,9 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
 
     Analyze top geometry-safe candidates. A text-free diagnostic rendition lets
     us inspect actual backing pixels without measuring the glyph's own color.
-    When the baked SigLIP weights are present, a learned image/text score is
-    blended with the deterministic cost as a closer proxy for the PNG evaluator;
-    otherwise the deterministic ranking is used unchanged. Either way this stage
+    When the baked SigLIP weights are present, their image/text score breaks
+    ties inside the measured defect band. Otherwise deterministic ranking is
+    used. Either way this stage
     retains existing candidates and can add bounded source-local Qwen contrast
     variants. Every added layout passes geometry checks and is rendered again.
     """
@@ -3967,16 +4132,36 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     # because it retains authored composition. Always compare it visually.
     shortlist.extend(c for c in qwen_candidates
                      if c['name']=='qwen-layer-preserved' and c not in shortlist)
-    # Rotation and typography-floor siblings are deliberately few, but must
-    # survive the family cap above so the renderer can compare them directly.
+    # Typography-floor siblings survive the family cap for direct comparison.
     shortlist.extend(c for c in candidates
-                     if c['name'].startswith(('qwen-background-rotation-', 'background-rotation-',
-                                               'qwen-rotation-', 'rotation-',
-                                               'qwen-readable-text-floor',
+                     if c['name'].startswith(('qwen-readable-text-floor',
                                                'readable-text-floor-'))
                      if c not in shortlist)
     shortlist.extend(c for c in qwen_candidates
                      if c['name']=='qwen-source-contained-proposal' and c not in shortlist)
+    # Reserve functional families explicitly; energy ordering must not let
+    # several near-identical Qwen siblings evict the aspect-bucket baseline.
+    required_families={}
+    primary=next((c for name in ('qwen-font-fitted','qwen-proposal','qwen-original')
+                  for c in qwen_candidates if c['name']==name),None)
+    if primary is None and qwen_candidates:primary=qwen_candidates[0]
+    if primary is not None:
+        locked=dict(primary,name='qwen-container-locked-font-fitted')
+        shortlist.insert(0,locked)
+        required_families['qwen-container-locked-font-fitted']=locked['name']
+    bucket_prefix=('deterministic-aspect-reflow','inline-banner','editorial','split','left-hero','dense-short') if width/height>=1.35 else ('deterministic-aspect-reflow','semantic-stack','copy-first','visual-first')
+    bucket=next((c for c in candidates if not c['name'].startswith('qwen-')
+                 and c['name'].startswith(bucket_prefix)),None)
+    bucket=next((c for c in candidates if c['name'].startswith('deterministic-aspect-reflow-')),bucket)
+    if bucket is not None:
+        if bucket not in shortlist:shortlist.append(bucket)
+        required_families['deterministic-aspect-reflow']=bucket['name']
+    if ratio_shift<1.35:
+        proportional=next((c for c in candidates if c['name']=='proportional'),None)
+        if proportional is not None:
+            centered=dict(proportional,name='proportional-centered')
+            shortlist.append(centered)
+            required_families['proportional-centered']=centered['name']
     from engine.qwen_refine import relationship_variant
     repaired_signatures=set()
     for name in ('qwen-proposal','qwen-font-fitted','qwen-original'):
@@ -3997,6 +4182,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             elements=repaired,energy=_energy(repaired,units,source,width,height,desired),
             variant_of=name,relationship_repairs=changes,structure=structure))
     relationship_context=_visual_relationship_context(units,source,width,height)
+    primary_regressions=[]
     with TemporaryDirectory(prefix='chameleon-rank-') as directory:
         reference_image=None;source_under=None;source_contrast={}
         try:
@@ -4084,6 +4270,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         a,b=_luminance(foreground),_luminance(pixel)
                         contrasts.append((max(a,b)+.05)/(min(a,b)+.05));lumas.append(b)
                     target=3 if e['font_size']>=24 or e.get('font_weight')=='bold' and e['font_size']>=18 else 4.5
+                    source_floor=source_contrast.get(e['id'],{}).get('lower_quintile')
+                    if source_floor is not None:target=min(target,max(1.,source_floor*.90))
                     sorted_contrasts=sorted(contrasts)
                     low=sorted_contrasts[max(0,len(sorted_contrasts)//5)]
                     minimum=sorted_contrasts[0]
@@ -4099,20 +4287,44 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     if deficit>.03:
                         weak.append(e['id'])
                     roughness=sum(abs(lumas[j]-lumas[j-1]) for j in range(1,len(lumas)) if j%8)/56
-                    cost+=max(0,roughness-.04)*8
                     from PIL import ImageFilter
                     edge_crop=under_crop.convert('L').filter(ImageFilter.FIND_EDGES)
                     edge_data=list(edge_crop.getdata())
                     edge_density=sum(edge_data)/(255.0*max(1,len(edge_data)))
                     mean_luma=sum(lumas)/max(1,len(lumas))
                     luma_std=(sum((x-mean_luma)**2 for x in lumas)/max(1,len(lumas)))**0.5
-                    cost+=edge_density*5.0
                     if roughness>.08 or edge_density>.07 or (luma_std>.15 and edge_density>.04):
                         busy.append(e['id'])
                     checked+=1
                 cost=cost/max(1,checked)+(8.0 if invisible else 0.0)+(4.0 if weak else 0.0)
                 occlusion_defects=_source_occlusion_defects(doc['elements'],source)
-                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,occlusion_defects=occlusion_defects,warnings=warnings,image=full.copy()))
+                structural_errors=[]
+                source_by_id={e['id']:e for e in source['elements']}
+                if (set(source_by_id)!={e['id'] for e in doc['elements']}
+                        or len(doc['elements'])!=len(source_by_id)):
+                    structural_errors.append('element IDs differ')
+                background_ids={e['id'] for e in backgrounds}
+                for element in doc['elements']:
+                    if (element['x']<-.01 or element['y']<-.01
+                            or element['x']+element['width']>width+.01
+                            or element['y']+element['height']>height+.01):
+                        structural_errors.append(f"{element['id']}: raw frame outside canvas")
+                    original=source_by_id.get(element['id'])
+                    if (original and element.get('type')=='image' and element['id'] not in background_ids
+                            and original.get('fit')!='cover' and min(original['width'],original['height'],element['height'])>0
+                            and abs((element['width']/element['height'])/(original['width']/original['height'])-1)>.05):
+                        structural_errors.append(f"{element['id']}: image aspect distortion")
+                entries.append(dict(candidate=candidate,cost=cost,checked=checked,low_contrast=weak,busy_background=busy,invisible_text=invisible,contrast_by_text=contrast_by_text,occlusion_defects=occlusion_defects,structural_errors=structural_errors,warnings=warnings,image=full.copy()))
+                regressions=[eid for eid in weak if not source_contrast.get(eid,{}).get('low',True)]
+                if candidate['name']=='qwen-container-locked-font-fitted' and regressions and not invisible:
+                    primary_regressions=regressions
+                    from engine.qwen_refine import whole_lockup_contrast_variants
+                    calm=whole_lockup_contrast_variants(candidate['elements'],units,source,width,height,regressions,under)
+                    for cell_index,(repaired,changes) in enumerate(calm,1):
+                        name=f"{candidate['name']}-contrast-repaired-cell-{cell_index:02d}"
+                        shortlist.append(dict(candidate,name=name,elements=repaired,contrast_repairs=changes,
+                                              variant_of=candidate['name']))
+                    if calm:required_families['qwen-contrast-repaired']='proposed and rerendered'
                 target_repair_ids=sorted(set(weak)|set(busy))
                 if (candidate['name'].startswith('qwen-') and target_repair_ids and not invisible
                         and _needs_contrast_repair(entries[-1])
@@ -4191,7 +4403,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             and after[eid]['minimum']>=floor
             and after[eid]['minimum']>=before[eid]['minimum']+.5
             for eid,floor in zone_floors.items())
-        is_quiet_2d = any(change.get('repair_type') in ('lockup-repositioned-2d', 'lockup-repositioned')
+        is_quiet_2d = any(change.get('repair_type') in ('lockup-repositioned-2d', 'lockup-repositioned','container-calm-cell')
                           for change in candidate.get('contrast_repairs', []))
         is_backdrop_rotation=any(change.get('repair_type')=='backdrop-rotation-variant'
                                  for change in candidate.get('contrast_repairs',[]))
@@ -4220,6 +4432,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     valid=filtered
     objective_layout_costs=[_objective_layout_cost(e['candidate']['elements'],units,source,
                 width,height,desired,allow_text_visual_overlap=e['candidate']['name'].startswith('qwen-'))
+                +1500.*len(e.get('structural_errors',[]))
                 for e in valid]
     from engine.qwen_refine import source_emblem_error
     for entry,layout_cost in zip(valid,objective_layout_costs):
@@ -4227,12 +4440,15 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         entry['source_lockup_error']=source_emblem_error(entry['candidate']['elements'],units)
         entry['source_relationship_error']=relationship_variant(
             entry['candidate']['elements'],units,source,width,height)[2]
+        entry['contrast_regressions']=[eid for eid,metrics in entry.get('contrast_by_text',{}).items()
+            if not source_contrast.get(eid,{}).get('low',True)
+            and eid in entry.get('low_contrast',[])]
         entry['has_layout_defects']=(not _feasible(entry['candidate']['elements'],units,width,height,
                 strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
                 or bool(_unintended_text_overlaps(entry['candidate']['elements'],units))
-                or bool(entry.get('invisible_text')))
-    objective_cost=lambda e:(_objective_layout_cost(e['candidate']['elements'],units,source,
-                width,height,desired,allow_text_visual_overlap=e['candidate']['name'].startswith('qwen-'))+e['cost'])
+                or bool(entry.get('invisible_text')) or bool(entry.get('occlusion_defects'))
+                or bool(entry['contrast_regressions']) or bool(entry.get('structural_errors')) or layout_cost>1.)
+    objective_cost=lambda e:e['layout_defect_cost']+e['cost']
     qwen_feasible={e['candidate']['name']:_feasible(e['candidate']['elements'],units,width,height,
                     strict_margins=False,gap_factor=.004,allow_text_visual_overlap=True)
                    for e in valid if e['candidate']['name'].startswith('qwen-')}
@@ -4250,8 +4466,20 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                                            source_contrast=source_contrast)
         perceptual.update(fallback,used=False)
     selected=valid[perceptual['selected_index']]
+    family_rules={
+        'qwen-container-locked-font-fitted':(bool(qwen_candidates),lambda n:n=='qwen-container-locked-font-fitted'),
+        'qwen-contrast-repaired':(bool(primary_regressions),lambda n:n.startswith('qwen-container-locked-font-fitted-contrast-repaired-')),
+        'deterministic-aspect-reflow':(True,lambda n:n==required_families.get('deterministic-aspect-reflow')),
+        'proportional-centered':(ratio_shift<1.35,lambda n:n=='proportional-centered'),
+    }
+    coverage={family:dict(required=required,
+                         rendered=[e['candidate']['name'] for e in entries if 'error' not in e and predicate(e['candidate']['name'])],
+                         eligible=[e['candidate']['name'] for e in valid if predicate(e['candidate']['name'])])
+              for family,(required,predicate) in family_rules.items()}
     report=dict(used=True,
-                method='rendered contrast/busyness/visible-text checks'+(' + SigLIP perceptual re-rank' if perceptual.get('used') else ''),
+                required_families=required_families,
+                shortlist_coverage=coverage,
+                method='rendered glyph contrast/overflow/source-lockup/structural gates'+(' + SigLIP tie-break' if perceptual.get('used') else ''),
                 perceptual=perceptual,qwen_primary=qwen_primary,
                 source_contrast=source_contrast,
                 objective_cost_components=[dict(name=e['candidate']['name'],
@@ -4426,35 +4654,6 @@ def _rotation_candidate_variants(elements,units,width,height,limit=6):
     return variants
 
 
-def _background_rotation_variants(backgrounds,limit=4):
-    """Return gentle rotations for full-canvas image backgrounds only."""
-    variants=[]
-    for original in backgrounds:
-        if original.get('type')!='image':
-            continue
-        asset=Path(_asset_root(original))/str(original.get('asset_id',''))
-        try:
-            from PIL import Image
-            with Image.open(asset) as opened:
-                if 'A' in opened.getbands() and opened.getchannel('A').getextrema()[0]<250:
-                    # Transparent color washes and border layers stay
-                    # canvas-registered; rotate only an opaque backdrop.
-                    continue
-        except (OSError,ValueError,ImportError):
-            continue
-        label=' '.join(str(original.get(k,'')) for k in ('asset_id','name','semantic')).lower()
-        if any(word in label for word in ('logo','wordmark','frame','border')):
-            continue
-        angle=float(original.get('rotation',0.))
-        for delta in (-4.,-2.,2.,4.):
-            changed=deepcopy(backgrounds)
-            next(e for e in changed if e['id']==original['id'])['rotation']=angle+delta
-            variants.append((changed,dict(element_id=original['id'],from_rotation=angle,
-                                          to_rotation=angle+delta,delta=delta)))
-            if len(variants)>=limit:
-                return variants
-    return variants
-
 
 def _busy_background_font_shrink_only(candidate, baselines, display_text_ids):
     """Find a strong Qwen layout penalized only for display text on busy pixels.
@@ -4518,7 +4717,7 @@ def _busy_background_font_shrink_only(candidate, baselines, display_text_ids):
 
 def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary=False,
                              ranker_trained=False,display_text_ids=None,source_contrast=None):
-    """Rank safe Qwen siblings; keep objective and contrast bands explicit."""
+    """Gate by measured defects; use image scores only inside a defect tie."""
     qwen=[i for i,e in enumerate(valid) if e['candidate']['name'].startswith('qwen-')]
     heur=[i for i in range(len(valid)) if i not in qwen]
     baselines=[valid[i] for i in heur]
@@ -4527,155 +4726,72 @@ def _select_visual_candidate(valid,costs,scores,qwen_feasible=False,qwen_primary
     tolerated={i:_busy_background_font_shrink_only(valid[i],baselines,display_text_ids)
                for i in qwen}
     safe=[i for i in qwen if feasible(i) and
-          (_qwen_contrast_safe(valid[i],baselines,qwen_primary,source_contrast) or bool(tolerated[i]))]
+          (_qwen_contrast_safe(valid[i],baselines,qwen_primary,source_contrast) or tolerated[i])]
     coherent=[i for i in safe if valid[i].get('source_lockup_error',0.)<=.025
               and not valid[i].get('has_layout_defects',False)]
     fractured=[]
     if coherent:
-        fractured=[valid[i]['candidate']['name'] for i in safe if valid[i].get('source_lockup_error',0.)>.10]
+        fractured=[valid[i]['candidate']['name'] for i in safe
+                   if valid[i].get('source_lockup_error',0.)>.10]
         safe=[i for i in safe if valid[i].get('source_lockup_error',0.)<=.10]
-    clean_base=[i for i in safe if valid[i]['candidate']['name'] in ('qwen-original','qwen-proposal','qwen-font-fitted')
-                and not _needs_contrast_repair(valid[i]) and not valid[i].get('invisible_text')
+    clean_base=[i for i in safe if valid[i]['candidate']['name'] in
+                ('qwen-original','qwen-proposal','qwen-font-fitted','qwen-container-locked-font-fitted')
+                and not _needs_contrast_repair(valid[i])
+                and not valid[i].get('invisible_text')
                 and not valid[i].get('has_layout_defects',False)]
     suppressed=[]
     if clean_base:
         suppressed=[valid[i]['candidate']['name'] for i in safe
                     if '-contrast-repaired-' in valid[i]['candidate']['name']]
-        safe=[i for i in safe if '-contrast-repaired-' not in valid[i]['candidate']['name']]
-    best=min(range(len(costs)),key=costs.__getitem__)
-    tolerance=max(1.25,abs(costs[best])*.20)
+        safe=[i for i in safe if valid[i]['candidate']['name'] not in suppressed]
     selection_costs=list(costs)
+    best=min(range(len(costs)),key=costs.__getitem__)
+    tolerance=max(1.25,abs(costs[best])*.03)
     for i in qwen:
-        if tolerated[i]:
-            # Keep raw diagnostics intact while treating this specific display
-            # font shrink penalty as inside the same objective tolerance band.
-            selection_costs[i]=min(selection_costs[i],costs[best]+tolerance)
-    global_band=[i for i,c in enumerate(selection_costs) if c<=selection_costs[best]+tolerance]
+        if tolerated[i]:selection_costs[i]=min(selection_costs[i],costs[best]+tolerance)
+
+    def hard_key(i):
+        e=valid[i]
+        return (bool(e.get('invisible_text')),bool(e.get('has_layout_defects')),
+                len(e.get('occlusion_defects',[])),len(e.get('contrast_regressions',[])),
+                bool(e.get('source_lockup_error',0.)>.10))
+
+    def tie_band(indices):
+        if not indices:return []
+        tier=min(hard_key(i) for i in indices)
+        pool=[i for i in indices if hard_key(i)==tier]
+        # Contrast counts and raster geometry rank before the VLM score.
+        weak=min(len(valid[i].get('low_contrast',[])) for i in pool)
+        pool=[i for i in pool if len(valid[i].get('low_contrast',[]))==weak]
+        minimum=min(selection_costs[i] for i in pool)
+        return [i for i in pool if selection_costs[i]<=minimum+max(1.25,abs(minimum)*.03)]
+
+    eligible=heur+safe
+    if not eligible:eligible=list(range(len(valid)))
+    global_band=tie_band(eligible)
+    family_band=tie_band(safe)
+    clean_qwen=[i for i in family_band if not any(hard_key(i))
+                and valid[i].get('layout_defect_cost',0.)<=1.]
+    # A safe learned reflow is not vetoed by a deterministic template prior.
+    # A defective learned layout still competes on the same hard metrics.
+    pool=clean_qwen if qwen_primary and clean_qwen else global_band
+    chosen=max(pool,key=lambda i:(scores[i],-selection_costs[i],-i))
+    qchoice=max(family_band,key=lambda i:(scores[i],-selection_costs[i],-i)) if family_band else None
     best_heuristic=min(heur,key=lambda i:costs[i]) if heur else None
-    family_band=[]
-    if safe:
-        family_best=min(selection_costs[i] for i in safe)
-        family_tol=max(1.25,abs(family_best)*.20)
-        family_band=[i for i in safe if selection_costs[i]<=family_best+family_tol]
-        # First minimize the number of weak text elements across safe family
-        # candidates. Compare rendered/objective cost next, with SigLIP only a
-        # tie-break among candidates with the same contrast result.
-        contrast_best=min(len(valid[i].get('low_contrast',[])) for i in family_band)
-        contrast_band=[i for i in family_band
-                       if len(valid[i].get('low_contrast',[]))==contrast_best]
-        qchoice=max(contrast_band,key=lambda i:scores[i]
-                    -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
-        readable_floor=[i for i in contrast_band
-                        if valid[i]['candidate'].get('readability_floor_met')
-                        and not valid[i].get('has_layout_defects',False)
-                        and not valid[i].get('invisible_text')]
-        if readable_floor:
-            # The ranker is a style tie-breaker; when hard checks and measured
-            # contrast are equal, honor a feasible minimum-size typography
-            # sibling over a smaller-text candidate.
-            qchoice=max(readable_floor,key=lambda i:scores[i]
-                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
-        # When Qwen has substantially undersized a large unboxed art group,
-        # keep its source-proportional candidate if SigLIP rates it at least as
-        # well as the current family choice. This restores a plausible art
-        # scale while leaving the model/vision score in control of placement.
-        source_scaled=[i for i in contrast_band
-                       if valid[i]['candidate']['name'].startswith('qwen-source-scaled-art-')
-                       and not valid[i].get('has_layout_defects',False)
-                       and not valid[i].get('invisible_text')
-                       and scores[i]>=scores[qchoice]-.05]
-        if source_scaled:
-            qchoice=max(source_scaled,key=lambda i:scores[i]
-                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
-        # Preserve a measured source alignment when its candidate is otherwise
-        # in the same safe cost/contrast band as the scaled-art sibling.
-        aligned=[i for i in contrast_band
-                 if valid[i]['candidate']['name'].startswith((
-                     'qwen-source-aligned-','qwen-rule-aligned-','qwen-panel-inset-',
-                     'qwen-source-frame-clearance-','qwen-rule-span-aligned-'))
-                 and not valid[i].get('has_layout_defects',False)
-                 and not valid[i].get('invisible_text')
-                 and len(valid[i].get('low_contrast',[]))==contrast_best
-                 and selection_costs[i]<=family_best+family_tol
-                 # A repeated-rule span repair changes only line length and
-                 # can score slightly below its parent on the image ranker,
-                 # even when it restores the source-evidenced rule-to-title
-                 # alignment. Keep that narrow candidate eligible within a
-                 # modestly wider tie band; all other alignment siblings keep
-                 # the stricter visual margin.
-                 and scores[i]>=scores[qchoice]-(
-                     .10 if valid[i]['candidate']['name'].startswith(
-                         'qwen-rule-span-aligned-') else .05)]
-        if aligned:
-            qchoice=max(aligned,key=lambda i:scores[i]
-                        -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
-        # When a rendered contrast repair is a safe member of the same family
-        # band and fixes more weak text, prefer it over its un-repaired parent.
-        by_name={valid[i]['candidate']['name']:i for i in family_band}
-        repaired=[]
-        for i in family_band:
-            name=valid[i]['candidate']['name']
-            if '-contrast-repaired-' not in name or valid[i].get('has_layout_defects',True):continue
-            parent=by_name.get(name.split('-contrast-repaired-',1)[0])
-            if parent is None:continue
-            if len(valid[i].get('low_contrast',[]))<len(valid[parent].get('low_contrast',[])):
-                repaired.append(i)
-        if repaired and contrast_best>0:
-            # If no candidate clears all weak text, preserve the strongest
-            # safe repair within the minimum-contrast family band.
-            repaired=[i for i in repaired if i in contrast_band]
-            if repaired:qchoice=max(repaired,key=lambda i:scores[i]
-                                    -.15*(selection_costs[i]-family_best)/max(family_tol,1e-9))
-        # Source attachments should survive style and objective ranking when
-        # the ordinary winner has visibly detached them. A relationship repair
-        # remains eligible only after canvas, overlap, visibility, and contrast
-        # checks have already admitted it to the safe Qwen family.
-        current_relationship_error=valid[qchoice].get('source_relationship_error',0.)
-        relationships=[i for i in safe
-                       if valid[i]['candidate'].get('relationship_repairs')
-                       and not valid[i].get('has_layout_defects',False)
-                       and not valid[i].get('occlusion_defects')
-                       and valid[i].get('source_relationship_error',1.)<=.005
-                       and len(valid[i].get('low_contrast',[]))<=len(valid[qchoice].get('low_contrast',[]))]
-        relationship_override=None
-        if current_relationship_error>.02 and relationships:
-            previous=qchoice
-            qchoice=max(relationships,key=lambda i:scores[i])
-            if qchoice!=previous:
-                relationship_override=dict(
-                    from_candidate=valid[previous]['candidate']['name'],
-                    to_candidate=valid[qchoice]['candidate']['name'],
-                    prior_error=round(current_relationship_error,5),
-                    final_error=round(valid[qchoice].get('source_relationship_error',1.),5),
-                    score_delta=round(scores[qchoice]-scores[previous],5),
-                    objective_delta=round(selection_costs[qchoice]-selection_costs[previous],5))
-    else:qchoice=None
-    eligible=[i for i in global_band if i not in qwen or i in safe]
-    if not eligible:eligible=heur or safe or [best]
-    chosen=max(eligible,key=lambda i:scores[i]-.10*(selection_costs[i]-selection_costs[best])/tolerance)
-    if qchoice is not None and qwen_primary:
-        # A trained domain judge can veto the family with a strong preference;
-        # unvalidated zero-shot scores select within Qwen's local trust region.
-        alternatives=[i for i in eligible if i not in qwen and not valid[i].get('invisible_text')]
-        veto=max(alternatives,key=lambda i:scores[i]) if alternatives else None
-        chosen=(veto if ranker_trained and veto is not None and scores[veto]>scores[qchoice]+.15 else qchoice)
     checked=qchoice if qchoice is not None else (qwen[0] if qwen else None)
     return dict(selected_index=chosen,objective_costs=[round(c,4) for c in costs],
-        source_lockup_rejected_names=fractured,
-        contrast_repair_suppressed_names=suppressed,
         selection_costs=[round(c,4) for c in selection_costs],
+        source_lockup_rejected_names=fractured,contrast_repair_suppressed_names=suppressed,
         busy_background_tolerated_names=[valid[i]['candidate']['name'] for i in qwen if tolerated[i]],
         tie_band=global_band,qwen_family_band=family_band,tolerance=round(tolerance,4),
         qwen_eligible=bool(safe),eligible_qwen_names=[valid[i]['candidate']['name'] for i in safe],
-        trained_ranker_loaded=ranker_trained,
-        relationship_override=relationship_override if safe else None,
+        trained_ranker_loaded=ranker_trained,relationship_override=None,
         qwen_safety_checks=dict(feasible=bool(checked is not None and feasible(checked)),
             no_invisible_text=bool(checked is not None and not valid[checked].get('invisible_text')),
-            contrast_within_tolerance=bool(checked is not None and
-                (_qwen_contrast_safe(valid[checked],baselines,qwen_primary,source_contrast) or bool(tolerated.get(checked)))),
-            qwen_primary=qwen_primary,objective_within_band=checked in family_band,
-            objective_within_global_band=checked in global_band,
-            siglip_margin=bool(checked is not None and best_heuristic is not None and scores[checked]>scores[best_heuristic]+.03),
+            contrast_within_tolerance=checked in safe,qwen_primary=qwen_primary,
+            objective_within_band=checked in family_band,objective_within_global_band=checked in global_band,
+            siglip_margin=bool(checked is not None and best_heuristic is not None
+                              and scores[checked]>scores[best_heuristic]+.03),
             busy_background_tolerated=bool(checked is not None and tolerated.get(checked))),
         overrode_heuristic=chosen!=best_heuristic)
 
@@ -4708,19 +4824,12 @@ def _assemble(elements,backgrounds,source,width,height):
     by_id={e['id']:deepcopy(e) for e in elements}
     for old in backgrounds:
         e=deepcopy(old)
-        if e['type']=='image':
-            angle=abs(float(e.get('rotation',0.)))%180.
-            theta=radians(angle)
-            c,s=abs(cos(theta)),abs(sin(theta))
-            # Size the rotated rectangle so every canvas corner stays inside
-            # the image. Covering only the rotated bounding-box dimensions is
-            # insufficient: a rectangle's diagonal corners can still expose
-            # transparent canvas wedges after rotation.
-            scale=max((float(width)*c+float(height)*s)/max(1e-6,float(width)),
-                      (float(height)*c+float(width)*s)/max(1e-6,float(height)))
-            fitted_w,fitted_h=float(width)*scale,float(height)*scale
-            e.update(x=(float(width)-fitted_w)/2.,y=(float(height)-fitted_h)/2.,
-                     width=fitted_w,height=fitted_h)
+        if _edge_backdrop(old,source):
+            e=_fit_edge_backdrop(old,source,width,height)
+        elif e['type']=='image':
+            # JSON frame bounds remain legal even when the original image
+            # rotates. The renderer clips rotated pixels at canvas edges.
+            e.update(x=0.,y=0.,width=float(width),height=float(height))
             e['fit']=_background_fit(old,source,width,height)
             if e['fit']=='fill':
                 matte=_poster_matte_asset(old,width,height)
@@ -5131,7 +5240,24 @@ def _adapt_with_diagnostics(source,target_canvas):
         seeds=distinct+[dense_seed]
     feasible=[]
     rejected=[]
+    source_element_ids={e['id'] for unit in units for e in unit['items']}
+    incomplete_seed_names=[]
     for seed in seeds:
+        # A generated layout is an all-elements candidate. Reject malformed
+        # seeds before geometric constraints index unit members; one omitted
+        # element must not abort the entire adaptation or reach the renderer.
+        seed_element_ids={e['id'] for e in seed['elements']}
+        if (seed_element_ids!=source_element_ids
+                or len(seed['elements'])!=len(seed_element_ids)):
+            incomplete_seed_names.append({
+                'name':seed['name'],
+                'missing_ids':sorted(source_element_ids-seed_element_ids),
+                'extra_ids':sorted(seed_element_ids-source_element_ids),
+                'duplicate_ids':sorted({e['id'] for e in seed['elements']
+                                        if sum(candidate['id']==e['id']
+                                               for candidate in seed['elements'])>1}),
+            })
+            continue
         projected=None
         qwen_seed=seed['name'].startswith('qwen-')
         if not qwen_seed:
@@ -5255,6 +5381,13 @@ def _adapt_with_diagnostics(source,target_canvas):
     feasible.sort(key=lambda c:(c['energy'],c['name']))
     optimized=[]
     optimize_candidates=feasible[:10]
+    aspect_prefix=('inline-banner','editorial','split','left-hero','dense-short') if width/height>=1.35 else ('semantic-stack','copy-first','visual-first')
+    reserved=next((c for c in feasible if not c['name'].startswith('qwen-')
+                   and c['name'].startswith(aspect_prefix)),None)
+    if reserved is not None and reserved not in optimize_candidates:optimize_candidates.append(reserved)
+    if max(width/height/(sw/sh),(sw/sh)/(width/height))<1.35:
+        proportional=next((c for c in feasible if c['name']=='proportional'),None)
+        if proportional is not None and proportional not in optimize_candidates:optimize_candidates.append(proportional)
     for candidate in feasible:
         if candidate['name'].startswith('qwen-') and candidate not in optimize_candidates:
             optimize_candidates.append(candidate)
@@ -5314,27 +5447,24 @@ def _adapt_with_diagnostics(source,target_canvas):
             if search['accepted'] or candidate['name']=='qwen-font-fitted':
                 optimized.append(dict(name=local_name,elements=local,
                     energy=_energy(local,units,source,width,height,desired),optimization=search))
-    # Add a small background-only rotation sweep to the rendered candidates.
-    # Each variant keeps the original text and foreground geometry unchanged.
-    rotation_parents=[]
-    for candidate in sorted(optimized,key=lambda c:(c['energy'],c['name'])):
-        if candidate['name'] in ('qwen-proposal','qwen-source-contained-proposal','proportional'):
-            rotation_parents.append(candidate)
-        if len(rotation_parents)>=2:break
-    for parent in rotation_parents:
-        for index,(rotated_backgrounds,change) in enumerate(
-                _background_rotation_variants(backgrounds,limit=4),1):
-            prefix='qwen-' if parent['name'].startswith('qwen-') else ''
-            optimized.append(dict(name=f"{prefix}background-rotation-{parent['name']}-{index:02d}",
-                elements=deepcopy(parent['elements']),backgrounds=rotated_backgrounds,
-                energy=parent['energy'],optimization=dict(before=parent['energy'],
-                after=parent['energy'],accepted=0,iterations=0),rotation_change=change))
     # Every layout family, including search/rotation variants, enters the render
     # verifier with its hierarchy restored. A noisy raw sibling cannot bypass
     # these constraints by winning a perceptual tie-break.
     structural_rejections=[]
     structured_candidates=[]
     rejected_structures=[]
+    # Preserve one genuine unit-based reflow for comparison. Projecting every
+    # deterministic seed through the learned container envelope can turn all
+    # families into the same source-proportional arrangement or reject them.
+    baseline_for_render=None
+    for candidate in sorted(optimized,key=lambda c:(c['energy'],c['name'])):
+        if candidate['name'].startswith('qwen-') or not candidate['name'].startswith(aspect_prefix):continue
+        fitted,fonts=_calibrate_text_boxes(candidate['elements'],source,width,height,container_tree)
+        if (_feasible(fitted,units,width,height,strict_margins=False,gap_factor=.004,
+                      allow_text_visual_overlap=True) and not _unintended_text_overlaps(fitted,units)):
+            baseline_for_render=dict(candidate,name='deterministic-aspect-reflow-'+candidate['name'],
+                                     elements=fitted,structure={'font_calibration':fonts,'mode':'atomic-unit-reflow'})
+            break
     for candidate in optimized:
         structured,structure=_structural_qwen_projection(
             candidate['elements'],source,units,width,height,container_tree)
@@ -5355,7 +5485,10 @@ def _adapt_with_diagnostics(source,target_canvas):
         optimized=sorted(rejected_structures,key=lambda c:(
             _constraint_violation(c['elements'],units,width,height),c['name']))[:4]
         qwen_diagnostics['structural_fallback_reason']='No projected candidate satisfies geometry and text constraints; retaining the least-violating complete container layout'
+    if baseline_for_render is not None:optimized.append(baseline_for_render)
     qwen_diagnostics['structural_rejected_candidates']=structural_rejections
+    if incomplete_seed_names:
+        qwen_diagnostics['incomplete_seed_candidates']=incomplete_seed_names
     optimized.sort(key=lambda c:(c['energy'],c['name']))
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
@@ -5365,10 +5498,7 @@ def _adapt_with_diagnostics(source,target_canvas):
     qwen_diagnostics['winner'] = winner['name']
     qwen_diagnostics['variants']=sorted({c['name'] for c in optimized+visual.get('candidates',[])
                                         if c['name'].startswith('qwen-')})
-    # The visual reranker may select a background-only rotation sibling. Use
-    # that candidate's background layers for the delivered layout as well as
-    # for its diagnostic render; otherwise the report records a winner that
-    # the final JSON silently discards.
+    # Deliver the exact background layers that accompanied the judged layout.
     output=_assemble(winner['elements'],winner.get('backgrounds',backgrounds),
                      source,width,height)
     report=dict(perceptual=context,aspect=state,roles=[dict(ids=[e['id'] for e in u['items']],role=u['semantic'],confidence=u['confidence']) for u in units],

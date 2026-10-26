@@ -1,5 +1,8 @@
 # Qwen audit changes — October 23, 2026
 
+> Historical audit. The October 25 selector, container, training-data counts,
+> and resolved mechanics failures are documented in [DAY4_5_AUDIT.md](DAY4_5_AUDIT.md).
+
 The user-provided Gemini audit was checked against the current implementation.
 The engine still uses the installed Qwen3-0.6B v2 adapter. No model upgrade or
 SigLIP training is needed to exercise these changes.

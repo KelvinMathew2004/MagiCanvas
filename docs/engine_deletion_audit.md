@@ -1,5 +1,10 @@
 # Engine deletion audit
 
+> Historical deletion audit. The three mechanics failures recorded below were
+> resolved on October 25; see [DAY4_5_AUDIT.md](DAY4_5_AUDIT.md) for the current
+> suite and batch verification. The generic background rotation sweep was later
+> removed after stress checks found invalid raw image frames.
+
 Audited commit `af6bc5b` against its parent `d646694`, then exercised the replacement passes and restored two omitted safeguards.
 
 ## Size and scope

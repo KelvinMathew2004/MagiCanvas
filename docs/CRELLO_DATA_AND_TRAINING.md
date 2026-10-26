@@ -5,6 +5,20 @@ reasonable candidates for a layout-model experiment. The counts below describe
 the local converted dataset and pair scan at the time this note was written;
 rerunning the scripts can change them if the source revision or filters change.
 
+## Current training and evaluation state — October 25
+
+`data/qwen_lora_expanded_v2` now contains **1,122 train / 309 validation / 89
+test** rows, with at most one training pair per target template ID and no family
+overlap between splits. The earlier export sizes discussed below are historical.
+Both larger base checkpoints are local, but their adapters have not been trained
+or promoted. The installed Qwen3-0.6B v2 adapter remains the runtime baseline.
+
+Use [QWEN_LORA_COLAB.md](QWEN_LORA_COLAB.md) for the current two-model recipe,
+6,144-token context, response-only masking, and explicit model/adapter A/B
+commands. [DAY4_5_AUDIT.md](DAY4_5_AUDIT.md) records the container/axis engine,
+batch defect gates, stress results, and remaining limitations. The previous
+398-case mining run is retained as a historical test/validation baseline.
+
 ## Source, attribution, and sharing
 
 The source is [CyberAgent's Crello dataset on Hugging Face](https://huggingface.co/datasets/cyberagent/crello), dataset revision `5.1.0` as pinned in `scripts/convert_crello_dataset.py`. Credit CyberAgent and the dataset authors when describing the source. The dataset card specifies CDLA-Permissive-2.0 and asks users to agree to VistaCreate's licensing terms. The card also explains that CyberAgent does not own the original templates and does not redistribute the original template files. The [CDLA terms](https://cdla.dev/permissive-2-0/) cover the dataset as a data collection; they do not grant rights to third-party design content that may appear inside it. VistaCreate's [licensing terms](https://support.create.vista.com/hc/en-us/articles/360002744694-What-are-the-licensing-terms-for-designs-made-in-VistaCreate) should be reviewed before sharing derived designs, images, or model weights.

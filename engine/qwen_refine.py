@@ -1479,7 +1479,9 @@ def project_container_tree(elements, tree, width, height):
             if e.get('type')=='text':
                 q['font_size']=max(1.,e.get('font_size',1.)*scale)
                 q['letter_spacing']=float(e.get('letter_spacing',0))*q['font_size']/max(1.,e.get('font_size',1.))
-                q['line_height']=e.get('line_height',1.2);q['text_align']=e.get('text_align','left')
+                if 'line_height' in e:q['line_height']=e['line_height']
+                else:q.pop('line_height',None)
+                q['text_align']=e.get('text_align','left')
         elastic_width=(sb[2]-sb[0])*min(_weighted_median(xscales),scale*1.5)
         if node['mode']=='semi-elastic' and elastic_width>(sb[2]-sb[0])*scale:
             for eid in ids:
@@ -1579,3 +1581,109 @@ def snap_source_axes(elements, source, width, height, tree=None):
         for eid in ids:used[eid,dimension]=True
         notes.append({'axis':dimension,'fraction':fraction,'value':target,'element_ids':ids})
     return result,notes
+
+
+def _contrast_text_lockup(weak_ids,tree,source):
+    """Find a copy subgroup without severing explicit groups or its backing.
+
+    Large overlapping artwork can connect an entire poster in the inferred
+    tree. For relocation, only source-aligned copy, explicit membership,
+    immediate backings and compact aligned ornaments are strong enough to
+    carry a neighbour. A photo/illustration is never dragged by proximity.
+    """
+    src=tree['source_elements'];ids=set(weak_ids)&src.keys()
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    changed=True
+    while changed:
+        changed=False
+        for a in list(ids):
+            for b,e in src.items():
+                if b in ids:continue
+                original=src[a]
+                explicit=(original.get('group_id') is not None
+                          and original.get('group_id')==e.get('group_id'))
+                aligned=any(r[0] in ('same-column','same-row') and {a,b}==set(r[1:3])
+                            for r in tree['relationships'])
+                copy=original.get('type')=='text' and e.get('type')=='text' and aligned
+                backing=any(r[0]=='backing' and r[1]==b and r[2]==a
+                            for r in tree['relationships'])
+                ornament=(original.get('type')=='text' and e.get('type')!='text'
+                          and e['width']*e['height']<.01*sw*sh
+                          and min(e['width']/sw,e['height']/sh)<.025 and aligned)
+                if explicit or copy or backing or ornament:
+                    ids.add(b);changed=True
+    return ids
+
+
+def whole_lockup_contrast_variants(elements,units,source,width,height,weak_ids,under):
+    """Propose rigid moves; full raster gates decide whether they improve ink.
+
+    Try complete functional containers first. When the inferred container is
+    too large, retain nested copy containers and a source-coupled copy subgroup.
+    Fonts, internal offsets, explicit membership and image ratios never change.
+    """
+    from engine.resize import _feasible,_unintended_text_overlaps,_rgba,_luminance,_text_visible_bounds
+    tree=build_container_tree(source,units);weak=set(weak_ids);variants=[]
+    by_id={e['id']:e for e in elements};groups=[]
+    pad=min(width,height)*.035
+    def collect(node):
+        ids=set(node.get('element_ids',()))&by_id.keys()
+        if not ids&weak:return
+        members=[by_id[eid] for eid in ids]
+        left=min(e['x'] for e in members);top=min(e['y'] for e in members)
+        right=max(e['x']+e['width'] for e in members);bottom=max(e['y']+e['height'] for e in members)
+        if right-left<=width-2*pad and bottom-top<=height-2*pad:
+            groups.append(ids)
+        else:
+            for child in node.get('children',[]):
+                if child.get('kind')=='container':collect(child)
+            subgroup=_contrast_text_lockup(ids&weak,tree,source)&by_id.keys()
+            if subgroup:groups.append(subgroup)
+    for node in tree['children']:collect(node)
+    seen=set()
+    for ids in groups:
+        if frozenset(ids) in seen:continue
+        seen.add(frozenset(ids));members=[by_id[eid] for eid in ids]
+        left=min(e['x'] for e in members);top=min(e['y'] for e in members)
+        right=max(e['x']+e['width'] for e in members);bottom=max(e['y']+e['height'] for e in members)
+        bw,bh=right-left,bottom-top
+        if bw>width-2*pad or bh>height-2*pad:continue
+        probes=[];positions=set()
+        # Include local shifts and the current axis, so a narrow viable strip
+        # between grid cells is not skipped. The global grid finds calm zones.
+        xs={left+width*f for f in (-.12,-.06,0.,.06,.12)}
+        ys={top+height*f for f in (-.12,-.06,0.,.06,.12)}
+        xs.update(width*f-bw/2 for f in (.12,.30,.50,.70,.88))
+        ys.update(height*f-bh/2 for f in (.12,.30,.50,.70,.88))
+        for y0 in sorted(ys):
+            for x0 in sorted(xs):
+                x=min(max(pad,x0),width-pad-bw);y=min(max(pad,y0),height-pad-bh)
+                dx,dy=x-left,y-top;position=(round(dx,4),round(dy,4))
+                if position in positions or abs(dx)+abs(dy)<1.:continue
+                positions.add(position)
+                candidate=deepcopy(elements)
+                for e in candidate:
+                    if e['id'] in ids:e['x']+=dx;e['y']+=dy
+                if (not _feasible(candidate,units,width,height,strict_margins=False,
+                                  gap_factor=.004,allow_text_visual_overlap=True)
+                        or _unintended_text_overlaps(candidate,units)):continue
+                ratios=[]
+                for e in members:
+                    if e.get('type')!='text' or e['id'] not in weak:continue
+                    color=_rgba(e.get('color',''))
+                    if color is None:continue
+                    box=_text_visible_bounds(e)
+                    for fy in (.1,.25,.5,.75,.9):
+                        for fx in (.1,.3,.5,.7,.9):
+                            px=min(under.width-1,max(0,int((box[0]+(box[2]-box[0])*fx+dx)/width*under.width)))
+                            py=min(under.height-1,max(0,int((box[1]+(box[3]-box[1])*fy+dy)/height*under.height)))
+                            bg=under.getpixel((px,py));alpha=color[3]*e.get('opacity',1.)
+                            fg=tuple(color[k]*alpha+bg[k]*(1-alpha) for k in range(3))
+                            a,b=_luminance(fg),_luminance(bg);ratios.append((max(a,b)+.05)/(min(a,b)+.05))
+                if ratios:
+                    ratios.sort();score=ratios[len(ratios)//5]
+                    probes.append((score,abs(dx)/width+abs(dy)/height,candidate,
+                                   dict(repair_type='container-calm-cell',element_ids=sorted(ids),dx=dx,dy=dy)))
+        probes.sort(key=lambda row:(-row[0],row[1]))
+        variants.extend((candidate,[change]) for _,_,candidate,change in probes[:3])
+    return variants[:3]

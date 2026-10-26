@@ -119,6 +119,41 @@ def choose_split_records(records_by_family, split, source_cap,
     return selected
 
 
+def cap_target_templates(records, cap=1):
+    """Keep at most ``cap`` training pairs per target template ID.
+
+    Selection is deterministic and greedily covers rare aspect transitions,
+    then underrepresented families and source templates. Evaluation rows are
+    intentionally not passed through this filter.
+    """
+    if cap <= 0:
+        return list(records)
+    remaining = sorted(records, key=lambda row: row["pair_id"])
+    selected = []
+    target_counts = Counter()
+    transition_counts = Counter()
+    family_counts = Counter()
+    source_counts = Counter()
+    while remaining:
+        eligible = [row for row in remaining
+                    if target_counts[row["target_template_id"]] < cap]
+        if not eligible:
+            break
+        chosen = min(eligible, key=lambda row: (
+            transition_counts[row["_aspect_transition"]],
+            family_counts[row.get("family_id", "")],
+            source_counts[row["source_template_id"]],
+            row["pair_id"],
+        ))
+        selected.append(chosen)
+        remaining.remove(chosen)
+        target_counts[chosen["target_template_id"]] += 1
+        transition_counts[chosen["_aspect_transition"]] += 1
+        family_counts[chosen.get("family_id", "")] += 1
+        source_counts[chosen["source_template_id"]] += 1
+    return selected
+
+
 def distribution(values):
     values = sorted(values)
     if not values:
@@ -201,6 +236,7 @@ def build_example(pair, a_design, b_design, reverse=False, prompt_version=2):
         "messages": messages_for(source,target["canvas"],completion,version=prompt_version),
         "pair_id": f"{source_info['id']}__to__{target_info['id']}",
         "source_template_id":source_info["id"],
+        "target_template_id":target_info["id"],
         "_aspect_transition": f"{aspect_bucket(source['canvas'])}->{aspect_bucket(target['canvas'])}",
         "_target_aspect_ratio": float(target["canvas"]["width"])/max(1.0,float(target["canvas"]["height"])),
         "prompt_version":prompt_version,
@@ -251,6 +287,8 @@ def main():
                         help="Maximum directed training examples per source template; 0 keeps all eligible directions")
     parser.add_argument("--train-family-cap",type=int,default=0,
                         help="Optional maximum training directions per connected template family; 0 keeps all")
+    parser.add_argument("--train-target-cap",type=int,default=1,
+                        help="Maximum training pairs per target template ID (default: 1; 0 disables)")
     parser.add_argument("--stratify-aspect-transitions",action="store_true",
                         help="Prioritize distinct portrait/square/landscape/wide source-to-target transitions under caps")
     parser.add_argument("--eval-source-cap",type=int,default=DEFAULT_EVAL_SOURCE_CAP,
@@ -268,6 +306,8 @@ def main():
         parser.error("--train-source-cap must be zero (unlimited) or positive")
     if args.train_family_cap < 0:
         parser.error("--train-family-cap must be zero (unlimited) or positive")
+    if args.train_target_cap < 0:
+        parser.error("--train-target-cap must be zero (unlimited) or positive")
     pair_doc = json.loads(args.pairs.read_text())
     excluded_pairs = set()
     excluded_templates = set()
@@ -372,10 +412,12 @@ def main():
     # Preserve legacy evenly-spaced cap behavior unless stratification is
     # explicitly requested. Eval files always use the same deterministic
     # direction cap so experiments can share identical held-out rows.
-    exact_by_split["train"] = choose_split_records(
+    train_before_target_cap = choose_split_records(
         records_by_family, "train", args.train_source_cap,
         family_cap=args.train_family_cap,
         stratified=args.stratify_aspect_transitions)
+    exact_by_split["train"] = cap_target_templates(
+        train_before_target_cap, args.train_target_cap)
     for split in ("validation", "test"):
         exact_by_split[split] = choose_split_records(
             records_by_family, split, args.eval_source_cap, stratified=False)
@@ -383,6 +425,8 @@ def main():
         split: sum(len(split_records.get(split, []))
                    for split_records in records_by_family.values())
         for split in ("train", "validation", "test")}
+    capped_train_before_target = uncapped_by_split["train"] - len(train_before_target_cap)
+    capped_train_target = len(train_before_target_cap) - len(exact_by_split["train"])
     capped_train = uncapped_by_split["train"] - len(exact_by_split["train"])
     capped_eval = sum(uncapped_by_split[split] - len(exact_by_split[split])
                       for split in ("validation", "test"))
@@ -444,8 +488,12 @@ def main():
                "family_graph_edges":"exact and core matches; core remains review-only",
                "train_source_direction_cap":args.train_source_cap or None,
                "train_family_direction_cap":args.train_family_cap or None,
+               "train_target_template_cap":args.train_target_cap or None,
                "aspect_transition_stratification":args.stratify_aspect_transitions,
                "train_directions_removed_by_cap": capped_train,
+               "train_directions_removed_by_source_or_family_cap":capped_train_before_target,
+               "train_directions_removed_by_target_template_cap":capped_train_target,
+               "train_unique_target_templates":len({r["target_template_id"] for r in exact_by_split["train"]}),
                "eval_source_direction_cap":args.eval_source_cap or None,
                "families_per_split":{split:len({r["family_id"] for r in rows}) for split,rows in exact_by_split.items()},
                "validation_test_directions_removed_by_cap": capped_eval,

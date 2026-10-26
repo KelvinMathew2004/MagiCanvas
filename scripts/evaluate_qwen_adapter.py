@@ -47,7 +47,7 @@ def measure(prediction,gold,canvas):
                 "out_of_canvas":None,"exact_ids":False}
     expected={row["id"]:row for row in gold.get("elements",[])}
     actual={row["id"]:row for row in prediction}
-    exact_ids=set(expected)==set(actual)
+    exact_ids=set(expected)==set(actual) and len(prediction)==len(actual)
     if not exact_ids or not expected:
         return {"valid":False,"geometry_mae":None,"font_mae":None,
                 "out_of_canvas":None,"exact_ids":exact_ids}
@@ -71,11 +71,12 @@ def measure(prediction,gold,canvas):
             "out_of_canvas":out_of_canvas,"exact_ids":True}
 
 
-def run_mode(records,source_for,adapter_dir):
+def run_mode(records,source_for,adapter_dir,model_dir=None):
     import torch
     import engine.qwen_seed as qwen_seed
     from engine.qwen_prompt import decode_v2_completion, record_prompt_version
     qwen_seed._load.cache_clear()
+    if model_dir is not None:qwen_seed.MODEL_DIR=Path(model_dir)
     qwen_seed.ADAPTER_DIR=adapter_dir
     results=[]
     for index,row in enumerate(records,1):
@@ -112,65 +113,78 @@ def run_mode(records,source_for,adapter_dir):
     return results
 
 
-def run_engine_mode(records,source_for,adapter_dir):
-    """Measure the selected, fully constrained engine result for one adapter."""
+def run_engine_mode(records,source_for,adapter_dir,model_dir=None,checkpoint_path=None):
+    """Evaluate the final render with the same gates for every layout family."""
     import torch
     import engine.qwen_seed as qwen_seed
     from engine.qwen_prompt import decode_v2_completion, record_prompt_version
-    from engine.resize import _adapt_with_diagnostics, _analyze, _feasible, _unintended_text_overlaps
+    from engine.resize import _adapt_with_diagnostics
+    from scripts.layout_defects import assess_engine_layout
 
     os.environ["MAGICANVAS_QWEN_ENABLED"]="1"
-    qwen_seed.ADAPTER_DIR=Path(adapter_dir)
-    qwen_seed._load.cache_clear()
-    results=[]
+    if model_dir is not None:qwen_seed.MODEL_DIR=Path(model_dir)
+    qwen_seed.ADAPTER_DIR=Path(adapter_dir);qwen_seed._load.cache_clear()
+    latest={}
+    if checkpoint_path and checkpoint_path.is_file():
+        for line in checkpoint_path.read_text().splitlines():
+            if line.strip():
+                row=json.loads(line);latest[row['pair_id']]=row
+    results=[];old_render_mode=os.environ.get('MAGICANVAS_DATASET_RENDERING')
+    if checkpoint_path:checkpoint_path.parent.mkdir(parents=True,exist_ok=True)
     try:
         for index,row in enumerate(records,1):
-            started=perf_counter()
-            source_id=row["pair_id"].split("__to__",1)[0]
-            source=source_for(row["source_split"],source_id)
-            canvas=row["target_canvas"]
-            design,report=_adapt_with_diagnostics(source,canvas)
-            gold=json.loads(row["messages"][-1]["content"])
-            if gold.get("elements") and "box" in gold["elements"][0]:
-                gold=decode_v2_completion(gold,source,canvas,record_prompt_version(row))
-            measured=measure(design.get("elements"),gold,canvas)
-            winner=report.get("winner","")
-            qdiag=report.get("qwen_diagnostics",{})
-            generation=qdiag.get("generation",{})
-            raw_valid=bool(qdiag.get("proposal_received") and generation.get("json_complete")
-                           and not generation.get("duplicate_ids")
-                           and not generation.get("unknown_ids")
-                           and not generation.get("missing_ids"))
-            raw_measure=measure(qdiag.get("model_elements") or None,gold,canvas)
-            raw_valid=raw_valid and raw_measure["valid"]
-            _,units=_analyze(source)
-            is_qwen=winner.startswith("qwen-")
-            overlap_errors=_unintended_text_overlaps(design.get("elements",[]),units)
-            feasible=_feasible(
-                design.get("elements",[]),units,canvas["width"],canvas["height"],
-                strict_margins=not is_qwen,gap_factor=.004 if is_qwen else .008,
-                allow_text_visual_overlap=is_qwen)
-            hard_checks=(measured["exact_ids"] and feasible and not overlap_errors
-                         and bool(report.get("hard_constraints_passed")))
-            measured.update(
-                pair_id=row["pair_id"],family_id=row.get("family_id"),winner=winner,
-                qwen_family_win=is_qwen,hard_checks_passed=bool(hard_checks),
-                raw_proposal_valid=raw_valid,
-                raw_geometry_mae=raw_measure["geometry_mae"],
-                raw_relative_font_mae=raw_measure["font_mae"],
-                raw_json_complete=bool(generation.get("json_complete")),
-                unintended_text_overlaps=overlap_errors,
-                qwen_status=report.get("qwen"),
-                qwen_safety_checks=((report.get("visual") or {}).get("perceptual") or {}).get("qwen_safety_checks"),
-                runtime=round(perf_counter()-started,2))
+            if row['pair_id'] in latest and not latest[row['pair_id']].get('engine_error'):
+                results.append(latest[row['pair_id']]);continue
+            started=perf_counter();canvas=row['target_canvas']
+            try:
+                official=row.get('official_path')
+                os.environ['MAGICANVAS_DATASET_RENDERING']='0' if official else '1'
+                source=(json.loads(Path(official).read_text())['source'] if official else
+                        source_for(row['source_split'],row['pair_id'].split('__to__',1)[0]))
+                design,report=_adapt_with_diagnostics(source,canvas)
+                if row.get('messages'):
+                    gold=json.loads(row['messages'][-1]['content'])
+                    if gold.get('elements') and 'box' in gold['elements'][0]:
+                        gold=decode_v2_completion(gold,source,canvas,record_prompt_version(row))
+                    measured=measure(design.get('elements'),gold,canvas)
+                else:
+                    gold={'elements':source['elements']}
+                    measured=measure(design.get('elements'),gold,canvas)
+                    measured.update(geometry_mae=None,font_mae=None)
+                qdiag=report.get('qwen_diagnostics',{});generation=qdiag.get('generation',{})
+                raw_measure=measure(qdiag.get('model_elements') or None,gold,canvas)
+                raw_valid=bool(qdiag.get('proposal_received') and generation.get('json_complete')
+                    and not generation.get('duplicate_ids') and not generation.get('unknown_ids')
+                    and not generation.get('missing_ids') and raw_measure['valid'])
+                defects=assess_engine_layout(source,design,report)
+                measured.update(defects,pair_id=row['pair_id'],family_id=row.get('family_id'),
+                    winner=report.get('winner',''),qwen_family_win=report.get('winner','').startswith('qwen-'),
+                    hard_checks_passed=not defects['flagged'],raw_proposal_valid=raw_valid,
+                    raw_geometry_mae=raw_measure['geometry_mae'] if not official else None,
+                    raw_relative_font_mae=raw_measure['font_mae'] if not official else None,
+                    raw_json_complete=bool(generation.get('json_complete')),
+                    qwen_status=report.get('qwen'),source_split=row.get('source_split','official'),
+                    target_canvas=canvas,official_path=official,source_design=source,output_design=design,
+                    required_families=(report.get('visual') or {}).get('required_families',{}),
+                    shortlist_coverage=(report.get('visual') or {}).get('shortlist_coverage',{}),
+                    runtime=round(perf_counter()-started,2))
+            except Exception as exc:
+                measured=dict(pair_id=row['pair_id'],family_id=row.get('family_id'),valid=False,
+                    exact_ids=False,geometry_mae=None,font_mae=None,raw_geometry_mae=None,
+                    raw_relative_font_mae=None,hard_checks_passed=False,flagged=True,
+                    defect_flags=['engine_error'],engine_error=f'{type(exc).__name__}: {exc}',
+                    runtime=round(perf_counter()-started,2))
             results.append(measured)
-            print(f"  {index}/{len(records)}: {winner or 'no winner'} · "
-                  f"geometry MAE {measured['geometry_mae']} ({measured['runtime']:.1f}s)",flush=True)
+            if checkpoint_path:
+                with checkpoint_path.open('a') as stream:
+                    stream.write(json.dumps(measured,ensure_ascii=False)+'\n');stream.flush();os.fsync(stream.fileno())
+            print(f"  {index}/{len(records)}: {measured.get('winner',measured.get('engine_error'))} · "
+                  f"flags {measured.get('defect_flags')} ({measured['runtime']:.1f}s)",flush=True)
     finally:
-        qwen_seed._load.cache_clear()
-        gc.collect()
-        if hasattr(torch,"mps") and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
+        if old_render_mode is None:os.environ.pop('MAGICANVAS_DATASET_RENDERING',None)
+        else:os.environ['MAGICANVAS_DATASET_RENDERING']=old_render_mode
+        qwen_seed._load.cache_clear();gc.collect()
+        if hasattr(torch,'mps') and torch.backends.mps.is_available():torch.mps.empty_cache()
     return results
 
 
@@ -218,7 +232,7 @@ def summarize_engine(results):
                  for rows in families.values() if any(r["geometry_mae"] is not None for r in rows)]
     wins=sum(bool(row.get("qwen_family_win")) for row in results)
     hard_passes=sum(bool(row.get("hard_checks_passed")) for row in results)
-    raw_valid=sum(bool(row.get("raw_proposal_valid")) for row in results)
+    raw_valid_count=sum(bool(row.get("raw_proposal_valid")) for row in results)
     return {
         "examples":len(results),"valid_final_layouts":len(valid),
         "valid_rate":len(valid)/max(1,len(results)),
@@ -229,13 +243,20 @@ def summarize_engine(results):
         "family_macro_post_constraint_geometry_mae":sum(family_maes)/len(family_maes) if family_maes else None,
         "qwen_family_wins":wins,"qwen_family_win_rate":wins/max(1,len(results)),
         "raw_proposal_valid_count":len(raw_valid),
-        "raw_proposal_valid_rate":len(raw_valid)/max(1,len(results)),
+        "raw_proposal_valid_rate":raw_valid_count/max(1,len(results)),
         "raw_json_complete_count":sum(bool(row.get("raw_json_complete")) for row in results),
         "raw_json_complete_rate":sum(bool(row.get("raw_json_complete")) for row in results)/max(1,len(results)),
         "hard_check_passes":hard_passes,
         "hard_check_pass_rate":hard_passes/max(1,len(results)),
         "families_with_valid_layouts":len(families),
+        "flagged_cases":sum(bool(r.get("flagged")) for r in results),
+        "engine_errors":sum(bool(r.get("engine_error")) for r in results),
     }
+
+
+def _engine_worker(args):
+    records,adapter,model,checkpoint=args
+    return run_engine_mode(records,read_sources(),Path(adapter),Path(model),Path(checkpoint))
 
 
 def main():
@@ -246,11 +267,21 @@ def main():
                         help="Adapter to evaluate; defaults to MAGICANVAS_QWEN_ADAPTER_DIR or the installed v2 adapter")
     parser.add_argument("--compare-adapter-dir",type=Path,default=None,
                         help="Evaluate a second adapter on the same examples and compare it with --adapter-dir")
+    parser.add_argument("--model-dir",type=Path,default=None,
+                        help="Local base model for --adapter-dir; defaults to MAGICANVAS_QWEN_DIR or the installed Qwen3 0.6B")
+    parser.add_argument("--compare-model-dir",type=Path,default=None,
+                        help="Local base model for --compare-adapter-dir; defaults to --model-dir")
     parser.add_argument("--engine",action="store_true",
                         help="Measure final engine-selected layouts, post-constraint geometry, and Qwen-family wins")
+    parser.add_argument('--engine-only',action='store_true',help='Run the installed adapter through engine stress gates without extra raw/base passes')
+    parser.add_argument('--official-samples',type=Path,help='Also stress source JSON tasks in this folder across all six formats')
+    parser.add_argument('--workers',type=int,default=1,help='Independent workers for --engine-only')
+    parser.add_argument('--resume',action='store_true',help='Resume --engine-only checkpoints')
+    parser.add_argument('--review-top',type=int,default=10,help='Render only the worst flagged outliers')
     parser.add_argument("--limit",type=int,default=0,
                         help="Examples to evaluate (0 means the full held-out test set)")
     args=parser.parse_args()
+    if args.workers<1 or args.review_top<1:parser.error('workers and review-top must be positive')
     if args.limit<0:parser.error("--limit must be nonnegative")
     records=[json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if args.limit:records=records[:args.limit]
@@ -282,10 +313,60 @@ def main():
     adapter_prompt_version=int(marker.read_text().strip()) if marker.is_file() else 1
     if adapter_prompt_version!=prompt_version:
         raise SystemExit(f"Dataset uses prompt v{prompt_version}, but {adapter_dir} uses prompt v{adapter_prompt_version}. Train/install the matching adapter first.")
-    import os
     os.environ["MAGICANVAS_QWEN_PROMPT_VERSION"]=str(prompt_version)
+    import engine.qwen_seed as qwen_seed
+    model_dir=(args.model_dir or Path(os.environ.get("MAGICANVAS_QWEN_DIR",qwen_seed.MODEL_DIR))).expanduser().resolve()
+    if not model_dir.is_dir():raise SystemExit(f"No base model directory at {model_dir}")
+    compare_model_dir=(args.compare_model_dir or model_dir).expanduser().resolve()
+    if args.compare_adapter_dir and not compare_model_dir.is_dir():
+        raise SystemExit(f"No comparison base model directory at {compare_model_dir}")
     report={"test_file":str(args.input.resolve()),"adapter_dir":str(adapter_dir),
-            "examples":len(records)}
+            "model_dir":str(model_dir),"examples":len(records)}
+    if args.engine_only:
+        if args.compare_adapter_dir:parser.error('--engine-only evaluates one installed adapter; use --engine for A/B comparison')
+        from scripts.layout_defects import official_records,build_outlier_viewer
+        test_count=len(records)
+        if args.official_samples:records.extend(official_records(args.official_samples))
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        import hashlib
+        fingerprint_files=[args.input,ROOT/'engine/resize.py',ROOT/'engine/qwen_refine.py',
+                           ROOT/'engine/qwen_seed.py',ROOT/'engine/qwen_prompt.py',
+                           ROOT/'scripts/layout_defects.py',Path(__file__).resolve(),
+                           adapter_dir/'adapter_config.json',adapter_dir/'adapter_model.safetensors',
+                           model_dir/'config.json',model_dir/'tokenizer_config.json']
+        if args.official_samples:fingerprint_files.extend(sorted(args.official_samples.glob('*.json')))
+        manifest=dict(model_dir=str(model_dir),adapter_dir=str(adapter_dir),workers=args.workers,
+            base_weight_files={path.name:[path.stat().st_size,path.stat().st_mtime_ns]
+                               for path in sorted(model_dir.glob('*.safetensors'))},
+            sha256={str(path.resolve()):hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in fingerprint_files if path.is_file()})
+        marker=args.output.with_name(args.output.stem+'.run_manifest.json')
+        if args.resume and marker.is_file() and json.loads(marker.read_text())!=manifest:
+            raise SystemExit('Engine, data, or run settings differ from this checkpoint. Use a new output directory.')
+        if args.resume and not marker.exists() and list(args.output.parent.glob(args.output.stem+'.worker*.jsonl')):
+            raise SystemExit('Existing checkpoints have no engine fingerprint. Use a new output directory.')
+        marker.write_text(json.dumps(manifest,indent=2)+'\n')
+        worker_args=[]
+        for i in range(args.workers):
+            checkpoint=args.output.with_name(args.output.stem+f'.worker{i}.jsonl')
+            if not args.resume and checkpoint.exists():checkpoint.unlink()
+            worker_args.append((records[i::args.workers],str(adapter_dir),str(model_dir),str(checkpoint)))
+        if args.workers==1:engine_results=_engine_worker(worker_args[0])
+        else:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                engine_results=[row for chunk in pool.map(_engine_worker,worker_args) for row in chunk]
+        order={r['pair_id']:i for i,r in enumerate(records)}
+        engine_results.sort(key=lambda r:order[r['pair_id']])
+        report.update(metric_scope='Final engine stress gates',examples=len(records),test_cases=test_count,
+                      official_combinations=len(records)-test_count,adapter_engine=summarize_engine(engine_results),
+                      test_engine=summarize_engine(engine_results[:test_count]),
+                      official_engine=summarize_engine(engine_results[test_count:]),
+                      run_manifest=manifest,engine_results=engine_results)
+        report['review_page']=build_outlier_viewer(engine_results,records,args.output.parent/'outliers',args.review_top)
+        args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+        print(json.dumps({k:v for k,v in report.items() if k!='engine_results'},indent=2),flush=True)
+        return
     if args.compare_adapter_dir:
         compare_dir=args.compare_adapter_dir.expanduser().resolve()
         if not compare_dir.is_dir():raise SystemExit(f"No comparison adapter directory at {compare_dir}")
@@ -296,43 +377,43 @@ def main():
                 raise SystemExit(f"Dataset uses prompt v{prompt_version}, but {path} uses prompt v{marker_version}.")
         if args.engine:
             print("Evaluating candidate adapter through the full engine",flush=True)
-            candidate_results=run_engine_mode(records,source_for,adapter_dir)
+            candidate_results=run_engine_mode(records,source_for,adapter_dir,model_dir)
             print("Evaluating comparison adapter through the full engine",flush=True)
-            comparison_results=run_engine_mode(records,source_for,compare_dir)
+            comparison_results=run_engine_mode(records,source_for,compare_dir,compare_model_dir)
             candidate_summary=summarize_engine(candidate_results)
             comparison_summary=summarize_engine(comparison_results)
             candidate_mae=candidate_summary["mean_post_constraint_geometry_mae"]
             comparison_mae=comparison_summary["mean_post_constraint_geometry_mae"]
             candidate_font_mae=candidate_summary["mean_post_constraint_relative_font_mae"]
             comparison_font_mae=comparison_summary["mean_post_constraint_relative_font_mae"]
-            candidate_wins=candidate_summary["qwen_family_wins"]
-            comparison_wins=comparison_summary["qwen_family_wins"]
             report.update(metric_scope="Final engine-selected layouts after constraints, local repair, rendering, and ranking",
             comparison_adapter_dir=str(compare_dir),
+                comparison_model_dir=str(compare_model_dir),
                 candidate_engine=candidate_summary,comparison_engine=comparison_summary,
                 results={"candidate":candidate_results,"comparison":comparison_results},
                 candidate_beats_both_comparison_metrics=(
                     candidate_mae is not None and comparison_mae is not None
-                    and candidate_font_mae is not None and comparison_font_mae is not None
                     and candidate_mae<comparison_mae
-                    and candidate_font_mae<comparison_font_mae
-                    and candidate_wins>comparison_wins
+                    and candidate_summary["raw_json_complete_rate"]>=comparison_summary["raw_json_complete_rate"]
+                    and candidate_summary["raw_proposal_valid_rate"]>=comparison_summary["raw_proposal_valid_rate"]
+                    and candidate_summary["qwen_family_win_rate"]>comparison_summary["qwen_family_win_rate"]
                     and candidate_summary["valid_rate"]==1.0
                     and candidate_summary["hard_check_pass_rate"]==1.0))
         else:
             print("Evaluating candidate adapter on raw held-out proposals",flush=True)
-            candidate_results=run_mode(records,source_for,adapter_dir)
+            candidate_results=run_mode(records,source_for,adapter_dir,model_dir)
             print("Evaluating comparison adapter on raw held-out proposals",flush=True)
-            comparison_results=run_mode(records,source_for,compare_dir)
+            comparison_results=run_mode(records,source_for,compare_dir,compare_model_dir)
             report.update(metric_scope="Raw decoded model JSON; no engine constraints are applied",
             comparison_adapter_dir=str(compare_dir),
+                comparison_model_dir=str(compare_model_dir),
                 candidate=summarize(candidate_results),comparison=summarize(comparison_results),
                 results={"candidate":candidate_results,"comparison":comparison_results})
     else:
         print("Evaluating base Qwen on held-out examples",flush=True)
-        base_results=run_mode(records,source_for,ROOT/"models"/"no-qwen-adapter")
+        base_results=run_mode(records,source_for,ROOT/"models"/"no-qwen-adapter",model_dir)
         print("Evaluating Qwen with the selected LoRA",flush=True)
-        adapter_results=run_mode(records,source_for,adapter_dir)
+        adapter_results=run_mode(records,source_for,adapter_dir,model_dir)
         base_summary=summarize(base_results)
         adapter_summary=summarize(adapter_results)
         base_mae=base_summary["mean_normalized_geometry_mae"]
@@ -344,7 +425,7 @@ def main():
                                          if adapter_mae is not None and base_mae is not None else None))
         if args.engine:
             print("Evaluating selected adapter through the full engine",flush=True)
-            engine_results=run_engine_mode(records,source_for,adapter_dir)
+            engine_results=run_engine_mode(records,source_for,adapter_dir,model_dir)
             report["adapter_engine"]=summarize_engine(engine_results)
             report["engine_results"]=engine_results
     args.output.parent.mkdir(parents=True,exist_ok=True)

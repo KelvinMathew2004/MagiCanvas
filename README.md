@@ -58,8 +58,8 @@ The standard local default remains `models/qwen3-layout-lora-v2` until the
 expanded adapter passes the held-out A/B evaluation. The expanded adapter is
 kept at `models/qwen3-layout-lora-v2-expanded/` as a separate candidate.
 
-SigLIP reranks valid layout candidates when its build-time weights are present;
-otherwise the engine falls back to deterministic ranking. Qwen can use a
+SigLIP breaks close ties after exact structural and raster defect checks when
+its build-time weights are present; otherwise ranking is deterministic. Qwen can use a
 configured Qwen checkpoint and optional public Hugging Face LoRA adapter. To
 bake an adapter into the image, pass its repository at build time:
 
@@ -76,8 +76,34 @@ For the task contract, constraints, and model/runtime caveats, see
 evaluation guidance, are in [docs/ADOBE_ORGANIZER_QA.md](docs/ADOBE_ORGANIZER_QA.md).
 Qwen currently limits input to 4096 tokens, output to 4096 tokens, and combined
 context to 8192 tokens (or a smaller model limit). Invalid proposals fall back
-to other engine candidates. Current repair/training changes are documented in
-[docs/QWEN_AUDIT_FIXES.md](docs/QWEN_AUDIT_FIXES.md).
+to other engine candidates. Current implementation, verification, and training
+readiness are documented in [docs/DAY4_5_AUDIT.md](docs/DAY4_5_AUDIT.md).
+
+## Current layout and evaluation approach
+
+The engine infers functional containers from source relationships, projects
+their internal source geometry together, and snaps supported shared axes.
+Font calibration uses rendered glyphs and the available local font bundle,
+widens into available space before shrinking, and scales tracking with fonts.
+Learned container candidates compete with independent deterministic aspect
+reflows and proportional preservation. Hard defects apply to every family;
+matching a preferred heuristic template is not a final selection requirement.
+
+Evaluation runs batches and renders only flagged outliers for review. The current
+stress suite covers 89 frozen Crello test pairs and the three official hackathon
+inputs across six formats (107 cases). The earlier 398-case test/validation
+mining report remains a historical baseline. Commands and the response-masked
+Colab training recipe are in [docs/QWEN_LORA_COLAB.md](docs/QWEN_LORA_COLAB.md).
+
+The cleaned training split has 1,122 unique target IDs, with 309 validation and
+89 test rows and no family overlap between splits. Both larger base models are
+available locally for later A/B training: Qwen3-1.7B and Qwen2.5-1.5B-Instruct.
+Neither has a newly trained/promoted adapter. Keep the existing 0.6B adapter as
+the baseline until an explicit base-model/adapter comparison passes the gates.
+The training recipe uses 6,144 tokens so complex examples are retained.
+
+Archived review snapshots and recovery details are listed in
+[docs/REVIEW_ARCHIVE.md](docs/REVIEW_ARCHIVE.md).
 
 The input/output contract is [chameleon_design_schema_v0.9.json](chameleon_design_schema_v0.9.json).
 The original starter instructions are preserved in

@@ -1,17 +1,20 @@
 # MagiCanvas implementation
 
-## Current model path (October 22)
+## Current model path (October 25)
 
 The engine now has an optional Qwen3-0.6B v2 LoRA proposal path, enabled with
 `MAGICANVAS_QWEN_ENABLED=1`. `engine/qwen_refine.py` supplies compact source
 lockups, joint column/peer-row constraints, measured-font alternatives, and
 bounded local/contrast repair candidates. `engine/resize.py` compares those
-candidates using feasibility, relative raster defects, and optional SigLIP
-scores. The current SigLIP ranker is zero-shot; its fine-tuned preference head
-has not been trained/installed. See [QWEN_AUDIT_FIXES.md](QWEN_AUDIT_FIXES.md) for
+candidates using exact structural/raster defects and optional SigLIP tie scores.
+Functional container projection and source-axis snapping preserve lockups;
+an independent deterministic reflow remains available in the rendered shortlist.
+The current SigLIP ranker is zero-shot; its fine-tuned preference head
+has not been trained/installed. See [DAY4_5_AUDIT.md](DAY4_5_AUDIT.md) for
 current behavior and limitations. The sections below describe the evolution
 from the original October 16 deterministic baseline; its historical statements
-about a future model decision are superseded by this paragraph.
+about a future model decision are superseded by this paragraph. Current
+training/evaluation commands are in [QWEN_LORA_COLAB.md](QWEN_LORA_COLAB.md).
 
 ## Scope and submission boundary
 

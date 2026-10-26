@@ -5,7 +5,7 @@
   "coordinate_encoding": "normalized 0..1000 canvas fractions; font scale relative to short side",
   "source_pair_manifest": "/Users/kelvinmathew/Documents/MagiCanvas/data/crello_verified_pairs.json",
   "exact_examples": {
-    "train": 2706,
+    "train": 1122,
     "validation": 309,
     "test": 89
   },
@@ -21,7 +21,7 @@
   "train_source_direction_cap": 4,
   "train_family_direction_cap": 40,
   "aspect_transition_stratification": true,
-  "train_directions_removed_by_cap": 1536,
+  "train_directions_removed_by_cap": 3120,
   "eval_source_direction_cap": 2,
   "families_per_split": {
     "train": 295,
@@ -80,5 +80,28 @@
     "source_cap_4_family_cap_32_stratified": 2518,
     "source_cap_4_family_cap_40_stratified": 2706,
     "uncapped_exact_directions": 4242
+  },
+  "pre_target_cap_train_examples": 2706,
+  "train_target_template_cap": 1,
+  "train_directions_removed_by_source_or_family_cap": 1536,
+  "train_directions_removed_by_target_template_cap": 1584,
+  "train_unique_target_templates": 1122,
+  "max_training_rows_per_target_template": 1,
+  "train_aspect_transition_distribution_after_target_cap": {
+    "landscape->landscape": 113,
+    "landscape->portrait": 40,
+    "landscape->square": 69,
+    "landscape->wide": 102,
+    "portrait->landscape": 58,
+    "portrait->portrait": 123,
+    "portrait->square": 33,
+    "portrait->wide": 47,
+    "square->landscape": 97,
+    "square->portrait": 32,
+    "square->wide": 63,
+    "wide->landscape": 111,
+    "wide->portrait": 46,
+    "wide->square": 51,
+    "wide->wide": 137
   }
 }
