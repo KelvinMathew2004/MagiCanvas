@@ -1,10 +1,10 @@
 """Optional SigLIP perceptual re-ranker for already-valid candidate renders.
 
 The engine generates several geometry-valid candidate layouts, renders the top
-few to PNG, and picks a winner. This module adds a *learned* image/text judge
-(``google/siglip2-base-patch16-224``) to that final tie-break, as a closer proxy
-for the AI evaluator that scores the rendered PNG than the deterministic
-contrast/busyness heuristics alone.
+few to PNG, and picks a winner. This module uses SigLIP2's pretrained zero-shot
+image/text scores as a final tie-break. An optional local Bradley–Terry head
+can add a preference signal after it has been trained on reviewed, same-domain
+render pairs.
 
 Scope and guarantees:
 - It ONLY reorders candidates that have already passed every hard constraint
@@ -17,6 +17,9 @@ Scope and guarantees:
 - Weights are baked into the image at Docker build time (see
   ``scripts/fetch_siglip.py`` and the Dockerfile) and loaded with
   ``local_files_only=True``, so runtime needs no network access.
+- The preference head is optional and loaded from ``models/siglip-ranker.pt``
+  (or ``MAGICANVAS_SIGLIP_RANKER``); missing or incompatible head files are
+  ignored without affecting zero-shot scoring.
 
 Inference runs on CPU in eval/inference mode, so repeated calls on the same
 machine are deterministic (matching the engine's determinism contract).
@@ -33,6 +36,10 @@ from pathlib import Path
 MODEL_DIR = Path(os.environ.get(
     "MAGICANVAS_SIGLIP_DIR",
     Path(__file__).resolve().parents[1] / "models" / "siglip",
+))
+RANKER_PATH=Path(os.environ.get(
+    "MAGICANVAS_SIGLIP_RANKER",
+    Path(__file__).resolve().parents[1]/"models"/"siglip-ranker.pt",
 ))
 
 # Prompts framing "a well-adapted resized layout". SigLIP has a sigmoid head, so
@@ -76,6 +83,26 @@ def _load():
 def available() -> bool:
     """True if the model and its weights can be loaded offline."""
     return _load() is not None
+
+
+@lru_cache(maxsize=1)
+def _load_ranker():
+    if not RANKER_PATH.is_file():return None
+    loaded=_load()
+    if loaded is None:return None
+    try:
+        import torch
+        try:payload=torch.load(RANKER_PATH,map_location="cpu",weights_only=True)
+        except TypeError:payload=torch.load(RANKER_PATH,map_location="cpu")
+        state=payload["state_dict"]
+        dimension=int(payload["dimension"])
+        weight=state["weight"].reshape(-1).float()
+        bias=state.get("bias")
+        bias=(bias.reshape(()).float() if bias is not None else weight.new_zeros(()))
+        if weight.numel()!=dimension:return None
+        return weight,bias,float(payload.get("score_scale",.25)),dimension
+    except Exception:
+        return None
 
 
 def _letterbox_square(image):
@@ -189,6 +216,13 @@ def score_layouts(images, reference_image=None, layout_context=None):
             positive=logits[:,:len(positive_prompts)].mean(dim=1)
             negative=logits[:,len(positive_prompts):].mean(dim=1)
             quality=(positive-negative)
+            ranker=_load_ranker()
+            if ranker is not None:
+                weight,bias,scale,dimension=ranker
+                image_features=getattr(output,'image_embeds',None)
+                if image_features is not None and image_features.shape[-1]==dimension:
+                    normalized=torch.nn.functional.normalize(image_features.float(),dim=-1)
+                    quality=quality+scale*(normalized[:len(images)]@weight.to(normalized.device)+bias.to(normalized.device))
             reference_similarity=None
             image_features=getattr(output,'image_embeds',None)
             if reference_image is not None and image_features is not None:
@@ -204,6 +238,8 @@ def score_layouts(images, reference_image=None, layout_context=None):
             note+=f" with {len(contextual_positive)} inferred relationship cue(s)"
         if reference_similarity is not None:
             note+=" against the original design"
+        if _load_ranker() is not None:
+            note+=" with local preference head"
         return scores,note
     except Exception as exc:
         return None, f"SigLIP scoring failed: {exc}"

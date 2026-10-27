@@ -81,8 +81,15 @@ separate implementation. The sample assets use the supported color notation.
 
 ## Items the supplied documents leave unresolved
 
-- Approved-model list and exact model-size limit, if the team chooses a model.
-- Complete reference-machine CPU/RAM/disk/GPU specification.
+- **Model guidance from Adobe Q&A (October 22):** organizers said any model
+  size may be considered when its weights are available or downloadable from
+  Hugging Face; they did not give a numeric size ceiling in the session. They
+  do expect the solution to run smoothly on an M5 Mac, but the exact hardware
+  and runtime limits remain unspecified. A large model or substantial
+  fine-tuning is not expected; model swapping is a bonus. See
+  [ADOBE_ORGANIZER_QA.md](ADOBE_ORGANIZER_QA.md). These are team notes from a
+  verbal Q&A, not a replacement for written rules.
+- Complete reference-machine CPU/RAM/disk/GPU and runtime specification.
 - Final schema/version and target-format catalogue, if organizers update the
   provisional materials. Viewer presets are conveniences, not a claimed full
   official catalogue; the engine accepts target dimensions directly.
@@ -91,9 +98,25 @@ separate implementation. The sample assets use the supported color notation.
 - The brand kit describes its assets/fonts as stand-ins. Confirm whether the
   organizers have supplied a final replacement kit before freezing a submission.
 
-These are organizer confirmations, not details the team should invent. This
-review used the supplied files; it does not claim to have checked later private
-announcements or obtained organizer approval.
+## Evaluation guidance from the October 22 Q&A
+
+The team was told that judge LLMs will compare outputs against reference designs
+for each tested aspect ratio, followed by human evaluation of visual appeal.
+Flexibility/model swapping and model size are also considered. The session
+provided no weights for these criteria. The team has visually observed that
+Qwen-on often improves on Qwen-off but remains below the source/reference
+quality; this is not an Adobe score.
+
+Adobe also said meaningful design content should remain visible and intentional
+bleed may extend beyond the canvas, including transparent PNG padding. This
+needs careful interpretation with the written on-canvas structural check:
+preserve visible pixels and review both the JSON frame bounds and the asset's
+alpha-visible bounds for any intentional bleed.
+
+The Q&A points above are team notes from a verbal conversation, not a written
+rule amendment or official scoring specification. This audit combines the
+supplied challenge files with those notes; it does not claim Adobe certified
+the implementation or that no later private updates exist.
 
 ## PNG resolution findings
 

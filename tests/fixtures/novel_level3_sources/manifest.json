@@ -1,0 +1,46 @@
+[
+  {
+    "name": "n01",
+    "title": "Field Notes \u2014 open studio",
+    "file": "n01.json",
+    "elements": 23,
+    "source_canvas": {
+      "width": 1440,
+      "height": 240
+    },
+    "sha256": "960997cb3ae32263e8df261d521a30cc8bdbd4ac24a63cff1e3a4ac9701646e2"
+  },
+  {
+    "name": "n02",
+    "title": "Slow Morning \u2014 coffee tasting",
+    "file": "n02.json",
+    "elements": 22,
+    "source_canvas": {
+      "width": 320,
+      "height": 1200
+    },
+    "sha256": "48af2c4fa3faf33a49e328a7fb15a5f80f1290759527bc8feaad65be88fb6952"
+  },
+  {
+    "name": "n03",
+    "title": "After Dark \u2014 independent music",
+    "file": "n03.json",
+    "elements": 21,
+    "source_canvas": {
+      "width": 900,
+      "height": 900
+    },
+    "sha256": "e1c47d4fab7c9bd4b0a5037edb2d92a1b7308b61904b58b85791ba790a83e3de"
+  },
+  {
+    "name": "n04",
+    "title": "North Collective \u2014 winter editorial",
+    "file": "n04.json",
+    "elements": 21,
+    "source_canvas": {
+      "width": 840,
+      "height": 1120
+    },
+    "sha256": "4de39a50bd80feafef154e05187dc2197d8b846fe1a0ca782e728971217b3c68"
+  }
+]

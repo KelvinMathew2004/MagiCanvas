@@ -9,7 +9,8 @@ kiwisolver==1.5.1
 # if these are absent the engine falls back to its deterministic ranking.
 # NOTE: CPU-only torch is installed separately in the Dockerfile via the
 # PyTorch CPU wheel index to avoid the large default CUDA build.
-transformers>=4.49
+transformers>=4.51
+peft>=0.14
 huggingface_hub>=0.23
 sentencepiece>=0.1.99
 protobuf>=3.20

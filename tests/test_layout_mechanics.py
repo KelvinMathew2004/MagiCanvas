@@ -249,22 +249,24 @@ class LayoutMechanicsTests(unittest.TestCase):
         wide_centers=[(box[1]+box[3])/2 for box in wide_boxes]
         self.assertLess(max(wide_centers)-min(wide_centers),1.)
 
-    def test_narrow_reflow_can_move_and_unrotate_corner_callout_into_flow(self):
+    def test_narrow_reflow_preserves_source_corner_rotation_and_footer(self):
         source=sample(3);units=_analyze(source)[1]
         callout=next(u for u in units if u.get('corner_callout'))
         ids={e['id'] for e in callout['items']}
         elements=_stack_seed(units,160,600,.30,.42,True,(1080,1350),move_corner_callouts=True)
+        from engine.resize import _source_geometry_safety
+        elements=_source_geometry_safety(elements,source,units,160,600)
         moved=[e for e in elements if e['id'] in ids]
         box=_bounds(moved)
         self.assertTrue(moved)
-        self.assertTrue(all(e.get('rotation',0)==0 for e in moved))
+        self.assertTrue(all(e.get('rotation',0)==callout['items'][0].get('rotation',0) for e in moved))
         self.assertLess(box[1],600*.20)
-        self.assertAlmostEqual((box[0]+box[2])/2,80,delta=2)
+        self.assertGreater((box[0]+box[2])/2,80)
         footer_asset=[e for e in elements if e['id']=='holiday_watermark']
         asset_box=_bounds(footer_asset)
         self.assertGreater(asset_box[1],300)
-        self.assertLess(asset_box[1],600*.85)
-        self.assertLess(asset_box[2]-asset_box[0],160*.30)
+        self.assertLessEqual(asset_box[3],600)
+        self.assertLessEqual(asset_box[2]-asset_box[0],160*.14+1e-5)
 
     def test_smaller_supporting_copy_keeps_subheading_relationship(self):
         units=_analyze(sample(2))[1]

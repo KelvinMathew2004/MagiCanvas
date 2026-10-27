@@ -1,5 +1,54 @@
 # MagiCanvas implementation
 
+## Current model path (October 25)
+
+See [the inventory repair audit](INVENTORY_REPAIR_AUDIT.md) for the current structural safeguards, identity handling, extreme-format candidates and controlled replay results.
+
+The engine now has an optional Qwen3-0.6B v2 LoRA proposal path, enabled with
+`MAGICANVAS_QWEN_ENABLED=1`. `engine/qwen_refine.py` supplies compact source
+lockups, joint column/peer-row constraints, measured-font alternatives, and
+bounded local/contrast repair candidates. `engine/resize.py` compares those
+candidates using exact structural/raster defects and optional SigLIP tie scores.
+Functional container projection remains a sibling to bounded pre-container
+Qwen proposals, so it cannot erase a clean learned reflow. The rigid projection alternative scales source fonts and tracking with its
+container frame; the raw alternative keeps the model's font predictions.
+Renderer-based calibration widens available boxes before shrinking glyphs;
+source-exact peer rows/columns are repaired as intact groups when their target
+axes drift by up to 8%, while general axis clusters keep the tighter 3%
+threshold. Functional containers can include a centered element between exact
+source peers, and a lone vertically edge-anchored container can recover its
+authored inset when the model shifts the whole group by more than 8% of the
+target height. Horizontal reflow remains model-proposed unless the source
+container is centered. These are candidate-generation rules: clean
+pre-container Qwen siblings remain available to the renderer-based selector.
+An independent deterministic reflow remains in the rendered shortlist.
+The current SigLIP ranker is zero-shot; its fine-tuned preference head
+has not been trained/installed. See [DAY4_5_AUDIT.md](DAY4_5_AUDIT.md) for
+current behavior and limitations. The sections below describe the evolution
+from the original October 16 deterministic baseline; its historical statements
+about a future model decision are superseded by this paragraph. Current
+training/evaluation commands are in [QWEN_LORA_COLAB.md](QWEN_LORA_COLAB.md).
+
+## Current selection safety (October 25 follow-up)
+
+Deterministic candidates retain their generated reflow and receive only glyph calibration. Qwen's decoded, aspect-corrected, bounded, font-fitted boxes have a reserved rendered candidate independent of source container projection. Learned candidates are gated by physical geometry/raster defects, with continuous mild contrast and readability costs. Large or translucent artwork cannot act as an incidental grouping bridge. See the latest verified results and raw-output ablations in `DAY4_5_AUDIT.md`.
+
+## Prompt geometry cues (October 25 follow-up)
+
+Prompt-v2 keeps its trained compact-ID order and `{id, box, font_scale}` output
+contract so existing adapters remain usable. Its source description now adds
+conservative structural roles, center axes, and normalized edge insets. Source
+relations are ranked by evidence strength and capped at 180 instead of stopping
+at the first 120 pairs in input order; the list includes shared left/right/top/
+bottom edges and equal short gaps as well as center alignments, groups, backing,
+and overlap. For ordinary foreground images, the predicted width is interpreted
+as the scale and height is derived from the source aspect ratio. Full-bleed
+`cover` imagery keeps its authored frame behavior. The renderer-measured text
+fitting and bounded layout/energy repair remain responsible for text size and
+physical constraints. This enriches inference context; it does not replace the
+need for a fresh 89-case visual/defect evaluation or train on solver-selected
+alternatives.
+
 ## Scope and submission boundary
 
 The scored engine is `engine/resize.py`. The existing function signature, runner,
