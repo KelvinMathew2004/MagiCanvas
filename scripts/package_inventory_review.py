@@ -105,11 +105,11 @@ def main():
         if report.get('manifest'):
             (evidence/(name+'_run_manifest.json')).write_text(json.dumps(report['manifest'],indent=2)+'\n')
     shutil.copy2(evidence/'reverse_level3.jsonl',PACK/'evidence/synthetic_level3_reverse.jsonl')
-    for path in ['engine/macro_layout.py','engine/source_structure.py','engine/clean_zones.py','engine/structural_reflow.py','engine/layout_contracts.py','engine/resize.py','engine/qwen_refine.py','engine/qwen_seed.py','engine/qwen_prompt.py',
+    for path in ['engine/geometry_policy.py','engine/macro_layout.py','engine/source_structure.py','engine/clean_zones.py','engine/structural_reflow.py','engine/layout_contracts.py','engine/resize.py','engine/qwen_refine.py','engine/qwen_seed.py','engine/qwen_prompt.py',
                  'scripts/package_inventory_review.py','scripts/replay_structure_audit.py','scripts/build_structure_comparisons.py','scripts/evaluate_qwen_adapter.py','scripts/layout_defects.py','scripts/audit_inventory_fixes.py','scripts/finalize_visual_contract_audit.py',
                  'scripts/build_novel_level3_designs.py','scripts/evaluate_novel_designs.py','scripts/replay_validation_sample.py','scripts/build_diverse_dataset_viewer.py','scripts/evaluate_novel_validation.py','scripts/replay_qwen_engine.py','scripts/replay_visual_contract_delta.py','scripts/build_level3_reverse_fixtures.py','scripts/evaluate_level3_reverse.py','scripts/package_visual_contract_comparisons.py',
-                 'tests/test_macro_layout.py','tests/test_novel_designs.py','tests/test_source_attachments.py','tests/test_qwen_pipeline.py','tests/test_source_evidence.py','tests/test_diverse_selection.py','tests/test_replay_pairs.py','tests/test_visual_contracts.py','tests/test_inventory_repairs.py','tests/test_stress_metrics.py','tests/test_layout_mechanics.py','pytest.ini',
-                 'docs/MACRO_STRUCTURE_REVIEW.md','docs/VISUAL_CONTRACT_REPAIRS.md','docs/IMPLEMENTATION.md','docs/INVENTORY_REPAIR_AUDIT.md','README.md']:
+                 'tests/test_geometry_policy.py','tests/test_macro_layout.py','tests/test_novel_designs.py','tests/test_source_attachments.py','tests/test_qwen_pipeline.py','tests/test_source_evidence.py','tests/test_diverse_selection.py','tests/test_replay_pairs.py','tests/test_visual_contracts.py','tests/test_inventory_repairs.py','tests/test_stress_metrics.py','tests/test_layout_mechanics.py','pytest.ini',
+                 'docs/RIGID_ART_REVIEW.md','docs/MACRO_STRUCTURE_REVIEW.md','docs/VISUAL_CONTRACT_REPAIRS.md','docs/IMPLEMENTATION.md','docs/INVENTORY_REPAIR_AUDIT.md','README.md']:
         dest=PACK/'code'/path;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/path,dest)
     for fixture in (ROOT/'tests/fixtures/level3_reverse').glob('*.json'):
         dest=PACK/'code/tests/fixtures/level3_reverse'/fixture.name;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(fixture,dest)
@@ -118,9 +118,10 @@ def main():
     (PACK/'docs').mkdir(exist_ok=True);shutil.copy2(ROOT/'docs/INVENTORY_REPAIR_AUDIT.md',PACK/'docs/INVENTORY_REPAIR_AUDIT.md')
     shutil.copy2(ROOT/'docs/VISUAL_CONTRACT_REPAIRS.md',PACK/'docs/VISUAL_CONTRACT_REPAIRS.md')
     shutil.copy2(ROOT/'docs/MACRO_STRUCTURE_REVIEW.md',PACK/'docs/MACRO_STRUCTURE_REVIEW.md')
+    shutil.copy2(ROOT/'docs/RIGID_ART_REVIEW.md',PACK/'docs/RIGID_ART_REVIEW.md')
     (PACK/'README_FOR_GEMINI.md').write_text("""# Compact current-engine review
 
-Read `docs/MACRO_STRUCTURE_REVIEW.md`, then open `review/index.html`.
+Read `docs/RIGID_ART_REVIEW.md`, then open `review/index.html`. `docs/MACRO_STRUCTURE_REVIEW.md` records the earlier checkpoint.
 
 - `review/novel_designs/index.html`: four genuinely new authored compositions, eight resize tasks. Exact earlier local 0.6B coordinates; current source / raw proposal / model ON / model OFF. Neutral IDs, frozen sources, all failures retained. These are new-composition stress tests, not unseen-asset or certified unseen-family claims.
 - `evidence/novel_designs_summary.json`: completion, raw/selected/OFF defect counts, winner provenance and manual notes.
@@ -131,12 +132,12 @@ Read `docs/MACRO_STRUCTURE_REVIEW.md`, then open `review/index.html`.
 - `review/inventory_worst10/review.html`: worst ten held-out comparison cases.
 - `review/visual_contract_fixes/index.html`: historical reported output / current output.
 - `review/synthetic_level3_reverse/index.html`: legacy same-elements reverse fixtures, retained only for regression.
-- `evidence/inventory_repairs/`: all 89 held-out, 18 official, paired 12-case adapters, twelve validation and eight legacy reverse outputs. All 151 replay cases pass current new-defect checks; authored identity issues remain disclosed. Replay is not new model inference.
+- `evidence/inventory_repairs/`: all 89 held-out, 18 official, paired 12-case adapters, twelve validation and eight legacy reverse outputs. Consult each report for current flags; authored identity issues remain disclosed. Replay is not new model inference.
 - `code/`: current engine, tests, reproduction scripts and authored source fixtures. No weights or full font/dataset bundles.
 
 The earlier prompt experiment remains historical; its raw prediction cache is retained. The active prompt and training adapter were not changed. No training was performed. Old documents are retained as labeled checkpoint history. Passing automatic checks does not imply aesthetic perfection; compare actual rendered sources and outputs.
 """)
-    (PACK/'GEMINI_REVIEW_PROMPT.md').write_text("""Read docs/MACRO_STRUCTURE_REVIEW.md first. Inspect structure_changes and admission diagnostics; separate substantive layout changes from floating-point normalization differences. Then compare the raw model panels against the current deterministic repairs. Inspect the eight genuinely new composition tests before the previously reviewed examples. Compare source, raw Qwen, selected Qwen-ON and Qwen-OFF. Do not credit deterministic fallback as raw model quality. Check edge anchors, parent containment, group scale, relative copy axes, rotated labels and negative space; all outputs, including failures, are retained. There is no human resized target for authored fixtures, so target MAE is null. Existing Crello training-split photographs are reused; do not claim unseen-asset generalization. The separate 151-case audit reuses identical model coordinates through the frozen current engine. Recommend general source-evidenced corrections only, with cross-family regression checks. Zero flags is not aesthetic perfection. Do not propose template-ID-specific rules.
+    (PACK/'GEMINI_REVIEW_PROMPT.md').write_text("""Read docs/RIGID_ART_REVIEW.md first; the macro review is historical. Inspect structure_changes and admission diagnostics; separate substantive layout changes from floating-point normalization differences. Then compare the raw model panels against the current deterministic repairs. Inspect the eight genuinely new composition tests before the previously reviewed examples. Compare source, raw Qwen, selected Qwen-ON and Qwen-OFF. Do not credit deterministic fallback as raw model quality. Check edge anchors, parent containment, group scale, relative copy axes, rotated labels and negative space; all outputs, including failures, are retained. There is no human resized target for authored fixtures, so target MAE is null. Existing Crello training-split photographs are reused; do not claim unseen-asset generalization. The separate 151-case audit reuses identical model coordinates through the frozen current engine. Recommend general source-evidenced corrections only, with cross-family regression checks. Zero flags is not aesthetic perfection. Do not propose template-ID-specific rules.
 """)
     (PACK/'review/index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{font:19px system-ui;background:#101820;color:#eee;max-width:900px;margin:60px auto}a{color:#9ed4ff}li{margin:22px}</style><h1>Current engine review</h1><ul><li><a href="structure_changes/index.html">Latest structural changes · every before / after comparison and unchanged hashes</a></li><li><a href="novel_designs/index.html">NEW: four different designs × two resizes · source / raw / Qwen ON / Qwen OFF</a></li><li><a href="novel_validation/index.html">12 additional validation-family designs · frozen prediction replay</a></li><li><a href="dataset_diversity/index.html">24 held-out sources · source / preview / proposal / output</a></li><li><a href="visual_contract_fixes/index.html">Previously reported defects: before / after</a></li><li><a href="main_engine_qwen_outputs/index.html">All current engine outputs</a></li><li><a href="inventory_worst10/review.html">89-case audit: worst 10 comparisons</a></li><li><a href="../docs/MACRO_STRUCTURE_REVIEW.md">Current approach, verification and limitations</a></li><li><a href="synthetic_level3_reverse/index.html">Regression archive: older same-elements reverse fixtures</a></li></ul>')
     origin=run/'all_changes';portable=PACK/'review/structure_changes'
@@ -144,11 +145,33 @@ The earlier prompt experiment remains historical; its raw prediction cache is re
         portable.mkdir(exist_ok=True)
         for path in origin.iterdir():
             if path.is_file():shutil.copy2(path,portable/path.name)
+        changes=json.loads((origin/'changes.json').read_text())
+        proof=PACK/'review/official_fixes';proof.mkdir(exist_ok=True)
+        official_changes=[c for c in changes['changed'] if c['cohort']=='official' and not c['render_pixels_identical']]
+        panels=[]
+        for c in official_changes:
+            for key in ('image','json'):shutil.copy2(origin/c[key],proof/c[key])
+            panels.append(f'<article><h2>{html.escape(c["pair_id"])}</h2><img src="{c["image"]}"><p>Source · previous engine · current engine</p><a href="{c["json"]}">Current JSON</a></article>')
+        (proof/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Official resize fixes</title><style>body{font:17px system-ui;background:#101820;color:#eee;margin:24px}a{color:#9ed4ff}article{background:#182532;padding:20px;margin:20px 0}img{width:100%;max-width:1500px}h2{overflow-wrap:anywhere}</style><h1>Official resizes · visual changes</h1><p>Exact earlier model coordinates; current repairs. All official outputs with changed review pixels are included. <a href="../main_engine_qwen_outputs/index.html?group=official">All 18 official outputs</a></p>'+''.join(panels))
+    if (run/'art_policy_audit.json').exists():
+        shutil.copy2(run/'art_policy_audit.json',PACK/'evidence/art_policy_audit.json')
+    # Keep the portable packet small without resizing its comparison images.
+    # Full-quality renders remain in the local run directory.
+    from io import BytesIO
+    for name in ('dataset_diversity','novel_validation','novel_designs','structure_changes'):
+        pattern='*comparison.jpg' if name=='structure_changes' else '*contact.jpg'
+        for image in (PACK/'review'/name).glob(pattern):
+            with Image.open(image) as src:
+                data=BytesIO();src.convert('RGB').save(data,format='JPEG',quality=82,optimize=True,progressive=True)
+            if len(data.getvalue())<image.stat().st_size:image.write_bytes(data.getvalue())
     manifest=[]
     for p in sorted(PACK.rglob('*')):
         if p.is_file() and p.name not in ('MANIFEST.sha256','.DS_Store'):
             manifest.append(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(PACK).as_posix()}')
     (PACK/'MANIFEST.sha256').write_text('\n'.join(manifest)+'\n')
+    (PACK/'evidence/current_checkpoint.json').write_text(json.dumps(dict(checkpoint=run.name,run=str(run),raw_coordinates_reused=True),indent=2)+'\n')
+    from scripts.refresh_review_viewer import refresh
+    refresh(PACK)
     print('Refreshed',PACK,'files',len(manifest))
 
 if __name__=='__main__':main()

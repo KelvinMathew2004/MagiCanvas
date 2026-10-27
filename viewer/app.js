@@ -139,7 +139,9 @@ async function adapt() {
   } catch (error) {
     if (id === requestId) {
       loader?.stop();
-      setStatus(error.message, 'error');
+      setStatus(error instanceof TypeError
+        ? 'Cannot reach the preview server. Start it with: python viewer/server.py'
+        : error.message, 'error');
     }
   }
   finally { if (id === requestId) {document.body.classList.remove('busy');$('adapt').disabled=false;} }
@@ -282,7 +284,9 @@ async function loadCollection(mode) {
     setTask(samples[0].task, samples[0].id);
     await adapt();
   } catch (error) {
-    setStatus(error.message, 'error');
+    setStatus(error instanceof TypeError
+      ? 'Cannot reach the preview server. Start it with: python viewer/server.py'
+      : error.message, 'error');
   }
 }
 

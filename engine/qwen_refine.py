@@ -1234,7 +1234,7 @@ def contrast_variant(elements,units,width,height,weak_ids,under,full,return_alte
                         nb = min(under.height, max(nt + 1, int((e['y'] + dy + e['height']) / height * under.height)))
                         if nr > nl and nb > nt:
                             ec = edges_under.crop((nl, nt, nr, nb))
-                            ed = sum(ec.getdata()) / (255.0 * max(1, ec.width * ec.height))
+                            ed = sum(ec.tobytes()) / (255.0 * max(1, ec.width * ec.height))
                             edge_densities.append(ed)
 
                     mean_edge = sum(edge_densities) / len(edge_densities) if edge_densities else 0.0
@@ -1474,13 +1474,14 @@ def build_container_tree(source, units=None):
     sets=sorted({frozenset(g) for g in sets},key=lambda g:(-len(g),tuple(sorted(g))))
     for eid in sorted(src):
         if not any(eid in g for g in sets):sets.append(frozenset([eid]))
+    from engine.geometry_policy import elastic_shape_ids
+    elastic_ids=elastic_shape_ids(source)
     def node(group):
         subsets=[s for s in sets if s<group and not any(s<t<group for t in sets)]
         covered=set().union(*subsets) if subsets else set()
         children=[node(s) for s in subsets]
         children.extend({'kind':'element','element_id':eid} for eid in sorted(group-covered))
-        # Only schema-native shapes may stretch; images always scale uniformly.
-        elastic=any(src[eid].get('type')=='shape' for eid in group)
+        elastic=bool(set(group)&elastic_ids)
         return {'kind':'container','id':'container:'+','.join(sorted(group)),
                 'element_ids':sorted(group),'source_box':list(_frame([src[eid] for eid in group])),
                 'mode':'semi-elastic' if elastic else 'rigid','children':children}
@@ -1501,6 +1502,8 @@ def project_container_tree(elements, tree, width, height):
     """
     from math import sqrt, isfinite
     src=tree['source_elements'];result=deepcopy(elements);out={e['id']:e for e in result}
+    from engine.geometry_policy import elastic_shape_ids
+    elastic_ids=elastic_shape_ids(dict(canvas=tree['source_canvas'],elements=list(src.values())))
     sw=float(tree['source_canvas']['width']);sh=float(tree['source_canvas']['height']);notes=[]
     for node in tree['children']:
         ids=[eid for eid in node['element_ids'] if eid in out]
@@ -1614,7 +1617,7 @@ def project_container_tree(elements, tree, width, height):
             for eid in ids:
                 e=src[eid];q=out[eid]
                 # Only a shape that spans the group can absorb its free axis.
-                if e.get('type')=='shape' and e.get('shape_type')!='ellipse' and e['width']>=.9*(sb[2]-sb[0]) and abs(e.get('rotation',0)%360)<.5:
+                if eid in elastic_ids and e['width']>=.9*(sb[2]-sb[0]) and abs(e.get('rotation',0)%360)<.5:
                     delta=min(elastic_width-q['width'],2*min(q['x'],width-q['x']-q['width']))
                     if delta>0:q['x']-=delta/2;q['width']+=delta
         final_box=_frame([out[eid] for eid in ids])

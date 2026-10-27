@@ -34,6 +34,12 @@ _DATASET_SPLIT_DIRS=tuple(Path(__file__).resolve().parents[1]/'data'/name for na
 _CRELLO_FONTS_PICKLE=Path(__file__).resolve().parents[1]/'data'/'crello_fonts.pickle'
 
 
+def _rgb_pixels(image):
+    """Read an RGB image as Python integer triples without Pillow's deprecated API."""
+    data=image.tobytes()
+    return list(zip(data[0::3],data[1::3],data[2::3]))
+
+
 def _asset_root(element):
     """Find the root against which an element's asset_id is stored."""
     asset_id=str(element.get('asset_id',''))
@@ -3487,110 +3493,12 @@ def _constrain(elements, units, width, height, topology='nearest', strict_margin
                                allow_text_visual_overlap) else None
 
 
-@lru_cache(maxsize=128)
-def _poster_like_background(asset_path):
-    """Detect flat graphic backgrounds without mistaking textured photos for art."""
-    try:
-        from PIL import Image, ImageFilter
-        with Image.open(asset_path) as opened:
-            # Transparent full-canvas layers are often color washes or frames
-            # intended to composite over a photo. Converting one to RGB while
-            # making a matte turns its transparent pixels opaque and hides the
-            # actual background underneath it.
-            if ('A' in opened.getbands()
-                    and opened.getchannel('A').getextrema()[0]<250):
-                return False
-            image=opened.convert('RGB').resize((32,32))
-        hsv=image.convert('HSV')
-        pixels=list(hsv.getdata())
-        mean_saturation=sum(pixel[1] for pixel in pixels)/(255.0*max(1,len(pixels)))
-        strong_saturation=sum(pixel[1]>=160 for pixel in pixels)/max(1,len(pixels))
-        # Saturation alone labels foliage and colorful photographs as flat
-        # posters. Their fine texture should be cropped as a normal background,
-        # rather than letterboxed over the old hard-coded maroon matte.
-        edges=image.convert('L').filter(ImageFilter.FIND_EDGES)
-        edge_density=sum(edges.getdata())/(255.0*max(1,edges.width*edges.height))
-        return (mean_saturation>=.72 and strong_saturation>=.70
-                and edge_density<=.12)
-    except (OSError,ValueError,ImportError):
-        return False
-
-
 def _background_fit(element,source,width,height):
-    """Avoid cropping saturated raster poster art when changing aspect ratio.
-
-    Photographic backgrounds retain cover-cropping. Graphic-like full-canvas
-    art uses fill only for a substantial aspect change, so baked-in stars,
-    borders, and ornaments remain visible instead of being silently clipped.
-    """
-    sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
-    source_ratio=sw/max(1.0,sh);target_ratio=float(width)/max(1.0,float(height))
-    ratio_shift=max(source_ratio/target_ratio,target_ratio/source_ratio)
+    """Fill the background by a uniform cover crop, never by pixel stretching."""
     asset=Path(_asset_root(element))/str(element.get('asset_id',''))
     if not asset.is_file():
-        return element.get('fit','contain')
-    if ratio_shift>=1.35 and _poster_like_background(str(asset)):
-        return 'fill'
+        return 'cover' if element.get('fit')=='cover' else 'contain'
     return 'cover'
-
-
-def _poster_matte_asset(element,width,height):
-    """Make an aspect-correct, edge-matted copy of a flattened poster layer.
-
-    A poster-like background may contain decorations baked into one raster.
-    Stretching it to a very different canvas preserves pixels but distorts
-    them; cropping it loses those decorations. For local dataset assets, keep
-    the complete raster at its original aspect and extend its plain top/bottom
-    edge color into the letterbox area. The generated asset is content-addressed
-    by the canvas dimensions and remains next to the original asset so the
-    unchanged renderer can resolve it through the normal asset ID.
-    """
-    try:
-        from PIL import Image, ImageFilter
-        root=Path(_asset_root(element))
-        asset_id=str(element.get('asset_id',''))
-        source_path=root/asset_id
-        if not source_path.is_file():return None
-        with Image.open(source_path) as opened:
-            source=opened.convert('RGB')
-        target_w=max(1,min(2048,int(round(float(width)))))
-        target_h=max(1,min(2048,int(round(float(height)))))
-        if max(target_w/source.width,target_h/source.height)>4.0:return None
-        scale=min(target_w/source.width,target_h/source.height)
-        fitted=source.resize((max(1,round(source.width*scale)),
-                              max(1,round(source.height*scale))),Image.Resampling.LANCZOS)
-        x=(target_w-fitted.width)//2;y=(target_h-fitted.height)//2
-        edge_pixels=[source.getpixel((x,y)) for x in (0,source.width-1)
-                     for y in range(0,source.height,max(1,source.height//32))]
-        matte=tuple(round(sum(pixel[channel] for pixel in edge_pixels)/max(1,len(edge_pixels)))
-                    for channel in range(3))
-        output=Image.new('RGB',(target_w,target_h),matte)
-        # Extend only the central edge bands, avoiding the corner ornaments.
-        band=max(1,round(min(source.width,source.height)*.045))
-        x0=round(source.width*.20);x1=round(source.width*.80)
-        top=source.crop((x0,0,max(x0+1,x1),min(source.height,band)))
-        bottom=source.crop((x0,max(0,source.height-band),max(x0+1,x1),source.height))
-        if y>0:
-            output.paste(top.resize((target_w,y),Image.Resampling.BILINEAR),(0,0))
-        if y+fitted.height<target_h:
-            pad_h=target_h-y-fitted.height
-            output.paste(bottom.resize((target_w,pad_h),Image.Resampling.BILINEAR),
-                         (0,y+fitted.height))
-        if x>0:
-            y0=round(fitted.height*.20);y1=round(fitted.height*.80)
-            left=fitted.crop((0,y0,max(1,band),y1)).resize(
-                (x,target_h),Image.Resampling.BILINEAR)
-            right=fitted.crop((max(0,fitted.width-band),y0,fitted.width,y1)).resize(
-                (max(1,target_w-x-fitted.width),target_h),Image.Resampling.BILINEAR)
-            output.paste(left,(0,0));output.paste(right,(x+fitted.width,0))
-        output.paste(fitted,(x,y))
-        derived=source_path.with_name(
-            f'{source_path.stem}_canvas_{target_w}x{target_h}_matte.png')
-        derived.parent.mkdir(parents=True,exist_ok=True)
-        if not derived.is_file():output.save(derived,optimize=True)
-        return derived.relative_to(root).as_posix()
-    except (OSError,ValueError,ImportError):
-        return None
 
 
 def _perceptual_context(source, backgrounds, units, width, height):
@@ -3909,8 +3817,8 @@ def _banner_centerline(records,width,height):
 
 
 @lru_cache(maxsize=2048)
-def _text_visual_coverage_cached(payload):
-    """Intersect actual Skia glyph pixels with the later asset's alpha mask."""
+def _text_visual_coverage_stats_cached(payload):
+    """Intersect glyph pixels with art; retain peak line coverage as well."""
     import json
     import numpy as np
     import skia
@@ -3921,9 +3829,11 @@ def _text_visual_coverage_cached(payload):
     from renderer.converter.convert import convert_chameleon_to_crello
     text,visual=json.loads(payload)
     box=_text_visible_bounds(text);x,y=floor(box[0]),floor(box[1]);w,h=ceil(box[2])-x,ceil(box[3])-y
-    if min(w,h)<=0:return 0.
+    if min(w,h)<=0:return (0.,0.,0)
     manager=_layout_font_manager()
-    if manager is None or w*h>16_000_000:return _overlap(box,_bounds([visual]))/max(1,w*h)
+    if manager is None or w*h>16_000_000:
+        fraction=_overlap(box,_bounds([visual]))/max(1,w*h)
+        return (fraction,fraction,0)
     e=deepcopy(text)
     for run in e.get('style_runs') or []:run['end']=int(run['end'])-1
     example,_=convert_chameleon_to_crello({'canvas':{'width':1,'height':1},'elements':[e]},manager)
@@ -3938,7 +3848,7 @@ def _text_visual_coverage_cached(payload):
     canvas.rotate(float(e.get('rotation',0)));canvas.translate(-e['width']/2,-e['height']/2)
     render_text(canvas,manager,prop)
     yy,xx=np.nonzero(surface.makeImageSnapshot().toarray()[:,:,3]>32)
-    if not len(xx):return 0.
+    if not len(xx):return (0.,0.,0)
     try:
         if visual.get('type')=='shape':
             from renderer.converter.shapes import render_shape,shape_fill_alpha
@@ -3946,7 +3856,9 @@ def _text_visual_coverage_cached(payload):
         else:
             with Image.open(_asset_root(visual)/visual['asset_id']) as im:
                 alpha=np.asarray(im.convert('RGBA').getchannel('A'))
-    except (OSError,KeyError):return _overlap(box,_bounds([visual]))/max(1,w*h)
+    except (OSError,KeyError):
+        fraction=_overlap(box,_bounds([visual]))/max(1,w*h)
+        return (fraction,fraction,0)
     vh,vw=alpha.shape;ew,eh=visual['width'],visual['height']
     dx=xx+x+.5-(visual['x']+ew/2);dy=yy+y+.5-(visual['y']+eh/2)
     a=radians(float(visual.get('rotation',0)));lx=dx*cos(a)+dy*sin(a)+ew/2;ly=-dx*sin(a)+dy*cos(a)+eh/2
@@ -3959,13 +3871,26 @@ def _text_visual_coverage_cached(payload):
     inside &= (px>=0)&(px<vw)&(py>=0)&(py<vh)
     active=np.zeros(len(xx),dtype=bool)
     active[inside]=alpha[py[inside].astype(int),px[inside].astype(int)]*float(visual.get('opacity',1.))>32
-    return float(active.mean())
+    peak=float(active.mean())
+    if abs(float(text.get('rotation',0)))<1:
+        rows=np.unique(yy)
+        cuts=np.flatnonzero(np.diff(rows)>max(2.,float(text.get('font_size',12))*.20))+1
+        for band in np.split(rows,cuts):
+            mask=(yy>=band[0])&(yy<=band[-1])
+            # Ignore a few anti-aliased pixels or a detached dot/accent.
+            if mask.sum()>=16 and active[mask].sum()>=4:
+                peak=max(peak,float(active[mask].mean()))
+    return (float(active.mean()),peak,int(active.sum()))
+
+
+def _text_visual_coverage_stats(text,visual):
+    import json
+    if _overlap(_text_visible_bounds(text),_bounds([visual]))<=0:return (0.,0.,0)
+    return _text_visual_coverage_stats_cached(json.dumps([text,visual],sort_keys=True))
 
 
 def _text_visual_coverage(text,visual):
-    import json
-    if _overlap(_text_visible_bounds(text),_bounds([visual]))<=0:return 0.
-    return _text_visual_coverage_cached(json.dumps([text,visual],sort_keys=True))
+    return _text_visual_coverage_stats(text,visual)[0]
 
 
 def _source_occlusion_defects(elements,source):
@@ -4666,6 +4591,18 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                      if c not in shortlist)
     shortlist.extend(c for c in qwen_candidates
                      if c['name']=='qwen-source-contained-proposal' and c not in shortlist)
+    # Reserve one representative of each available independent path before
+    # rendering. Macro proposals are generated only when their quality gate
+    # warrants them; never manufacture a candidate for an inapplicable family.
+    for predicate in (
+        lambda c: c['name'] in ('qwen-pre-container-font-fitted', 'qwen-raw-constraint-repaired'),
+        lambda c: c['name'].startswith('macro-band-reflow'),
+        lambda c: c['name'].startswith('source-attached-proportional'),
+        lambda c: any(part in c['name'] for part in ('semantic-stack', 'editorial-split')),
+    ):
+        representative=next((c for c in candidates if predicate(c)),None)
+        if representative is not None and representative not in shortlist:
+            shortlist.append(representative)
     # Reserve functional families explicitly; energy ordering must not let
     # several near-identical Qwen siblings evict the aspect-bucket baseline.
     required_families={}
@@ -4737,8 +4674,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     right=min(source_under.width,max(left+1,round((e['x']+e['width'])/sw*source_under.width)))
                     bottom=min(source_under.height,max(top+1,round((e['y']+e['height'])/sh*source_under.height)))
                     if right<=left or bottom<=top:continue
-                    bg=list(source_under.crop((left,top,right,bottom)).getdata())
-                    mask=list(source_ink.crop((left,top,right,bottom)).getdata())
+                    bg=_rgb_pixels(source_under.crop((left,top,right,bottom)))
+                    mask=source_ink.crop((left,top,right,bottom)).tobytes()
                     active=[px for px,m in zip(bg,mask) if m>12]
                     if not active:continue
                     alpha=color[3]*float(e.get('opacity',1.0));ratios=[]
@@ -4787,6 +4724,17 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     repaired,contract_fonts=_finish_candidate_text(repaired,source,units,width,height,candidate.get('measured_stack',False))
                 candidate=dict(candidate,elements=repaired,contract_font_calibration=contract_fonts)
                 shortlist[index]=candidate
+            # Every candidate, including raw Qwen and macro layouts, obeys the
+            # same aspect policy before its actual pixels are scored.
+            from engine.geometry_policy import preserve_aspects
+            from engine.layout_contracts import _separate_art
+            repaired=preserve_aspects(candidate['elements'],source,width,height)
+            # Source-attached and macro layouts own whole-container geometry.
+            # Never make their leaves independently movable after calibration.
+            if not candidate.get('source_attached') and not candidate.get('macro_locked'):
+                _separate_art(repaired,source,width,height,new_contacts_only=True)
+            candidate=dict(candidate,elements=repaired)
+            shortlist[index]=candidate
             candidate_backgrounds=candidate.get('backgrounds',backgrounds)
             doc=_assemble(candidate['elements'],candidate_backgrounds,source,width,height)
             full_path=Path(directory)/f'{index}.png'
@@ -4815,8 +4763,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         continue
                     under_crop=under.crop((left,top,right,bottom))
                     ink_crop=ink.crop((left,top,right,bottom))
-                    backing_pixels=list(under_crop.getdata())
-                    ink_pixels=list(ink_crop.getdata())
+                    backing_pixels=_rgb_pixels(under_crop)
+                    ink_pixels=ink_crop.tobytes()
                     active_pixels=[pixel for pixel,mask in zip(backing_pixels,ink_pixels) if mask>12]
                     if not active_pixels:
                         cost+=3.;invisible.append(e['id']);weak.append(e['id']);checked+=1
@@ -4849,7 +4797,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     roughness=sum(abs(lumas[j]-lumas[j-1]) for j in range(1,len(lumas)) if j%8)/56
                     from PIL import ImageFilter
                     edge_crop=under_crop.convert('L').filter(ImageFilter.FIND_EDGES)
-                    edge_data=list(edge_crop.getdata())
+                    edge_data=edge_crop.tobytes()
                     edge_density=sum(edge_data)/(255.0*max(1,len(edge_data)))
                     mean_luma=sum(lumas)/max(1,len(lumas))
                     luma_std=(sum((x-mean_luma)**2 for x in lumas)/max(1,len(lumas)))**0.5
@@ -5522,15 +5470,12 @@ def _assemble(elements,backgrounds,source,width,height):
             # rotates. The renderer clips rotated pixels at canvas edges.
             e.update(x=0.,y=0.,width=float(width),height=float(height))
             e['fit']=_background_fit(old,source,width,height)
-            if e['fit']=='fill':
-                matte=_poster_matte_asset(old,width,height)
-                if matte:
-                    e['asset_id']=matte
-                    e['fit']='fill'
         else:
             e.update(x=0,y=0,width=width,height=height)
         by_id[e['id']]=e
-    return dict(canvas=dict(width=int(width),height=int(height)),elements=[by_id[e['id']] for e in source['elements']])
+    from engine.geometry_policy import preserve_aspects
+    return dict(canvas=dict(width=int(width),height=int(height)),
+                elements=preserve_aspects([by_id[e['id']] for e in source['elements']],source,width,height))
 
 
 def _broken_source_stack_units(proposal, units):
@@ -6275,7 +6220,9 @@ def _adapt_with_diagnostics(source,target_canvas):
             signature=tuple((e['id'],round(e['x'],3),round(e['y'],3),round(e['width'],3),
                              round(e['height'],3),round(e.get('font_size',0.),3))
                             for e in candidate['elements'])
-            if signature not in signatures:
+            if (signature not in signatures or
+                    (candidate['name'] in ('qwen-pre-container-font-fitted','qwen-raw-constraint-repaired')
+                     and not any(c['name']==candidate['name'] for c in optimized))):
                 optimized.append(candidate);signatures.add(signature)
     if baseline_for_render is not None:optimized.append(baseline_for_render)
     if width/height<=.45:

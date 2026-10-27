@@ -399,9 +399,24 @@ def _brand_order(elements,source,units,width,height,apply=False):
     return issues
 
 
+def _new_art_collision(text,art,old_text,old_art):
+    from engine.resize import _text_visual_coverage_stats
+    authored,source_peak,_=_text_visual_coverage_stats(old_text,old_art)
+    if authored>.05:return None
+    coverage,peak,pixels=_text_visual_coverage_stats(text,art)
+    # Source-supported intersections (e.g. lettering over a decorative frame)
+    # can shift between lines after wrapping. Use the aggregate regression
+    # floor for those; the stricter line check detects newly introduced contact.
+    new_line_contact=(source_peak<=.01 and pixels>=max(8,.02*text.get('font_size',12)**2)
+                      and peak>max(.01,source_peak+.005))
+    if coverage>max(.02,authored+.01) or new_line_contact:
+        return dict(kind='text_art_occlusion',ids=[text['id'],art['id']],coverage=coverage,line_coverage=peak,new_line_contact=new_line_contact)
+    return None
+
+
 def art_occlusions(elements,source):
     """New glyph intersections with opaque foreground art, in either paint order."""
-    from engine.resize import _analyze,_text_visual_coverage,_overlap,_bounds
+    from engine.resize import _analyze,_overlap,_bounds
     background={e['id'] for e in _analyze(source)[0]};src={e['id']:e for e in source['elements']};defects=[]
     for text in elements:
         if text['type']!='text':continue
@@ -410,12 +425,8 @@ def art_occlusions(elements,source):
             if text.get('group_id') is not None and text.get('group_id')==art.get('group_id'):continue
             old_text,old_art=src[text['id']],src[art['id']]
             if _overlap(_bounds([text]),_bounds([art]))<=0:continue
-            authored=_text_visual_coverage(old_text,old_art)
-            if authored>.05:continue
-            coverage=_text_visual_coverage(text,art)
-            # Even a narrow ring/rule can cross several glyphs while covering
-            # less than five percent of an entire paragraph's ink.
-            if coverage>max(.02,authored+.01):defects.append(dict(kind='text_art_occlusion',ids=[text['id'],art['id']],coverage=coverage))
+            collision=_new_art_collision(text,art,old_text,old_art)
+            if collision:defects.append(collision)
     return defects
 
 
@@ -432,20 +443,24 @@ def image_collisions(elements,source):
     return defects
 
 
-def _separate_art(elements,source,width,height):
-    from engine.resize import _bounds,_text_visible_bounds,_text_visual_coverage
+def _separate_art(elements,source,width,height,new_contacts_only=False):
+    from engine.resize import _bounds,_text_visible_bounds
     out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']};pad=.025*min(width,height)
     for defect in art_occlusions(elements,source):
+        if new_contacts_only and not defect.get('new_line_contact'):continue
         text,art=(out[i] for i in defect['ids'])
         if art.get('group_id') is not None:continue
-        tb=_text_visible_bounds(text);old=src[art['id']];sw,sh=source['canvas']['width'],source['canvas']['height']
-        probes=[(old['x']/sw*width,old['y']/sh*height),(tb[2]+pad,art['y']),(tb[0]-pad-art['width'],art['y']),
-                (art['x'],tb[3]+pad),(art['x'],tb[1]-pad-art['height'])]
+        tb=_text_visible_bounds(text);ab=_bounds([art]);old=src[art['id']];sw,sh=source['canvas']['width'],source['canvas']['height']
+        # Transparent padding is not the subject. Move the painted art only
+        # far enough to clear the glyphs, rather than overshooting by its frame.
+        probes=[(old['x']/sw*width,old['y']/sh*height),(art['x']+tb[2]+pad-ab[0],art['y']),
+                (art['x']+tb[0]-pad-ab[2],art['y']),(art['x'],art['y']+tb[3]+pad-ab[1]),
+                (art['x'],art['y']+tb[1]-pad-ab[3])]
         valid=[]
         for x,y in probes:
             candidate=dict(art,x=min(width-art['width']-pad,max(pad,x)),y=min(height-art['height']-pad,max(pad,y)))
             if candidate['x']<0 or candidate['y']<0:continue
-            if all(_text_visual_coverage(t,candidate)<=.05 or _text_visual_coverage(src[t['id']],old)>.05 for t in elements if t['type']=='text'):
+            if all(_new_art_collision(t,candidate,src[t['id']],old) is None for t in elements if t['type']=='text'):
                 valid.append(candidate)
         if valid:
             chosen=min(valid,key=lambda e:abs(e['x']-art['x'])+abs(e['y']-art['y']));art.update(chosen)
@@ -578,6 +593,8 @@ def issues(elements,source,width,height,units=None):
                 if _overlap(box,scene['subject'])>1:result.append(dict(kind='background_subject_overlap',ids=[e['id'],scene['photo']['id']]))
     result.extend(art_occlusions(elements,source))
     result.extend(image_collisions(elements,source))
+    from engine.geometry_policy import aspect_issues
+    result.extend(aspect_issues(elements,source))
     from engine.source_structure import containment_issues
     result.extend(containment_issues(elements,source))
     return result

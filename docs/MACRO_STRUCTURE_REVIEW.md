@@ -1,6 +1,6 @@
 # Composite macro reflow and measured upgrades
 
-October 26, 2026. Current implementation review. Final frozen run: `data/qwen_lora/macro_structure_final/`. Older source-attachment and visual-contract documents are historical checkpoints.
+October 26, 2026. Historical macro-layout checkpoint: `data/qwen_lora/macro_structure_final/`. See [Rigid artwork and glyph clearance](RIGID_ART_REVIEW.md) for the subsequent aspect-policy and collision fixes. Results below describe this earlier frozen run.
 
 ## What changed
 

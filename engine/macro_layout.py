@@ -14,7 +14,7 @@ import json
 def edge_strips(source):
     w,h=source['canvas']['width'],source['canvas']['height'];found={}
     for e in source['elements']:
-        if e['type']!='shape' or abs(e.get('rotation',0))>.1:continue
+        if e['type']!='shape' or e.get('shape_type','rectangle') not in ('rectangle','rounded_rectangle','line') or abs(e.get('rotation',0))>.1:continue
         if e['width']<=.06*w and e['height']>=.85*h:
             if e['x']<=1:found[e['id']]='left'
             elif e['x']+e['width']>=w-1:found[e['id']]='right'

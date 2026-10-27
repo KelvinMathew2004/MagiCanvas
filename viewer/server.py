@@ -154,16 +154,11 @@ def render_preview_data(design, assets_dir=None, asset_mode='demo'):
 
 
 def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', sample_id=None):
-    import importlib
-    import renderer.converter.assets
-    import engine.resize
-    import engine.main
-    importlib.reload(renderer.converter.assets)
-    importlib.reload(engine.resize)
-    importlib.reload(engine.main)
-    current_adapt = engine.resize._adapt_with_diagnostics
-    current_text = engine.resize._text
-    current_self_check = engine.main.self_check
+    # Keep one consistent module graph for the lifetime of the server. Partial
+    # reloads mix new callers with stale dependent modules, and concurrent
+    # requests can observe half-reloaded state. Restart after editing code.
+    from engine.resize import _adapt_with_diagnostics, _text
+    from engine.main import self_check
 
     source, target = validated or validate_task(task)
     original_source = deepcopy(source)
@@ -176,8 +171,8 @@ def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', samp
         source_png, source_warnings = render_preview_data(source, assets_dir, asset_mode)
     else:
         source_warnings = []
-    output, diagnostics = current_adapt(source, target)
-    warnings = source_warnings + current_self_check(source, output)
+    output, diagnostics = _adapt_with_diagnostics(source, target)
+    warnings = source_warnings + self_check(source, output)
     gate = diagnostics.get('quality_gate', {})
     if gate and not gate.get('passed', False):
         faults = ', '.join(gate.get('faults', {}).keys())
@@ -189,7 +184,7 @@ def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', samp
         )
     for e in output['elements']:
         if e['type'] == 'text':
-            h, w, lines = current_text(e)
+            h, w, lines = _text(e)
             if h > e['height'] + .1 or w > e['width'] + .1 or (e.get('max_lines') and lines > e['max_lines']):
                 warnings.append(f"{e['id']}: text may not fit at this resolution.")
             if e['font_size'] < 8:
