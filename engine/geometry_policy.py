@@ -10,6 +10,30 @@ import json
 from math import cos, sin, radians
 
 
+def ambient_shape(element, source=None):
+    """Ungrouped translucent paint is not evidence of an atomic attachment.
+
+    Opacity can be authored either on the layer or in its fill color. Explicit
+    groups remain stronger evidence and are not classified as ambient here.
+    """
+    if element.get('type')!='shape' or element.get('group_id') is not None:
+        return False
+    from engine.resize import _rgba
+    color=_rgba(element.get('fill_color',''))
+    alpha=float(element.get('opacity',1.))*(color[3] if color else 1.)
+    if (alpha<.4 and source is not None
+            and element.get('shape_type','rectangle') in ('rectangle','rounded_rectangle')):
+        # Translucency alone does not make an enclosing copy panel ambient.
+        # Strict containment is stronger evidence than incidental overlap.
+        children=[t for t in source['elements'] if t.get('type')=='text'
+                  and t.get('z_index',0)>element.get('z_index',0)
+                  and t['x']>=element['x']-1 and t['y']>=element['y']-1
+                  and t['x']+t['width']<=element['x']+element['width']+1
+                  and t['y']+t['height']<=element['y']+element['height']+1]
+        if len(children)>=2:return False
+    return alpha<.4
+
+
 def elastic_shape_ids(source):
     return _elastic_shapes(json.dumps(source, sort_keys=True))
 
@@ -35,7 +59,7 @@ def _elastic_shapes(payload):
             elastic.add(e['id'])
         # Source-evidenced backplate: paint is behind, and contains a label.
         # Translucent ambient decorations must not become elastic via overlap.
-        if float(e.get('opacity', 1)) >= .9 and any(
+        if not ambient_shape(e,source) and float(e.get('opacity', 1)) >= .9 and any(
             t.get('z_index', 0) > e.get('z_index', 0)
             and t['x'] >= e['x'] - 1 and t['y'] >= e['y'] - 1
             and t['x'] + t['width'] <= e['x'] + w + 1

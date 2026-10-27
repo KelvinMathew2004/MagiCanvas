@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "description": "Fixed feature-selected development regression suite. Qwen enabled; original/resized only. This repeatedly reviewed suite is not a blind benchmark.",
+  "selection": "All 18 official formats + all 8 independently authored alternate conversions + 12 dataset sources selected by element/text counts and family diversity, never by output scores.",
+  "adapter": "models/qwen3-layout-lora-v2",
+  "model": "models/qwen3-0.6b",
+  "cases": [
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__widescreen",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__leaderboard",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__leaderboard",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__portrait",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__skyscraper",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__square",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__story",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level1_warmup__to__widescreen",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__leaderboard",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__portrait",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__skyscraper",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__square",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level2_core__to__story",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__portrait",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__skyscraper",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__square",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__story",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "official",
+      "pair_id": "official:chameleon_sample_level3_advanced__to__widescreen",
+      "prediction_report": "data/qwen_lora/peer_edge_alignment/official/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n01__to__square",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n01__to__portrait",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n02__to__square",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n02__to__widescreen",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n03__to__leaderboard",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n03__to__story",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n04__to__widescreen",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "alternate",
+      "pair_id": "authored:n04__to__square",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/novel/report.json"
+    },
+    {
+      "cohort": "validation",
+      "pair_id": "59e8760bd8141396fe977d6d__to__5954bfa595a7a863ddce1686",
+      "prediction_report": "data/qwen_lora/art_proportions_verified/novel_validation/report.json",
+      "element_count": 20,
+      "text_count": 3
+    },
+    {
+      "cohort": "validation",
+      "pair_id": "591424ce95a7a863ddcd795e__to__5914233995a7a863ddcd7772",
+      "prediction_report": "data/qwen_lora/art_proportions_verified/novel_validation/report.json",
+      "element_count": 18,
+      "text_count": 10
+    },
+    {
+      "cohort": "validation",
+      "pair_id": "5914287695a7a863ddcd7d07__to__5952990895a7a863ddce04f5",
+      "prediction_report": "data/qwen_lora/art_proportions_verified/novel_validation/report.json",
+      "element_count": 13,
+      "text_count": 6
+    },
+    {
+      "cohort": "validation",
+      "pair_id": "5952484295a7a863ddcddf38__to__58898c2895a7a863ddcc3095",
+      "prediction_report": "data/qwen_lora/art_proportions_verified/novel_validation/report.json",
+      "element_count": 11,
+      "text_count": 6
+    },
+    {
+      "cohort": "test",
+      "pair_id": "5914257f95a7a863ddcd7a55__to__5914261c95a7a863ddcd7b1a",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 18,
+      "text_count": 4,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "58b4351a95a7a863ddcc9d62__to__592d1c6995a7a863ddcd99c6",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 16,
+      "text_count": 6,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "58b5635b95a7a863ddcca1ff__to__58d138a495a7a863ddcccef6",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 15,
+      "text_count": 7,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "5e87623f4b3890eb0782a9f3__to__5e8d975c4b3890eb071d6099",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 15,
+      "text_count": 10,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "59524cde95a7a863ddcde0a7__to__595263cb95a7a863ddcde752",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 13,
+      "text_count": 5,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "5914261c95a7a863ddcd7b1a__to__5914257f95a7a863ddcd7a55",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 18,
+      "text_count": 4,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "592d1c6995a7a863ddcd99c6__to__58b4351a95a7a863ddcc9d62",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 16,
+      "text_count": 6,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    },
+    {
+      "cohort": "test",
+      "pair_id": "59524ced95a7a863ddcde0b2__to__58b4351a95a7a863ddcc9d62",
+      "prediction_report": "data/qwen_lora/universal_reflow_research/accepted/heldout/report.json",
+      "element_count": 16,
+      "text_count": 6,
+      "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
+    }
+  ]
+}

@@ -1373,8 +1373,9 @@ def build_container_tree(source, units=None):
                    and not e.get('group_id') for e in members):return
         parent[find(b)]=find(a)
     def decorative_bridge(e):
+        from engine.geometry_policy import ambient_shape
         return (e.get('type')!='text' and e.get('group_id') is None
-                and float(e.get('opacity',1.))<.98)
+                and (ambient_shape(e) or float(e.get('opacity',1.))<.98))
     for i,a in enumerate(items):
         ab=_rotated_bounds(a);aa=max(1.,a['width']*a['height'])
         contained={a['id']}

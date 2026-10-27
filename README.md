@@ -24,7 +24,7 @@ Restart the preview server after changing engine code. The preview enables Qwen 
 
 ## Offline Docker evaluation
 
-The build needs internet access to install dependencies and fetch public Qwen3-0.6B and SigLIP base weights. The resulting container uses local files without network access:
+The build needs internet access to install dependencies and fetch public Qwen3-0.6B and SigLIP2 base weights. The resulting container uses local files without network access:
 
 ```bash
 docker build --platform linux/amd64 -t magicanvas .
@@ -44,7 +44,9 @@ For deterministic-only comparison add `-e MAGICANVAS_QWEN_ENABLED=0` to `docker 
 
 ## Architecture and trade-offs
 
-The engine infers source relationships and functional containers, then generates learned Qwen proposals and deterministic candidates including proportional, semantic/editorial and, when appropriate, macro-band reflows. Source relationships guide repair and attachment preservation. A renderer measures text fit, overlaps, contrast and other defects before selection; SigLIP is an optional bounded tie-breaker. The checks are safeguards, not a guarantee of a flawless or feasible layout for every dense or extreme format. Existing intentional overlaps can be preserved. The engine preserves artwork proportions; native panels, backgrounds and dividers may resize as layout surfaces.
+The engine infers source relationships and functional containers, then generates learned Qwen proposals and deterministic candidates including proportional, semantic/editorial and, when appropriate, macro-band reflows. Source relationships guide repair and attachment preservation. A renderer measures text fit, overlaps, contrast and other defects before selection; SigLIP2 is an optional bounded tie-breaker. The checks are safeguards, not a guarantee of a flawless or feasible layout for every dense or extreme format. Existing intentional overlaps can be preserved. The engine preserves artwork proportions; native panels, backgrounds and dividers may resize as layout surfaces.
+
+Ungrouped ambient paint is separated from functional containers using effective layer and fill opacity. Additional intrinsic row/column candidates move atomic cards and media attachments together; measured occupancy, readability and primary-content prominence govern acceptance. This is a bounded layout search, not a full CSS/Figma implementation. See the [research and regression decisions](docs/UNIVERSAL_REFLOW_RESEARCH.md).
 
 The Qwen base and compatible LoRA are selected independently through `MAGICANVAS_QWEN_DIR` and `MAGICANVAS_QWEN_ADAPTER_DIR` before starting the process. The adapter must match the base and prompt contract; this is not a promise that arbitrary models work. The default local adapter is `models/qwen3-layout-lora-v2` when present. For example:
 
@@ -66,6 +68,19 @@ python -m pytest -q
 ```
 
 Historical audits, limitations and replay instructions are in [rigid artwork review](docs/RIGID_ART_REVIEW.md), [macro structure review](docs/MACRO_STRUCTURE_REVIEW.md), and [model evaluation and training](docs/QWEN_LORA_COLAB.md). Prior replay results are checkpoints, not evidence that a later code change has passed the same run.
+
+## Current visual regression review
+
+The single local review viewer combines **18 official conversions, 8 independent alternate-design conversions, and 12 complex dataset cases**. Every case has Qwen enabled and shows only Original and Resized. After major engine changes, refresh all cases together and rebuild the Gemini packet:
+
+```bash
+.venv/bin/python scripts/refresh_regression_viewer.py --workers 2
+.venv/bin/python scripts/refresh_regression_viewer.py --check
+.venv/bin/python scripts/package_regression_review.py
+# Existing local review server: http://127.0.0.1:8766/review/main_engine_qwen_outputs/index.html
+```
+
+This development workflow needs the local Crello assets/fonts, weights and saved prediction reports named in `config/regression_review.json`; these large research artifacts are not bundled with Git. It replays exact recorded Qwen predictions to isolate engine changes, and does not measure fresh generation speed. Incomplete runs do not replace the current viewer. See [diagnosis, regression workflow and next steps](docs/REGRESSION_REVIEW_AND_NEXT_STEPS.md). The existing 1.7B A/B did not justify promotion; no additional training is needed to fix the current post-processing alignment defect. The visual backbone already is SigLIP2; preference-head training needs reviewed labels first.
 
 ## Data and artifacts
 

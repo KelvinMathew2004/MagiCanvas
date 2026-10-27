@@ -95,3 +95,86 @@ def test_source_supported_intentional_contact_does_not_gain_a_new_gap():
  assert clearance(items,source)==0
  clearance(items,source,True)
  assert items==source['elements']
+
+
+def test_rgba_wash_does_not_fuse_separate_source_cards():
+ wash=dict(id='wash',type='shape',shape_type='rectangle',x=100,y=0,width=70,height=500,
+           z_index=1,fill_color='rgba(255,255,255,0.12)')
+ elements=[wash]
+ for i,y in enumerate((100,230,360)):
+  elements.extend([dict(id=f'p{i}',type='shape',shape_type='rectangle',x=30,y=y,width=300,height=60,z_index=2,group_id=f'g{i}'),
+                   text(f't{i}',45,y+15,270,30,'Card label',group_id=f'g{i}')])
+ source=dict(canvas=dict(width=400,height=500),elements=elements)
+ units=_analyze(source)[1]
+ assert any([e['id'] for e in u['items']]==['wash'] and u['role']=='decoration' for u in units)
+ assert all(len({e.get('group_id') for e in u['items'] if e.get('group_id')})<=1 for u in units)
+ spec=composites(source)
+ assert 'wash' in spec['ambient_ids']
+ assert all('wash' not in {e['id'] for e in block} for block in spec['blocks'])
+
+
+def test_intrinsic_flow_transposes_atomic_cards_without_changing_labels():
+ from engine.macro_layout import _fit_flow,bounds
+ blocks=[]
+ for i,y in enumerate((0,100,200)):
+  blocks.append([dict(id=f'p{i}',type='shape',shape_type='rectangle',x=0,y=y,width=200,height=60,z_index=1),
+                 text(f't{i}',20,y+20,160,24,'Label',size=18)])
+ source=dict(canvas=dict(width=200,height=300),elements=sum(blocks,[]))
+ result=_fit_flow(blocks,(10,10,700,80),source,0,'center')
+ by={e['id']:e for e in result};boxes=[bounds([by[e['id']] for e in block]) for block in blocks]
+ assert set(by)=={e['id'] for e in source['elements']}
+ assert all(a[2]<b[0] for a,b in zip(boxes,boxes[1:]))
+ assert all(10<=b[0] and b[2]<=710 and 10<=b[1] and b[3]<=90 for b in boxes)
+ for i in range(3):
+  p,t=by[f'p{i}'],by[f't{i}']
+  assert abs((t['x']-p['x'])/p['width']-.1)<1e-9
+  assert abs(t['font_size']/p['width']-18/200)<1e-9
+
+
+def test_content_fill_uses_union_not_double_counted_panels():
+ from engine.macro_layout import _union_area
+ assert _union_area([(0,0,100,100),(20,20,80,80)])==10000
+ assert _union_area([(0,0,100,100),(50,0,150,100)])==15000
+
+
+def test_translucent_copy_panel_is_not_ambient_decoration():
+ from engine.geometry_policy import ambient_shape
+ panel=dict(id='panel',type='shape',shape_type='rectangle',x=20,y=20,width=350,height=150,
+            fill_color='rgba(255,255,255,.3)',z_index=1)
+ source=dict(canvas=dict(width=500,height=500),elements=[panel,
+     text('a',40,40,300,30,'A heading'),text('b',40,90,300,50,'Supporting copy')])
+ assert not ambient_shape(panel,source)
+ assert any({'panel','a','b'}<={e['id'] for e in block} for block in composites(source)['blocks'])
+
+
+def test_translucent_ellipse_does_not_become_a_copy_panel():
+ from engine.geometry_policy import ambient_shape
+ ellipse=dict(id='wash',type='shape',shape_type='ellipse',x=0,y=0,width=400,height=400,
+              fill_color='rgba(255,255,255,.2)',z_index=1)
+ source=dict(canvas=dict(width=500,height=500),elements=[ellipse,
+     text('a',40,40,300,30,'A heading'),text('b',40,300,300,50,'Unrelated copy')])
+ assert ambient_shape(ellipse,source)
+ assert 'wash' in composites(source)['ambient_ids']
+
+
+def test_primary_prominence_is_not_determined_by_annotation_median():
+ photo=dict(id='hero',type='image',x=10,y=100,width=200,height=200,z_index=1)
+ source=dict(canvas=dict(width=500,height=500),elements=[photo,
+     text('headline',10,10,300,50,'Main heading',size=40),
+     text('annotation',10,400,200,20,'Small annotation',size=10)])
+ before=quality(source['elements'],source,500,500)
+ changed=deepcopy(source['elements']);changed[0].update(width=100,height=100)
+ changed[1]['font_size']=20;changed[2]['font_size']=30
+ after=quality(changed,source,500,500)
+ assert after['hero_area_share']==before['hero_area_share']/4
+ assert after['headline_font']==before['headline_font']/2
+
+
+def test_translucent_edge_strip_has_only_one_realization_path():
+ strip=dict(id='wash',type='shape',shape_type='rectangle',x=0,y=0,width=10,height=500,
+            fill_color='rgba(255,255,255,.2)',z_index=0)
+ source=dict(canvas=dict(width=400,height=500),elements=[strip,
+     text('heading',40,100,300,30,'A heading')])
+ spec=composites(source)
+ assert 'wash' in spec['edge_ids']
+ assert 'wash' not in spec['ambient_ids']

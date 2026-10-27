@@ -52,7 +52,12 @@ def composites(source):
 def _composites(payload):
     from engine.resize import _analyze,_overlap,_text_visible_bounds
     source=json.loads(payload);w,h=source['canvas']['width'],source['canvas']['height']
-    bg,_=_analyze(source);excluded={e['id'] for e in bg}|set(edge_strips(source))
+    from engine.geometry_policy import ambient_shape
+    bg,_=_analyze(source);fixed={e['id'] for e in bg}|set(edge_strips(source))
+    # Backgrounds and edge strips have their own realization paths. A layer
+    # may also be translucent, but must only be emitted once.
+    ambient={e['id'] for e in source['elements'] if ambient_shape(e,source)}-fixed
+    excluded=fixed|ambient
     src={e['id']:e for e in source['elements'] if e['id'] not in excluded};parent={i:i for i in src};links=[]
     # A previously established compact emblem is already a complete functional
     # unit. Whitespace between its leaves is not permission to split it.
@@ -61,7 +66,7 @@ def _composites(payload):
     if len(shared)==1 and set(shared[0])==set(src):
         box=bounds(list(src.values()))
         if (box[2]-box[0])*(box[3]-box[1])<=.65*w*h:
-            return dict(blocks=[list(src.values())],links=[],edge_ids=list(edge_strips(source)))
+            return dict(blocks=[list(src.values())],links=[],edge_ids=list(edge_strips(source)),ambient_ids=sorted(ambient))
 
     def root(i):
         while parent[i]!=i:parent[i]=parent[parent[i]];i=parent[i]
@@ -119,7 +124,43 @@ def _composites(payload):
         if choices:join(art['id'],min(choices,key=lambda p:p[0])[1]['id'],'mark')
     blocks={}
     for i,e in src.items():blocks.setdefault(root(i),[]).append(e)
-    return dict(blocks=list(blocks.values()),links=links,edge_ids=list(edge_strips(source)))
+    return dict(blocks=list(blocks.values()),links=links,edge_ids=list(edge_strips(source)),ambient_ids=sorted(ambient))
+
+
+def _ambient_layers(source,width,height,ids):
+    """Carry translucent paint outside normal flow, preserving artwork aspect."""
+    sw,sh=source['canvas']['width'],source['canvas']['height'];result=[]
+    for old in source['elements']:
+        if old['id'] not in ids:continue
+        e=deepcopy(old);s=min(width/sw,height/sh)
+        w,h=old['width']*s,old['height']*s
+        cx=(old['x']+old['width']/2)/sw*width;cy=(old['y']+old['height']/2)/sh*height
+        e.update(width=w,height=h,x=max(0.,min(width-w,cx-w/2)),y=max(0.,min(height-h,cy-h/2)))
+        result.append(e)
+    return result
+
+
+def _fit_flow(blocks,slot,source,axis,align='left'):
+    """One intrinsic-size flow of atomic containers, without leaf deformation."""
+    from engine.source_structure import _transform
+    x,y,w,h=slot
+    if not blocks or min(w,h)<=0:return []
+    sw,sh=source['canvas']['width'],source['canvas']['height']
+    source_axis=0 if sw/sh>=1.6 else 1
+    ordered=sorted(blocks,key=lambda es:((bounds(es)[source_axis]+bounds(es)[source_axis+2])/2,
+                                         bounds(es)[1-source_axis]))
+    boxes=[bounds(es) for es in ordered];gap=.035*min(w,h)
+    extents=[b[axis+2]-b[axis] for b in boxes];cross=[b[3-axis]-b[1-axis] for b in boxes]
+    main=w if axis==0 else h;other=h if axis==0 else w
+    scale=min((main-gap*(len(boxes)-1))/max(1.,sum(extents)),other/max(1.,max(cross)))
+    if scale<=0:return []
+    used=sum(extents)*scale+gap*(len(boxes)-1);cursor=(x if axis==0 else y)+(main-used)/2;output=[]
+    for es,b,extent,c in zip(ordered,boxes,extents,cross):
+        offset=(other-c*scale)/2 if align=='center' else 0.
+        left,top=(cursor,y+offset) if axis==0 else (x+offset,cursor)
+        output+=_transform(es,scale,left,top,b)
+        cursor+=extent*scale+gap
+    return output
 
 
 def _prepared(source):
@@ -199,6 +240,19 @@ def candidates(source,width,height):
     top=max([margin]+[src[i]['height']/sh*height+gap for i,side in edges.items() if side=='top'])
     bottom=max([margin]+[src[i]['height']/sh*height+gap for i,side in edges.items() if side=='bottom'])
     w=width-left-right;h=height-top-bottom;result=[]
+    ambient=_ambient_layers(source,width,height,spec.get('ambient_ids',[]))
+    # Additional intrinsic flows retain the existing band candidates. All
+    # source-backed cards, rotated labels and media attachments stay atomic.
+    for flow_axis in (0,1):
+        for align in ('left','center'):
+            items=_fit_flow(blocks,(left,top,w,h),source,flow_axis,align)
+            if not items:continue
+            items+=deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
+            clamp_edge_strips(items,source,width,height)
+            from engine.layout_contracts import center_control_labels
+            center_control_labels(items,source,width,height)
+            result.append(dict(name=f'macro-intrinsic-flow-{flow_axis}-{align}',elements=items,
+                               energy=0.,macro_locked=True,source_attached=True,macro_links=spec['links']))
     arrangements=[(n,1) for n in (2,3,4)] if width/height>=1.35 else [(1,n) for n in (2,3,4)]+([(2,2)] if width/height>.65 else [])
     seen=set()
     for cols,rows in arrangements:
@@ -206,7 +260,7 @@ def candidates(source,width,height):
             for align in ('left','center'):
                 items=[];cw=(w-gap*(cols-1))/cols;ch=(h-gap*(rows-1))/rows
                 for i,band in enumerate(bands):items+=_fit_band(band,(left+(i%cols)*(cw+gap),top+(i//cols)*(ch+gap),cw,ch),source,align)
-                items += [deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
+                items += deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
                 clamp_edge_strips(items,source,width,height)
                 from engine.layout_contracts import _grow_controls,center_control_labels
                 _grow_controls(items,source,width,height)
@@ -227,7 +281,7 @@ def candidates(source,width,height):
                     items=_fit_band([hero],(left,top,w*share,h),source,'center')
                     space=w*(1-share)-gap;cw=(space-gap*(n-1))/n
                     for i,band in enumerate(bands):items+=_fit_band(band,(left+w*share+gap+i*(cw+gap),top,cw,h),source,'left')
-                    items += [deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
+                    items += deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
                     clamp_edge_strips(items,source,width,height)
                     from engine.layout_contracts import _grow_controls,center_control_labels
                     _grow_controls(items,source,width,height);center_control_labels(items,source,width,height)
@@ -247,10 +301,24 @@ def candidates(source,width,height):
     return chosen
 
 
+def _union_area(boxes):
+    """Rectangle union area, so overlapping backplates cannot inflate fill."""
+    xs=sorted({b[0] for b in boxes}|{b[2] for b in boxes});area=0.
+    for left,right in zip(xs,xs[1:]):
+        intervals=sorted((b[1],b[3]) for b in boxes if b[0]<right and b[2]>left)
+        bottom=None;covered=0.
+        for top,end in intervals:
+            if bottom is None or top>bottom:covered+=max(0.,end-top);bottom=end
+            elif end>bottom:covered+=end-bottom;bottom=end
+        area+=(right-left)*covered
+    return area
+
+
 def quality(elements,source,width,height):
     """Geometry/ink-visible quality; excluded edge strips cannot inflate occupancy."""
     from engine.resize import _analyze,_text_visible_bounds,_overlap
-    bg,units=_analyze(source);excluded={e['id'] for e in bg}|set(edge_strips(source));original={e['id']:e for e in source['elements']};out={e['id']:e for e in elements}
+    from engine.geometry_policy import ambient_shape
+    bg,units=_analyze(source);excluded={e['id'] for e in bg}|set(edge_strips(source))|{e['id'] for e in source['elements'] if ambient_shape(e,source)};original={e['id']:e for e in source['elements']};out={e['id']:e for e in elements}
     content=[e for e in elements if e['id'] not in excluded];texts=[e for e in content if e['type']=='text' and e.get('content','').strip()]
     if not content:return dict(cost=1000.,width_use=0.,height_use=0.)
     bs=[_text_visible_bounds(e) if e['type']=='text' else bounds([e]) for e in content]
@@ -261,6 +329,12 @@ def quality(elements,source,width,height):
     # Supporting/legal annotations contribute less than major copy, but cannot
     # make a microscopic headline acceptable merely by spreading corner marks.
     major=sorted(texts,key=lambda e:-original[e['id']]['font_size'])[:max(1,len(texts)//2)]
+    headline=max(texts,key=lambda e:original[e['id']]['font_size']) if texts else None
+    photos=[e for e in source['elements']
+            if e['id'] not in excluded and e['type']=='image']
+    hero=max(photos,key=lambda e:e['width']*e['height']) if photos else None
+    target_hero=out.get(hero['id']) if hero else None
+    hero_share=(target_hero['width']*target_hero['height']/(width*height)) if target_hero else 0.
     floor=min(16.,max(5.,min(width,height)*.024));read=sum(max(0.,1.-e['font_size']/floor) for e in major)/max(1,len(major))
     links=composites(source)['links'];orphans=0;drift=0.
     for a,b,kind in links:
@@ -283,6 +357,8 @@ def quality(elements,source,width,height):
             center_error=abs((box[0]+box[2])/2-width/2)/width
     cost+=18.*drift/max(1,len(links))+8.*orphans/max(1,len(links))+35.*local_axes+10.*source_gap+50.*center_error
     return dict(cost=cost,width_use=wx,height_use=hy,content_area_share=sum(max(0,b[2]-b[0])*max(0,b[3]-b[1]) for b in bs)/(width*height),
+                content_union_share=_union_area(bs)/(width*height),
+                hero_area_share=hero_share,headline_font=headline['font_size'] if headline else 0.,
                 subpanel_axis_error=local_axes,source_gap_deficit=source_gap,near_center_error=center_error,median_font=medfont,minimum_font=minfont,relative_font_median=median(ratios) if ratios else 0.,orphaned_attachments=orphans,attachment_drift=drift,margin_imbalance=balance)
 
 
@@ -298,7 +374,9 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
     local=local_variants(incumbent['elements'],source,width,height)
     if incumbent['name'].startswith('qwen-'):
         for c in local:c['name']='qwen-'+c['name']
-    eligible=bool(local) or (len(source['elements'])>=14 and (old_checks['flagged'] or shift>=1.6 and (before['cost']>20. or before.get('orphaned_attachments',0)>=2 or min(before['width_use'],before['height_use'])<.45)))
+    flow_opportunity=(shift>=1.6 and min(before['width_use'],before['height_use'])<.60
+                      and before.get('relative_font_median',1.)<.85)
+    eligible=bool(local) or (len(source['elements'])>=14 and (old_checks['flagged'] or flow_opportunity or shift>=1.6 and (before['cost']>20. or before.get('orphaned_attachments',0)>=2 or min(before['width_use'],before['height_use'])<.45)))
     diagnostics=dict(considered=eligible,incumbent=incumbent['name'],before=before,old_flags=old_checks['defect_flags'],candidates=[])
     if not eligible:return incumbent,visual,diagnostics
     alternatives=local+(candidates(source,width,height) if len(source['elements'])>=14 else [])
@@ -314,6 +392,21 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
         # layout with at least 20% quality improvement and a two-point margin.
         if gate['flagged']:continue
         if not old_checks['flagged'] and score['cost']>=before['cost']-max(2.,before['cost']*.15):continue
+        # Median type size overweights tiny annotations. The measured quality
+        # cost already checks readability; use occupied union area here so a
+        # larger hero/heading can beat a sparse layout with larger footnotes.
+        if (not old_checks['flagged'] and
+                score.get('content_union_share',0.)<.90*before.get('content_union_share',0.)):
+            item['rejection_reason']='Clean incumbent retains larger occupied content area'
+            continue
+        # Reflow can trade headline size for a much larger hero. Reject joint
+        # shrinkage, not every individual trade-off in a fixed-size canvas.
+        hero_lost=(before.get('hero_area_share',0.)==0. or
+                   score.get('hero_area_share',0.)<.90*before['hero_area_share'])
+        if (not old_checks['flagged'] and hero_lost and
+                score.get('headline_font',0.)<.90*before.get('headline_font',0.)):
+            item['rejection_reason']='Clean incumbent retains stronger combined primary prominence'
+            continue
         if diagnostics.get('selected_cost',float('inf'))<=score['cost']:continue
         diagnostics.update(selected=c['name'],selected_cost=score['cost']);best=(winner,report)
     if 'selected' in diagnostics:

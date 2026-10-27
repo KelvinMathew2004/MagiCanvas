@@ -35,7 +35,8 @@ def _groups_cached(payload):
     for t in texts:
         tb=_text_visible_bounds(t);area=max(1.,(tb[2]-tb[0])*(tb[3]-tb[1]));choices=[]
         for p in src.values():
-            if p['type']=='text' or p.get('z_index',0)>=t.get('z_index',0):continue
+            from engine.geometry_policy import ambient_shape
+            if p['type']=='text' or ambient_shape(p,source) or p.get('z_index',0)>=t.get('z_index',0):continue
             pa=p['width']*p['height']
             if pa>.70*sw*sh or pa<area:continue
             if p.get('shape_type')=='ellipse' and len(t.get('content',''))>40:continue
@@ -334,3 +335,97 @@ def coherent_copy_axes(elements,source,units,width,height):
         if any(_overlap(moved,_text_visible_bounds(other))>_overlap(pb,_text_visible_bounds(other))+1.
                for other in copy):continue
         for e in members:e['x']+=delta
+
+
+def copy_axis_contracts(elements, units, width, height):
+    """Remember exact axes declared by a candidate, independently of its family.
+
+    This is a topology contract, not a request to straighten arbitrary source
+    artwork. Two separate, explicitly aligned text units must already form a
+    non-overlapping vertical column. Incidental matching frame edges of centered
+    text, offset captions, peer rows and separate inline actions do not qualify.
+    """
+    from engine.resize import _bounds
+    out = {e['id']: e for e in elements}
+    records = []
+    for unit in units:
+        members = [out[e['id']] for e in unit['items'] if e['id'] in out]
+        if unit.get('role') != 'copy' or not members or any(e['type'] != 'text' for e in members):
+            continue
+        if any(abs(e.get('rotation',0)) > .5 for e in members):
+            continue
+        aligns = {e.get('text_align') for e in members}
+        if len(aligns) != 1 or next(iter(aligns)) not in ('left', 'center', 'right'):
+            continue
+        align = next(iter(aligns)); box = _bounds(members)
+        axis = box[0] if align == 'left' else box[2] if align == 'right' else (box[0]+box[2])/2
+        records.append((unit, members, box, align, axis))
+    contracts = []; used = set()
+    for record in sorted(records, key=lambda r: (r[3], r[4], r[2][1])):
+        if id(record[0]) in used:
+            continue
+        group = [r for r in records if id(r[0]) not in used and r[3] == record[3] and abs(r[4]-record[4]) <= .5]
+        group.sort(key=lambda r: r[2][1])
+        # Split distant columns/sections instead of joining them transitively.
+        clusters = []
+        for r in group:
+            if not clusters or r[2][1] < clusters[-1][-1][2][3]-1 or r[2][1]-clusters[-1][-1][2][3] > height*.25:
+                clusters.append([])
+            clusters[-1].append(r)
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            axis = sum(r[4] for r in cluster)/len(cluster)
+            members = [[e['id'] for e in r[1]] for r in cluster]
+            top = cluster[0][2][1]
+            # A kicker already placed on this column belongs to it. Preserve
+            # the whole backing+label; never acquire a corner badge by proximity.
+            for unit in units:
+                if unit.get('role') != 'tag' or unit.get('peer_ids'):
+                    continue
+                es = [out[e['id']] for e in unit['items'] if e['id'] in out]
+                if not es or any(abs(e.get('rotation', 0)) > .5 for e in es):
+                    continue
+                b = _bounds(es)
+                a = b[0] if record[3] == 'left' else b[2] if record[3] == 'right' else (b[0]+b[2])/2
+                if abs(a-axis) <= .5 and 0 <= top-b[3] <= height*.20:
+                    members.append([e['id'] for e in es])
+            contracts.append(dict(align=record[3], axis=axis, members=members))
+            used.update(id(r[0]) for r in cluster)
+    return contracts
+
+
+def apply_copy_axis_contracts(elements, contracts, units, width, height):
+    """Restore candidate-owned axes after sizing, without adding collisions.
+
+    Children translate rigidly; font size, tracking, widths, heights and Y stay
+    untouched. An unsafe contract is skipped as a whole, not partly applied.
+    """
+    from engine.resize import _bounds, _layered, _overlap, _unintended_text_overlaps
+    out = {e['id']: e for e in elements}; applied = []
+    for contract in contracts:
+        if any(eid not in out for ids in contract['members'] for eid in ids):
+            continue
+        before = {e['id']: dict(e) for e in elements}
+        old_ink = set(_unintended_text_overlaps(elements, units))
+        for ids in contract['members']:
+            es = [out[eid] for eid in ids]; b = _bounds(es)
+            a = b[0] if contract['align'] == 'left' else b[2] if contract['align'] == 'right' else (b[0]+b[2])/2
+            for e in es:
+                e['x'] += contract['axis']-a
+        moved = {eid for ids in contract['members'] for eid in ids}
+        safe = all(-1e-6 <= out[i]['x'] and out[i]['x']+out[i]['width'] <= width+1e-6 for i in moved)
+        safe = safe and not (set(_unintended_text_overlaps(elements, units))-old_ink)
+        records = []
+        for unit in units:
+            ids = [e['id'] for e in unit['items'] if e['id'] in out]
+            if ids:
+                records.append((unit, _bounds([before[i] for i in ids]), _bounds([out[i] for i in ids])))
+        safe = safe and not any(not _layered(u, v) and _overlap(a2, b2) > _overlap(a1, b1)+1e-6
+                                for n, (u, a1, a2) in enumerate(records) for v, b1, b2 in records[:n])
+        if not safe:
+            for eid in moved:
+                out[eid]['x'] = before[eid]['x']
+        else:
+            applied.append(contract)
+    return applied

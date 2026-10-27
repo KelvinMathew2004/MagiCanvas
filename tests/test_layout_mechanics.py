@@ -165,6 +165,112 @@ class LayoutMechanicsTests(unittest.TestCase):
         displaced[2][1][0]['x']=80
         self.assertGreater(_badge_flow(displaced,120,40),centered)
 
+    def test_spacing_sibling_preserves_peer_internals_and_compacts_gaps(self):
+        from engine.resize import _even_source_peer_spacing
+        source=sample(3);units=_analyze(source)[1]
+        elements=_banner_seed(units,1200,260,1.1,.3,False,(1080,1350))
+        tags=sorted((u for u in units if u.get('peer_ids')),key=lambda u:u['bounds'][0])
+        by_id={e['id']:e for e in elements}
+        for e in tags[1]['items']:by_id[e['id']]['x']+=5
+        old=[_bounds([by_id[e['id']] for e in u['items']]) for u in tags]
+        before=deepcopy(elements)
+        result=_even_source_peer_spacing(elements,units,1200,260)
+        self.assertIsNotNone(result)
+        fixed={e['id']:e for e in result}
+        boxes=[_bounds([fixed[e['id']] for e in u['items']]) for u in tags]
+        self.assertAlmostEqual(boxes[1][0]-boxes[0][2],boxes[2][0]-boxes[1][2])
+        self.assertLessEqual(boxes[1][0]-boxes[0][2],.46*(boxes[0][3]-boxes[0][1]))
+        for a,b in zip(old,boxes):self.assertAlmostEqual(a[2]-a[0],b[2]-b[0])
+        self.assertEqual(elements,before)
+
+    def _unequal_peer_column(self):
+        units=[];elements=[];source_x=236.;target_x=110.
+        ids=tuple(f'control{i}' for i in range(5))
+        for i,(sw,tw) in enumerate(zip((80,100,120,100,80),(90,140,160,110,120))):
+            panel=dict(id=ids[i],type='shape',x=source_x,y=300,width=sw,height=40)
+            label=dict(id=f'label{i}',type='text',x=source_x+8,y=310,width=sw-16,height=20,font_size=15,content=str(i))
+            units.append(dict(role='tag',peer_ids=ids,bounds=(source_x,300,source_x+sw,340),items=[panel,label]))
+            elements.extend([dict(panel,x=target_x,y=400,width=tw,height=30),
+                             dict(label,x=target_x+8,y=405,width=tw-16,height=20)])
+            source_x+=sw+12;target_x+=tw+12
+        for i,(sx,sw,tx,tw) in enumerate(((300,400,400,400),(350,300,450,300))):
+            item=dict(id=f'copy{i}',type='text',x=sx,y=100+i*70,width=sw,height=40,font_size=20,content='Supporting column',text_align='center')
+            units.append(dict(role='copy',bounds=(sx,item['y'],sx+sw,item['y']+40),items=[item]))
+            elements.append(dict(item,x=tx,y=100+i*70,width=tw))
+        return units,elements
+
+    def test_unequal_five_peer_row_inherits_corroborated_copy_axis(self):
+        from engine.resize import _even_source_peer_spacing
+        from statistics import median
+        units,elements=self._unequal_peer_column();original=deepcopy(elements)
+        result=_even_source_peer_spacing(elements,units,1200,600)
+        self.assertIsNotNone(result);by={e['id']:e for e in result}
+        boxes=[_bounds([by[e['id']] for e in u['items']]) for u in units[:5]]
+        self.assertAlmostEqual(median((b[0]+b[2])/2 for b in boxes),600.)
+        gaps=[b[0]-a[2] for a,b in zip(boxes,boxes[1:])]
+        self.assertLess(max(gaps)-min(gaps),1e-8)
+        for i in range(5):
+            self.assertAlmostEqual(by[f'label{i}']['x']-by[f'control{i}']['x'],8.)
+            self.assertEqual(by[f'label{i}']['font_size'],15)
+        self.assertEqual(elements,original)
+
+    def test_peer_axis_does_not_override_reflowed_copy_columns(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column();elements[-1]['x']+=250
+        self.assertIsNone(_even_source_peer_spacing(elements,units,1200,600))
+
+    def test_peer_axis_does_not_infer_center_from_left_aligned_text_frames(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        for u in units[-2:]:u['items'][0]['text_align']='left'
+        self.assertIsNone(_even_source_peer_spacing(elements,units,1200,600))
+
+    def test_peer_row_follows_a_reflowed_left_copy_column(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        for e in elements[-2:]:e.update(x=400,text_align='left')
+        result=_even_source_peer_spacing(elements,units,1200,600)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(next(e for e in result if e['id']=='control0')['x'],400.)
+
+    def test_peer_row_follows_a_reflowed_right_copy_column(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        for e in elements[-2:]:e.update(x=800-e['width'],text_align='right')
+        result=_even_source_peer_spacing(elements,units,1200,600)
+        self.assertIsNotNone(result)
+        last=next(e for e in result if e['id']=='control4')
+        self.assertAlmostEqual(last['x']+last['width'],800.)
+
+    def test_peer_row_does_not_use_incidental_edges_of_centered_text(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        for e in elements[-2:]:e['x']=400
+        self.assertIsNone(_even_source_peer_spacing(elements,units,1200,600))
+
+    def test_peer_axis_does_not_invent_centering_for_asymmetric_source(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        for u in units[-2:]:
+            a,b,c,d=u['bounds'];u['bounds']=(a+60,b,c+60,d)
+            u['items'][0]['x']+=60
+        self.assertIsNone(_even_source_peer_spacing(elements,units,1200,600))
+
+    def test_peer_axis_preserves_explicit_source_left_alignment(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        a,b,c,d=units[-2]['bounds'];units[-2]['bounds']=(236,b,764,d)
+        units[-2]['items'][0].update(x=236,width=528)
+        result=_even_source_peer_spacing(elements,units,1200,600)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(next(e for e in result if e['id']=='control0')['x'],400.)
+
+    def test_peer_axis_leaves_wrapped_controls_unchanged(self):
+        from engine.resize import _even_source_peer_spacing
+        units,elements=self._unequal_peer_column()
+        elements[4]['y']+=80;elements[5]['y']+=80
+        self.assertIsNone(_even_source_peer_spacing(elements,units,1200,600))
+
     def test_banner_cta_keeps_clearance_from_product_when_room_exists(self):
         source=sample(3);units=_analyze(source)[1]
         elements=_banner_seed(units,1600,400,1.1,.3,False,(1080,1350))

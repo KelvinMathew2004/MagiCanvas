@@ -736,8 +736,8 @@ def _intentional_stack_pair(a, b, a_box=None, b_box=None):
     back, front = (a, b) if a.get('z_index', 0) < b.get('z_index', 0) else (b, a)
     # A translucent decorative wash may cross copy without becoming its
     # semantic parent. Explicit groups are already joined by the analyzer.
-    if (back.get('type')=='shape' and back.get('opacity',1.)<.4
-            and back.get('shape_type') in ('ellipse','line')):
+    from engine.geometry_policy import ambient_shape
+    if ambient_shape(back):
         return False
     if back['type'] not in ('image', 'shape', 'text') or front['type'] not in ('image', 'shape', 'text'):
         return False
@@ -1103,6 +1103,7 @@ def _fit_edge_backdrop(element,source,width,height):
 
 
 def _analyze(source):
+    from engine.geometry_policy import ambient_shape
     elements = source['elements']
     sw, sh = source['canvas']['width'], source['canvas']['height']
     max_font = max((e.get('font_size', 0) for e in elements), default=24)
@@ -1144,7 +1145,7 @@ def _analyze(source):
         text_area=max(1e-9,(text_box[2]-text_box[0])*(text_box[3]-text_box[1]))
         candidates=[]
         for parent_index,back in enumerate(rest):
-            if (back['type'] not in ('image','shape')
+            if (back['type'] not in ('image','shape') or ambient_shape(back,source)
                     or back.get('z_index',0)>=text.get('z_index',0)
                     or root(parent_index)==root(text_index)
                     or back.get('shape_type')=='ellipse' and float(back.get('opacity',1.))<.98):
@@ -1198,7 +1199,7 @@ def _analyze(source):
     for items in groups:
         if len(items)!=1:continue
         panel=items[0]
-        if panel.get('shape_type')=='ellipse' and float(panel.get('opacity',1.))<.98:continue
+        if ambient_shape(panel,source):continue
         shape_panel=panel['type']=='shape'
         image_panel=panel['type']=='image'
         if (not (shape_panel or image_panel)
@@ -1291,7 +1292,7 @@ def _analyze(source):
             role = 'footer'
         elif len(items)==1 and items[0]['id'] in panel_children:
             role = 'decoration'
-        elif len(items)==1 and shapes and (shapes[0].get('opacity', 1)<.4 or shapes[0].get('shape_type') in ('ellipse', 'line')):
+        elif len(items)==1 and shapes and (ambient_shape(shapes[0]) or shapes[0].get('shape_type') in ('ellipse', 'line')):
             role = 'decoration'
         else:
             role = 'visual'
@@ -4307,6 +4308,108 @@ def _align_peer_rows(elements, units):
     return elements
 
 
+def _even_source_peer_spacing(elements, units, width, height):
+    """Offer equal gaps only for a source-evidenced, already-horizontal row."""
+    changed=deepcopy(elements);by_id={e['id']:e for e in changed};bands={}
+    for unit in units:
+        if unit.get('peer_ids') and unit.get('role')=='tag':
+            bands.setdefault(unit['peer_ids'],[]).append(unit)
+    adjusted=False
+    for peers in bands.values():
+        if len(peers)<3:continue
+        peers.sort(key=lambda u:u['bounds'][0])
+        source_boxes=[u['bounds'] for u in peers]
+        gaps=[b[0]-a[2] for a,b in zip(source_boxes,source_boxes[1:])]
+        if min(gaps)<0 or max(gaps)-min(gaps)>max(2.,sum(gaps)/len(gaps)*.15):continue
+        members=[[by_id[e['id']] for e in u['items'] if e['id'] in by_id] for u in peers]
+        if any(not items for items in members):continue
+        boxes=[_bounds(items) for items in members]
+        centers=[(b[1]+b[3])/2 for b in boxes]
+        if max(centers)-min(centers)>min(width,height)*.03:continue
+        if any(b[0]<a[2] for a,b in zip(boxes,boxes[1:])):continue
+        gap=(boxes[-1][2]-boxes[0][0]-sum(b[2]-b[0] for b in boxes))/(len(boxes)-1)
+        if gap<0:continue
+        source_height=sum(b[3]-b[1] for b in source_boxes)/len(source_boxes)
+        target_height=sum(b[3]-b[1] for b in boxes)/len(boxes)
+        source_ratio=(sum(gaps)/len(gaps))/max(1e-6,source_height)
+        gap=min(gap,max(source_ratio,.45)*target_height)
+        x=boxes[0][0]
+        # Use a shared source left edge only when the original explicitly
+        # establishes it, and the corresponding target copy is available.
+        copy=[u for u in units if u.get('role')=='copy' and
+              abs(u['bounds'][0]-source_boxes[0][0])<=max(4.,source_height*.12)]
+        row_width=sum(b[2]-b[0] for b in boxes)+gap*(len(boxes)-1)
+        if copy:
+            target_items=[by_id[e['id']] for u in copy for e in u['items'] if e['id'] in by_id]
+            if target_items:x=_bounds(target_items)[0]
+        else:
+            # Preserve a source-evidenced column, not the compacted row's old
+            # left edge. Median peer centers retain the authored axis even
+            # with unequal outer widths; every control still moves rigidly.
+            from statistics import median
+            axis=median((b[0]+b[2])/2 for b in source_boxes)
+            columns=[u for u in units if u.get('role')=='copy' and
+                     abs((u['bounds'][0]+u['bounds'][2])/2-axis)<=4. and
+                     all(e.get('text_align','left')=='center'
+                         for e in u['items'] if e['type']=='text')]
+            targets=[];target_boxes=[];target_alignments=[]
+            for u in columns:
+                items=[by_id[e['id']] for e in u['items'] if e['id'] in by_id]
+                if items:
+                    b=_bounds(items);targets.append((b[0]+b[2])/2);target_boxes.append(b)
+                    target_alignments.append({e.get('text_align','left') for e in items if e['type']=='text'})
+            # Keep a shared center when it survives reflow. Otherwise an
+            # explicitly left/right-aligned target copy column can establish
+            # its new edge; unequal copy widths must not hide that evidence.
+            tolerance=max(2.,width*.005)
+            if len(targets)>=2 and max(targets)-min(targets)<=tolerance:
+                cursor=0.;centers=[]
+                for b in boxes:
+                    centers.append(cursor+(b[2]-b[0])/2)
+                    cursor+=b[2]-b[0]+gap
+                aligned=median(targets)-median(centers)
+                if 0.<=aligned<=width-row_width:x=aligned
+            elif len(targets)>=2:
+                for alignment,edge in (('left',0),('right',2)):
+                    axes=[b[edge] for b in target_boxes]
+                    if (all(a=={alignment} for a in target_alignments)
+                            and max(axes)-min(axes)<=tolerance):
+                        aligned=median(axes)-(row_width if alignment=='right' else 0.)
+                        if 0.<=aligned<=width-row_width:x=aligned
+                        break
+        x=max(0.,min(x,width-row_width))
+        for items,box in zip(members,boxes):
+            dx=x-box[0]
+            if abs(dx)>1e-6:_shift(items,dx,0.);adjusted=True
+            x+=box[2]-box[0]+gap
+    return changed if adjusted else None
+
+
+def _peer_gap_cost(elements, units):
+    """Soft row-spacing cost, only for peers compactly spaced in the source."""
+    by_id={e['id']:e for e in elements};bands={};cost=0.
+    for u in units:
+        if u.get('role')=='tag' and u.get('peer_ids'):
+            bands.setdefault(u['peer_ids'],[]).append(u)
+    for peers in bands.values():
+        if len(peers)<3:continue
+        peers.sort(key=lambda u:u['bounds'][0]);source=[u['bounds'] for u in peers]
+        source_gaps=[b[0]-a[2] for a,b in zip(source,source[1:])]
+        h=sum(b[3]-b[1] for b in source)/len(source)
+        if min(source_gaps)<0 or max(source_gaps)-min(source_gaps)>max(2.,sum(source_gaps)/len(source_gaps)*.15):continue
+        if sum(source_gaps)/len(source_gaps)>.8*h:continue
+        members=[[by_id[e['id']] for e in u['items'] if e['id'] in by_id] for u in peers]
+        if any(not row for row in members):continue
+        boxes=[_bounds(row) for row in members];height=sum(b[3]-b[1] for b in boxes)/len(boxes)
+        centers=[(b[1]+b[3])/2 for b in boxes]
+        if max(centers)-min(centers)>max(2.,height*.2):continue
+        gaps=[b[0]-a[2] for a,b in zip(boxes,boxes[1:])]
+        if min(gaps)<0:continue
+        cost+=min(2.,max(0.,max(gaps)-min(gaps)-2.)/max(1.,height))
+        cost+=min(2.,max(0.,sum(gaps)/len(gaps)-1.5*height)/max(1.,height))
+    return cost
+
+
 def _polish(elements, units, source, width, height, desired, seed=0, iterations=36):
     """Bounded seeded annealing over atomic units, not per-element jitter.
 
@@ -4318,6 +4421,8 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
     rng=Random(seed)
     state=_aspect_state(source,width,height)
     current=_align_peer_rows(deepcopy(elements),units)
+    from engine.source_structure import copy_axis_contracts, apply_copy_axis_contracts
+    column_contracts=copy_axis_contracts(current,units,width,height)
     current_energy=_energy(current,units,source,width,height,desired)
     current_feasible=_feasible(current,units,width,height)
     violation=_constraint_violation(current,units,width,height)
@@ -4429,6 +4534,7 @@ def _polish(elements, units, source, width, height, desired, seed=0, iterations=
         changed=[e for e in current if e['id'] not in ids]+proposal
         _sync_backing_panels(changed,units,width,height)
         _align_peer_rows(changed,units)
+        apply_copy_axis_contracts(changed,column_contracts,units,width,height)
         feasible=_feasible(changed,units,width,height)
         if current_feasible and not feasible:
             continue
@@ -4603,6 +4709,16 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         representative=next((c for c in candidates if predicate(c)),None)
         if representative is not None and representative not in shortlist:
             shortlist.append(representative)
+    # Compare a source-evidenced spacing repair as an additional candidate;
+    # leave the incumbent intact and require the normal geometry/ink checks.
+    for parent in shortlist[:4]:
+        spaced=_even_source_peer_spacing(parent['elements'],units,width,height)
+        if (spaced is not None and
+                _feasible(spaced,units,width,height,strict_margins=False,gap_factor=.004,
+                          allow_text_visual_overlap=True) and
+                not _unintended_text_overlaps(spaced,units)):
+            shortlist.append(dict(name=parent['name']+'-source-peer-spacing',elements=spaced,
+                                  energy=_energy(spaced,units,source,width,height,desired)))
     # Reserve functional families explicitly; energy ordering must not let
     # several near-identical Qwen siblings evict the aspect-bucket baseline.
     required_families={}
@@ -4701,6 +4817,11 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
         except (OSError,ValueError,ImportError):
             clean_zones=[]
         for index,candidate in enumerate(shortlist):
+            from engine.source_structure import copy_axis_contracts, apply_copy_axis_contracts
+            # These candidates already own a complete container arrangement.
+            # Do not acquire a competing leaf-level alignment contract.
+            column_contracts=([] if candidate.get('source_attached') or candidate.get('macro_locked')
+                              else copy_axis_contracts(candidate["elements"],units,width,height))
             if candidate.get('macro_locked'):
                 candidate=dict(candidate,elements=deepcopy(candidate['elements']))
                 shortlist[index]=candidate
@@ -4733,6 +4854,24 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             # Never make their leaves independently movable after calibration.
             if not candidate.get('source_attached') and not candidate.get('macro_locked'):
                 _separate_art(repaired,source,width,height,new_contacts_only=True)
+            # Last geometry pass before rasterization: keep compact, source-
+            # evidenced peers together. Reject a move that introduces a new
+            # geometry violation; never alter children within each control.
+            column_repairs=apply_copy_axis_contracts(repaired,column_contracts,units,width,height)
+            candidate=dict(candidate,copy_axis_contracts=column_contracts,copy_axes_preserved=len(column_repairs))
+            spaced=_even_source_peer_spacing(repaired,units,width,height)
+            if spaced is not None and not _unintended_text_overlaps(spaced,units):
+                before={e['id']:e for e in repaired};after={e['id']:e for e in spaced}
+                records=[]
+                for u in units:
+                    old=[before[e['id']] for e in u['items'] if e['id'] in before]
+                    new=[after[e['id']] for e in u['items'] if e['id'] in after]
+                    if old and new:records.append((u,_bounds(old),_bounds(new)))
+                def overlap(a,b):
+                    return max(0.,min(a[2],b[2])-max(a[0],b[0]))*max(0.,min(a[3],b[3])-max(a[1],b[1]))
+                introduces_contact=any(not _layered(u,v) and overlap(a2,b2)>overlap(a1,b1)+1e-6
+                    for i,(u,a1,a2) in enumerate(records) for v,b1,b2 in records[:i])
+                if not introduces_contact:repaired=spaced
             candidate=dict(candidate,elements=repaired)
             shortlist[index]=candidate
             candidate_backgrounds=candidate.get('backgrounds',backgrounds)
@@ -4973,6 +5112,8 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             entry['candidate']['elements'],units,source,width,height)[2]
         from engine.source_structure import relationship_cost
         entry['attachment_error']=relationship_cost(entry['candidate']['elements'],source,width,height)
+        entry['peer_gap_cost']=_peer_gap_cost(entry['candidate']['elements'],units)
+        entry['cost']+=entry['peer_gap_cost']
         from engine.macro_layout import quality
         entry['layout_quality']=quality(entry['candidate']['elements'],source,width,height)
         entry['contrast_regressions']=[];entry['mild_contrast_regressions']=[]
