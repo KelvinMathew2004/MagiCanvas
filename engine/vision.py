@@ -74,6 +74,9 @@ def _load():
     try:
         model = AutoModel.from_pretrained(str(MODEL_DIR), local_files_only=True)
         processor = AutoProcessor.from_pretrained(str(MODEL_DIR), local_files_only=True)
+        from engine.runtime import select_runtime
+        runtime=select_runtime(torch,'vision')
+        model.to(device=runtime.device,dtype=runtime.dtype)
         model.eval()
         return model, processor, torch
     except Exception:
@@ -209,6 +212,7 @@ def score_layouts(images, reference_image=None, layout_context=None):
                 padding="max_length",
                 return_tensors="pt",
             )
+            inputs={k:v.to(device=model.device,dtype=model.dtype if v.is_floating_point() else v.dtype) for k,v in inputs.items()}
             output=model(**inputs)
             logits=output.logits_per_image
             if reference_image is not None:

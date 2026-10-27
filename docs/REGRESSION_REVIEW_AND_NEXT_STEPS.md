@@ -1,4 +1,9 @@
-# Shared copy axes and the current regression workflow
+# Shared copy axes and the regression workflow
+
+**Latest:** see [ENGINE_UPGRADE_RESULTS.md](ENGINE_UPGRADE_RESULTS.md) and
+[ENGINE_UPGRADE_CHECKLIST.md](ENGINE_UPGRADE_CHECKLIST.md) for the fresh 20-case
+A/B, the current 296-test/38-case verification, preference-label status and
+submission preparation. The copy-axis checkpoint below is historical evidence.
 
 ## Why the reported leaderboard drifted
 

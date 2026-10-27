@@ -710,7 +710,8 @@ class QwenPipelineTests(unittest.TestCase):
         criteria3=QwenEarlyStoppingCriteria(tok,prompt_len=0,expected_ids=expected)
         tok.current_text='{"elements":[{"id":"e000"},{"id":"e001"},{"id":"e999"}]}'
         criteria3._counter=15
-        self.assertFalse(criteria3(torch.tensor([[1,2,3]])))
+        self.assertTrue(criteria3(torch.tensor([[1,2,3]])))
+        self.assertEqual(criteria3.reason,"json-closed")  # invalid inventory stays invalid; no extra JSON continuation
 
 
 

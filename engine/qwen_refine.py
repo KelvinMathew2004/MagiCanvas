@@ -928,11 +928,9 @@ def _background_column_variants(elements,units,width,height,weak_ids,under,sourc
         y0=max(0,int(tb[1]/height*under.height));y1=min(under.height,int(tb[3]/height*under.height))
         sample_y=list(range(y0,y1,max(1,(y1-y0)//24)))
         if len(sample_y)<3:continue
-        matching=[]
-        for x in range(under.width):
-            good=sum(sum((under.getpixel((x,y))[k]-color[k])**2 for k in range(3))<=tolerance**2
-                     for y in sample_y)
-            matching.append(good/len(sample_y)>=.8)
+        import numpy as np
+        sampled=np.asarray(under,dtype=np.float64)[sample_y,:,:3]
+        matching=(np.mean(np.sum((sampled-np.asarray(color))**2,axis=2)<=tolerance**2,axis=0)>=.8).tolist()
         runs=[];start=None
         for x,ok in enumerate(matching+[False]):
             if ok and start is None:start=x

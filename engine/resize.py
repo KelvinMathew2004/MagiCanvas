@@ -4643,6 +4643,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     try:
         from renderer.converter.convert import render_design_to_png
         from PIL import Image, ImageChops
+        import numpy as np
     except ImportError as exc:
         return candidates[0],dict(used=False,reason=f'Renderer unavailable: {exc}')
     diagnostic_assets=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
@@ -4763,17 +4764,19 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             variant_of=name,relationship_repairs=changes,structure=structure))
     relationship_context=_visual_relationship_context(units,source,width,height)
     primary_regressions=[]
-    with TemporaryDirectory(prefix='chameleon-rank-') as directory:
+    from engine.render_cache import DiagnosticRenderCache
+    render_mode='dataset' if diagnostic_assets.name.startswith('crello_') else 'brand'
+    with TemporaryDirectory(prefix='chameleon-rank-') as directory, DiagnosticRenderCache(render_diagnostic,diagnostic_assets,render_mode) as raster_cache:
         reference_image=None;source_under=None;source_contrast={};clean_zones=[]
         try:
             reference_path=Path(directory)/'source.png'
-            render_diagnostic(source,diagnostic_assets,reference_path,max_size=640)
+            raster_cache.render(source,reference_path)
             with Image.open(reference_path) as image:
                 reference_image=image.convert('RGB')
             if qwen_candidates or any(c.get('macro_locked') for c in candidates):
                 source_backing=dict(canvas=source['canvas'],elements=[e for e in source['elements'] if e['type']!='text'])
                 source_backing_path=Path(directory)/'source-backing.png'
-                render_diagnostic(source_backing,diagnostic_assets,source_backing_path,max_size=640)
+                raster_cache.render(source_backing,source_backing_path)
                 with Image.open(source_backing_path) as image:
                     source_under=image.convert('RGB')
                 # Measure whether source text already has low contrast at its
@@ -4781,6 +4784,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 # existing style without tolerating newly introduced failures.
                 source_ink=ImageChops.difference(reference_image,source_under).convert('L')
                 sw=float(source['canvas']['width']);sh=float(source['canvas']['height'])
+                source_under_array=np.asarray(source_under);source_ink_array=np.asarray(source_ink)
                 for e in source.get('elements',[]):
                     if e.get('type')!='text' or not e.get('content','').strip():continue
                     color=_rgba(e.get('color',''))
@@ -4790,18 +4794,12 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     right=min(source_under.width,max(left+1,round((e['x']+e['width'])/sw*source_under.width)))
                     bottom=min(source_under.height,max(top+1,round((e['y']+e['height'])/sh*source_under.height)))
                     if right<=left or bottom<=top:continue
-                    bg=_rgb_pixels(source_under.crop((left,top,right,bottom)))
-                    mask=source_ink.crop((left,top,right,bottom)).tobytes()
-                    active=[px for px,m in zip(bg,mask) if m>12]
-                    if not active:continue
-                    alpha=color[3]*float(e.get('opacity',1.0));ratios=[]
-                    for px in active:
-                        fg=tuple(color[k]*alpha+px[k]*(1-alpha) for k in range(3))
-                        a,b=_luminance(fg),_luminance(px)
-                        ratios.append((max(a,b)+.05)/(min(a,b)+.05))
-                    ratios.sort();lower=ratios[max(0,len(ratios)//5)]
+                    from engine.raster_metrics import glyph_statistics
+                    stats=glyph_statistics(source_under_array[top:bottom,left:right],source_ink_array[top:bottom,left:right],color,e.get('opacity',1))
+                    if stats is None:continue
+                    lower=stats['lower_quintile']
                     threshold=3. if e.get('font_size',0)>=24 or e.get('font_weight')=='bold' and e.get('font_size',0)>=18 else 4.5
-                    source_contrast[e['id']]=dict(lower_quintile=lower,p05=ratios[max(0,len(ratios)//20)],
+                    source_contrast[e['id']]=dict(lower_quintile=lower,p05=stats['p05'],
                         low=lower<threshold*.97,near_threshold=lower<threshold*1.20)
         except Exception:
             # Identity continuity is a soft cue; candidate diagnostics remain
@@ -4811,7 +4809,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             from engine.clean_zones import source_zones
             source_background=dict(canvas=source['canvas'],elements=[e for e in source['elements'] if e['id'] in {b['id'] for b in backgrounds}])
             source_background_path=Path(directory)/'source-background-only.png'
-            render_diagnostic(source_background,diagnostic_assets,source_background_path,max_size=640)
+            raster_cache.render(source_background,source_background_path)
             with Image.open(source_background_path) as image:
                 clean_zones=source_zones(source,image.convert('RGB'),source_contrast,units)
         except (OSError,ValueError,ImportError):
@@ -4879,14 +4877,15 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
             full_path=Path(directory)/f'{index}.png'
             backing_path=Path(directory)/f'{index}-backing.png'
             try:
-                warnings=render_diagnostic(doc,diagnostic_assets,full_path,max_size=640)
                 backing=dict(canvas=doc['canvas'],elements=[e for e in doc['elements'] if e['type']!='text'])
-                render_diagnostic(backing,diagnostic_assets,backing_path,max_size=640)
+                warnings,_=raster_cache.render_many([(doc,full_path),(backing,backing_path)])
                 with Image.open(full_path) as image:
                     full=image.convert('RGB')
                 with Image.open(backing_path) as image:
                     under=image.convert('RGB')
                 ink=ImageChops.difference(full,under).convert('L')
+                import numpy as np
+                under_array=np.asarray(under);ink_array=np.asarray(ink)
                 cost,checked,weak,busy,invisible=0.,0,[],[],[]
                 contrast_by_text={}
                 for e in doc['elements']:
@@ -4902,29 +4901,17 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                         continue
                     under_crop=under.crop((left,top,right,bottom))
                     ink_crop=ink.crop((left,top,right,bottom))
-                    backing_pixels=_rgb_pixels(under_crop)
-                    ink_pixels=ink_crop.tobytes()
-                    active_pixels=[pixel for pixel,mask in zip(backing_pixels,ink_pixels) if mask>12]
-                    if not active_pixels:
+                    from engine.raster_metrics import glyph_statistics
+                    stats=glyph_statistics(under_array[top:bottom,left:right],ink_array[top:bottom,left:right],color,e.get('opacity',1))
+                    if stats is None:
                         cost+=3.;invisible.append(e['id']);weak.append(e['id']);checked+=1
                         contrast_by_text[e['id']]=dict(minimum=None,lower_quintile=None,ink_pixels=0)
                         continue
-                    contrasts,lumas=[],[]
-                    for pixel in active_pixels:
-                        alpha=color[3]*e.get('opacity',1)
-                        foreground=tuple(color[k]*alpha+pixel[k]*(1-alpha) for k in range(3))
-                        a,b=_luminance(foreground),_luminance(pixel)
-                        contrasts.append((max(a,b)+.05)/(min(a,b)+.05));lumas.append(b)
                     target=3 if e['font_size']>=24 or e.get('font_weight')=='bold' and e['font_size']>=18 else 4.5
                     source_floor=source_contrast.get(e['id'],{}).get('lower_quintile')
                     if source_floor is not None:target=min(target,max(1.,source_floor*.90))
-                    sorted_contrasts=sorted(contrasts)
-                    low=sorted_contrasts[max(0,len(sorted_contrasts)//5)]
-                    minimum=sorted_contrasts[0]
-                    contrast_by_text[e['id']]=dict(minimum=round(minimum,3),
-                                                   lower_quintile=round(low,3),p05=round(sorted_contrasts[max(0,len(sorted_contrasts)//20)],3),
-                                                   background_rgb_jump=float(max(max(p[k] for p in backing_pixels)-min(p[k] for p in backing_pixels) for k in range(3))),
-                                                   ink_pixels=len(active_pixels))
+                    low=stats['lower_quintile'];minimum=stats['minimum']
+                    contrast_by_text[e['id']]=dict(minimum=round(minimum,3),lower_quintile=round(low,3),p05=round(stats['p05'],3),background_rgb_jump=stats['background_rgb_jump'],ink_pixels=stats['ink_pixels'])
                     deficit=max(0,(target-low)/target)
                     cost+=deficit*5
                     # The 20th percentile represents contrast across a
@@ -4933,13 +4920,12 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                     # itself clears its contrast target.
                     if deficit>.03:
                         weak.append(e['id'])
-                    roughness=sum(abs(lumas[j]-lumas[j-1]) for j in range(1,len(lumas)) if j%8)/56
+                    roughness=stats['roughness']
                     from PIL import ImageFilter
                     edge_crop=under_crop.convert('L').filter(ImageFilter.FIND_EDGES)
                     edge_data=edge_crop.tobytes()
-                    edge_density=sum(edge_data)/(255.0*max(1,len(edge_data)))
-                    mean_luma=sum(lumas)/max(1,len(lumas))
-                    luma_std=(sum((x-mean_luma)**2 for x in lumas)/max(1,len(lumas)))**0.5
+                    edge_density=float(np.frombuffer(edge_data,dtype=np.uint8).mean()/255.) if edge_data else 0.
+                    luma_std=stats['luma_std']
                     if roughness>.08 or edge_density>.07 or (luma_std>.15 and edge_density>.04):
                         busy.append(e['id'])
                     checked+=1
@@ -5229,6 +5215,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                          eligible=[e['candidate']['name'] for e in valid if predicate(e['candidate']['name'])])
               for family,(required,predicate) in family_rules.items()}
     report=dict(used=True,
+                raster_cache=dict(raster_cache.stats),
                 required_families=required_families,
                 shortlist_coverage=coverage,
                 method='rendered glyph contrast/overflow/source-lockup/structural gates'+(' + SigLIP tie-break' if perceptual.get('used') else ''),
@@ -5893,6 +5880,11 @@ def _adapt_with_diagnostics(source,target_canvas):
             if proposal is not None:
                 from engine.qwen_refine import anchor_superscripts, font_variant
                 original_proposal=deepcopy(proposal)
+                from engine.container_flow import variants as sibling_variants
+                for sibling_items,sibling_report in sibling_variants(proposal,source):
+                    seeds.append(dict(name='qwen-sibling-grid-'+str(len(seeds)),elements=sibling_items,sibling_flow=sibling_report))
+                if generation.get('completed_proposal'):
+                    seeds.append(dict(name='qwen-completed-source-attachments',elements=deepcopy(proposal),completion=deepcopy(generation.get('completion',{}))))
                 # Decode the model boxes independently of source-lockup repair.
                 raw=[{**deepcopy(e),**generation.get('model_elements',{}).get(e['id'],{})}
                      for e in (seeds[0]['elements'] if generation.get('model_elements') else original_proposal)]
@@ -6001,6 +5993,7 @@ def _adapt_with_diagnostics(source,target_canvas):
                     # sizes with source-scaled fonts, silently undoing the fit.
                     seeds.append(dict(name='qwen-font-fitted',elements=calibrated))
         except Exception as exc:
+            if os.environ.get('MAGICANVAS_REQUIRE_QWEN_ADAPTER')=='1':raise
             qwen_status = f'Qwen proposal unavailable: {type(exc).__name__}: {exc}'
             qwen_diagnostics['status'] = qwen_status
     for mode in ('split','copy-first','visual-first'):

@@ -46,22 +46,20 @@ complex validation dataset cases. Only Original and Resized are displayed.
 Intermediates, actual raw validity and selected-candidate diagnostics are in
 per-case audit JSON. Zero automated flags is not proof of aesthetic perfection.
 
-## Diagnosis and change
+## Current changes
 
-The reported Level 2 leaderboard started with an aligned copy column. Independent
-optimization moved its supporting text; a partial hierarchy repair did not move
-the attached kicker, and a later source-center snap split the reflowed left
-edges by 17.7595px. Candidate-owned column-axis contracts now preserve an
-already-declared left/center/right axis through those operations. No template
-IDs or content strings enter the rule; unsafe moves are rejected. The final
-reported headline/body frame lefts now agree exactly; kicker/frame discrepancy
-is under 0.5px. Separate inline action columns remain independent.
+Read docs/ENGINE_UPGRADE_CHECKLIST.md and docs/ENGINE_UPGRADE_RESULTS.md first.
+Implemented bounded missing-ID completion, gated atomic sibling grid/row/column
+candidates, exact full-document/backing render reuse, equivalent vectorized
+glyph statistics, capability-aware runtimes and fail-closed adapter-required
+submission preparation. Existing final peer equalization was verified rather
+than duplicated. No design IDs or content strings drive the engine.
 
 ## Verification scope
 
-Both arms keep Qwen enabled and use the same cached raw predictions, adapter,
-selector and current engine. The baseline disables only this change's new
-copy-axis contracts. This is not Qwen-off or fresh model generation.
+Both arms keep Qwen enabled and use the same cached raw predictions and adapter.
+The baseline is the frozen prior engine; the after arm uses current code.
+This 38-case comparison is not Qwen-off or fresh model generation.
 {len(changed)} layouts changed materially; {len(flips)} winners flipped;
 {len(added)} cases acquired new automated flag types. {len(flagged)} current
 outputs still have automated flags. Inspect those outliers and winner changes
@@ -74,14 +72,25 @@ cases were chosen by complexity/family diversity, not selected for good outputs.
 
 ## Next steps
 
-Read `docs/REGRESSION_REVIEW_AND_NEXT_STEPS.md`. Keep the current 0.6B adapter
-until a fresh paired A/B justifies promotion; the previous 1.7B run did not.
-The dense alternate cohort still has seven/eight saved proposals missing IDs;
-fresh paired 0.6B/1.7B inference on that cohort is the next model experiment.
-The project already uses SigLIP2. Collect same-renderer human preference labels
-before training its existing small ranking head. NaFlex is an optional offline
-encoder A/B for extreme aspects, not a substitute for exact geometry checks.
-No training, model promotion, weight download or external upload occurred.
+Fresh, separate 20-case A/B evidence is in evidence/engine_upgrade_dense_ab_summary.json
+and review/dense_ab/index.html in the full local packet. Raw exact IDs improve
+12/20 to 20/20 with 1.7B, but final learned-family wins stay 5/20 in both arms.
+Final dataset geometry MAE improves ~6%; final font MAE worsens ~15% and generation
+takes ~1.8 times longer. The default remains 0.6B. No Qwen retraining is indicated
+by the missing-ID experiment alone; the larger model still loses seven/eight
+authored layouts to deterministic candidates despite complete inventories.
+
+The user supplied 60 genuine occupancy preferences, all hash-verified; 46 pass
+fidelity gates. Their valid criticism was that the original batch taught only
+scale. A randomized actual-engine-candidate batch now replaces that shortcut.
+No labels or head weights were invented and no ranker was trained/promoted from
+the narrow batch. Public adapter publication remains pending; local artifacts
+are verified, but no Docker build is claimed because the daemon is unavailable.
+
+Performance is measured, not promised: exact render caching reused 9/16 requests;
+two-process rendering was slower than serial on that microbenchmark, so it
+stays opt-in. The cold replay profile points to geometry/asset lookups as well
+as imports and vision, not rendering alone. Read the measured scope in results.
 
 The compact sibling ZIP contains all 38 current original/resized contact sheets,
 selected output/raw/source JSON, important current code and evidence. It excludes
@@ -90,13 +99,14 @@ weights, full assets and fonts and is a review packet, not a runnable submission
     (packet/'LATEST_UPDATE.md').write_text(latest)
     prompt='''# Gemini review request
 
-Read LATEST_UPDATE.md and docs/REGRESSION_REVIEW_AND_NEXT_STEPS.md first.
+Read LATEST_UPDATE.md, docs/ENGINE_UPGRADE_RESULTS.md and the checklist first.
 Review the 38 current original/resized comparisons. Distinguish model proposals
 from engine-selected layouts. Identify repeated root causes, avoid design-ID
 patches, and propose bounded changes with regression checks. Do not assume that
 zero flags means clean alignment, that 1.7B is automatically better, or that
-SigLIP2 needs full-backbone fine-tuning. Audit candidate-axis contract safety,
-winner flips, remaining attachment/occupancy defects and extreme-aspect failures.
+SigLIP2 needs full-backbone fine-tuning. Audit bounded completion and atomic
+sibling candidate safety, exact raster-cache keys, source/target glyph metric
+equivalence, weak preference-label distribution and extreme-aspect failures.
 Historical documents have their own earlier scope; current evidence is named
 unified_regression_*. No adapter or full assets are distributed in this packet.
 '''
@@ -107,10 +117,15 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         'scripts/refresh_regression_viewer.py','scripts/package_regression_review.py','scripts/replay_qwen_engine.py',
         'scripts/build_focus_reflow_viewer.py','scripts/layout_defects.py','scripts/evaluate_qwen_adapter.py',
         'scripts/train_siglip_ranker.py','scripts/fetch_siglip.py','scripts/refresh_review_viewer.py',
-        'tests/test_copy_axis_contracts.py','tests/test_layout_mechanics.py','tests/test_macro_layout.py')]
+        'scripts/build_upgrade_review.py','scripts/evaluate_dense_qwen_ab.py','scripts/evaluate_dense_engine_ab.py',
+        'scripts/prepare_siglip_preferences.py','scripts/prepare_engine_preferences.py','scripts/prepare_dense_continuation.py',
+        'scripts/benchmark_render_cache.py','scripts/profile_frozen_engine.py','scripts/verify_qwen_adapter.py',
+        'scripts/prepare_submission_context.py',
+        'tests/test_copy_axis_contracts.py','tests/test_layout_mechanics.py','tests/test_macro_layout.py',
+        'tests/test_upgrade_primitives.py','tests/test_preference_labels.py','tests/test_qwen_pipeline.py','tests/test_source_evidence.py','Dockerfile')]
     for p in sources:
         target=packet/'code'/p.relative_to(ROOT);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,target)
-    for name in ('REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
+    for name in ('ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
         shutil.copy2(ROOT/'docs'/name,packet/'docs'/name)
     shutil.copy2(ROOT/'config/regression_review.json',packet/'config/regression_review.json')
     shutil.copy2(ROOT/'README.md',packet/'CURRENT_PROJECT_README.md')
@@ -119,6 +134,20 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     trace=ROOT/'data/qwen_lora/shared_column_audit'
     for p in trace.glob('*.json'):shutil.copy2(p,packet/'evidence'/('copy_axis_'+p.name))
     for p in trace.glob('*_comparison.jpg'):shutil.copy2(p,packet/'evidence'/('copy_axis_'+p.name))
+    upgrade=ROOT/'data/qwen_lora/engine_upgrade'
+    for name in ('dense_ab_summary.json','regression_pixels.json','peer_gaps.json','render_benchmark.json','human_labels_received.json','preferences_v2_summary.json'):
+        if (upgrade/name).is_file():shutil.copy2(upgrade/name,packet/'evidence'/('engine_upgrade_'+name))
+    if (upgrade/'profile/profile.json').is_file():shutil.copy2(upgrade/'profile/profile.json',packet/'evidence/engine_upgrade_profile.json')
+    for arm in ('0.6b','1.7b'):
+        raw=ROOT/'data/qwen_lora/dense_ab_fresh_v1'/f'{arm}.manifest.json'
+        if raw.is_file():shutil.copy2(raw,packet/'evidence'/f'engine_upgrade_raw_{arm}_manifest.json')
+    # The private adapter context contains weights and is deliberately never copied.
+    overview=packet/'review/index.html'
+    overview.write_text('<!doctype html><meta charset="utf-8"><title>MagiCanvas review</title><h1>Current engine review</h1><p><a href="regression_suite/index.html">Unified 38-case Original/Resized viewer</a></p><p><a href="dense_ab/index.html">Fresh 20-case model A/B (experimental)</a></p><p><a href="preferences/review.html">Randomized actual-engine preference review</a></p><p>Read LATEST_UPDATE.md and ENGINE_UPGRADE_RESULTS.md. No model-off arm, public upload or automatically generated approvals.</p>')
+    page=viewer/'index.html'
+    nav='<p id="upgrade-links"><a href="../dense_ab/index.html">Fresh model A/B experiment</a> · <a href="../preferences/review.html">Human preference review</a></p>'
+    body=page.read_text()
+    if 'id="upgrade-links"' not in body:page.write_text(body.replace('</header>',nav+'</header>'))
     if test_log:shutil.copy2(test_log,packet/'evidence/unified_regression_tests.log')
     small=ROOT/'data/gemini_review_current_compact';stage=small.with_name(small.name+'.next')
     if stage.exists():shutil.rmtree(stage)
@@ -128,9 +157,9 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         dest=stage/'code'/p.relative_to(ROOT);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
     shutil.copy2(ROOT/'config/regression_review.json',stage/'config/regression_review.json')
     for p in (packet/'docs').glob('*.md'):
-        if p.name in ('REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
+        if p.name in ('ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
     for p in (packet/'evidence').glob('*'):
-        if p.name.startswith(('unified_regression_','copy_axis_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
+        if p.name.startswith(('unified_regression_','copy_axis_','engine_upgrade_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
     cards=[]
     for i,row in enumerate(rows):
         sheet=Image.new('RGB',(1200,700),'#182532');draw=ImageDraw.Draw(sheet)

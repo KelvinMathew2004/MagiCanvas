@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 python:3.11-slim
+FROM --platform=linux/amd64 python:3.11-slim AS runtime
 
 WORKDIR /app
 
@@ -29,15 +29,19 @@ RUN python scripts/fetch_siglip.py
 # Qwen is enabled with the local offline weights below. Its local
 # weights are included so a judging container can run entirely offline.
 COPY scripts/fetch_qwen.py ./scripts/fetch_qwen.py
-RUN python scripts/fetch_qwen.py
+ARG QWEN_MODEL="Qwen/Qwen3-0.6B"
+ARG QWEN_MODEL_REVISION=""
+RUN python scripts/fetch_qwen.py --model "$QWEN_MODEL" --output /app/models/qwen-base ${QWEN_MODEL_REVISION:+--revision "$QWEN_MODEL_REVISION"}
+ENV MAGICANVAS_QWEN_DIR=/app/models/qwen-base
 ENV MAGICANVAS_QWEN_ENABLED=1
 
 # A public adapter is fetched only when its repository is supplied at build
-# time. The default image has no LoRA adapter and stays on the base-model
-# proposal path. MAGICANVAS_QWEN_ENABLED=0 explicitly disables proposals.
+# time. Only the explicit runtime development target can run base-model-only.
+# The final submission stage below requires the verified pinned adapter.
 ARG QWEN_ADAPTER_REPO=""
 ARG QWEN_ADAPTER_REVISION=""
 COPY scripts/fetch_qwen_lora.py ./scripts/fetch_qwen_lora.py
+COPY scripts/verify_qwen_adapter.py ./scripts/verify_qwen_adapter.py
 RUN if [ -n "$QWEN_ADAPTER_REPO" ]; then \
       if [ -n "$QWEN_ADAPTER_REVISION" ]; then \
         python scripts/fetch_qwen_lora.py --repo "$QWEN_ADAPTER_REPO" --revision "$QWEN_ADAPTER_REVISION"; \
@@ -62,3 +66,10 @@ COPY engine/ ./engine/
 RUN mkdir -p /app/input /app/output
 
 ENTRYPOINT ["python", "-m", "engine.main"]
+
+# Final public submission path: no silent base-model-only fallback.
+FROM runtime AS submission
+ENV MAGICANVAS_REQUIRE_QWEN_ADAPTER=1
+RUN test -n "$QWEN_ADAPTER_REPO" && test ${#QWEN_ADAPTER_REVISION} -eq 40 \
+    && ! printf "%s" "$QWEN_ADAPTER_REVISION" | grep -q "[^0-9a-fA-F]" \
+    && python scripts/verify_qwen_adapter.py --adapter /app/models/qwen3-layout-lora --model /app/models/qwen-base

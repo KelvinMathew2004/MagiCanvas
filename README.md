@@ -27,15 +27,15 @@ Restart the preview server after changing engine code. The preview enables Qwen 
 The build needs internet access to install dependencies and fetch public Qwen3-0.6B and SigLIP2 base weights. The resulting container uses local files without network access:
 
 ```bash
-docker build --platform linux/amd64 -t magicanvas .
+docker build --platform linux/amd64 --target runtime -t magicanvas .
 docker run --rm --network none \
   -v "$(pwd)/input:/app/input" -v "$(pwd)/output:/app/output" magicanvas
 ```
 
-The default Docker build runs the **base Qwen model without a LoRA adapter**. The fine-tuned adapter is not included in Git and will be published to Hugging Face for final submission; no public adapter repository has been configured yet. Once available, bake it in at build time (a revision pins the artifact):
+The explicit `runtime` development target runs the **base Qwen model without a LoRA adapter**. The default/final `submission` target fails closed unless a public adapter repository and full 40-character pinned commit are supplied. It verifies base/LoRA hidden-width compatibility and the prompt marker during the build and requires the adapter at runtime. The fine-tuned adapter is not included in Git and will be published to Hugging Face for final submission; no public adapter repository has been configured yet. Local adapter verification has passed; Docker build/offline execution is still unverified because the development Docker daemon is unavailable. Once the public artifact is available, bake it in at build time (a revision pins the artifact):
 
 ```bash
-docker build --platform linux/amd64 \
+docker build --platform linux/amd64 --target submission \
   --build-arg QWEN_ADAPTER_REPO=OWNER/ADAPTER_REPO \
   --build-arg QWEN_ADAPTER_REVISION=REVISION -t magicanvas .
 ```
@@ -85,3 +85,49 @@ This development workflow needs the local Crello assets/fonts, weights and saved
 ## Data and artifacts
 
 `brand_kit/`, the renderer, schemas, sample inputs, source code and tests are included. Downloaded models, adapters, Crello data, generated reviews and outputs stay local and are ignored by Git; they are not needed for deterministic use of the official samples. Local dataset tools use CyberAgent's [Crello dataset](https://huggingface.co/datasets/cyberagent/crello); see [dataset and training notes](docs/CRELLO_DATA_AND_TRAINING.md) for attribution and sharing considerations.
+
+## Current upgrade experiments and human preference labels
+
+[Implementation checklist](docs/ENGINE_UPGRADE_CHECKLIST.md) records the accepted,
+already implemented, experimental and human-gated recommendations. Fresh dense
+A/B generation is separate from cached engine regression replay. No public
+adapter upload or ranking-head training is performed without its prerequisites.
+
+To prepare the selected adapter privately for an offline local Docker test:
+
+```bash
+docker build --platform linux/amd64 --target runtime -t magicanvas:base .
+.venv/bin/python scripts/prepare_submission_context.py
+docker build --platform linux/amd64 -t magicanvas:submission data/submission_context
+docker run --rm --network none -v "$PWD/input:/app/input" -v "$PWD/output:/app/output" magicanvas:submission
+```
+
+The ignored local context contains weights; do not commit or upload it. This is
+local testing only: final rules still require publicly accessible weights. The
+public `submission` target supports `QWEN_MODEL`, `QWEN_MODEL_REVISION`,
+`QWEN_ADAPTER_REPO` and `QWEN_ADAPTER_REVISION`; base and adapter must match.
+
+The initial `prepare_siglip_preferences.py` batch measures only occupancy with
+controlled shrinking; it is insufficient for general ranking. Its 60 reviewed
+labels are preserved locally (46 pass fidelity gates). The replacement batch
+has 21 randomized comparisons of actual Qwen-enabled engine candidates from
+seven training families, with no human reference always winning one side.
+Prepare it with `python scripts/prepare_engine_preferences.py` and review at
+`http://127.0.0.1:8766/review/preferences/review.html`. Both batches support
+JSONL export and create no approvals automatically. Collect broader preferences
+before promoting a general ranker. After reviewing/exporting, train explicitly:
+
+```bash
+python scripts/train_siglip_ranker.py --manifest data/siglip_engine_review_v2/manifest.jsonl --approvals /path/to/siglip-engine-preferences-v2.jsonl
+```
+
+A candidate preference is supported as well as a target preference; ties are
+excluded. Image hashes guard stale labels, and connected families stay in one
+split. The head is saved only if its existing held-out promotion gate passes.
+
+Hardware overrides are opt-in: `MAGICANVAS_QWEN_DEVICE=auto|cpu|mps|cuda`,
+`MAGICANVAS_QWEN_DTYPE=auto|float32|float16|bfloat16`,
+`MAGICANVAS_VISION_DEVICE=cpu|auto|mps|cuda`, `MAGICANVAS_CPU_THREADS=N` and
+`MAGICANVAS_RENDER_WORKERS=1|2`. Vision stays on CPU and renderer concurrency
+stays at one by default until local measurements justify changing them. Linux
+Docker uses CPU, not the macOS host's Metal GPU. No fixed speedup is promised.

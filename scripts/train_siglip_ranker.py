@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Train a small SigLIP image-ranking head from reviewed local-render pairs.
 
-The SigLIP backbone stays frozen. Only same-renderer local target positives
-with a human approval record are eligible; scripted defect status is retained
-as evidence but is not the only route to a human preference label.
+The SigLIP backbone stays frozen. Only same-renderer pairs with an image-bound
+human preference record are eligible. Either side may be preferred; a named
+positive/engine field is a storage convention, not an automatic correctness label.
 """
 from __future__ import annotations
 
@@ -31,11 +31,35 @@ def family_splits(items):
     return result
 
 
+def reviewed_pairs(rows, approvals):
+    """Latest human choice owns each pair; stale images and revocations reject it."""
+    choices={}
+    if approvals.is_file():
+        for line in approvals.read_text().splitlines():
+            if line.strip():
+                choice=json.loads(line)
+                choices[choice.get('pair_id')]=choice
+    eligible=[]
+    for row in rows:
+        decision=choices.get(row.get('pair_id'))
+        if not decision or decision.get('decision') not in ('accept','prefer_candidate'):continue
+        positive=next((p for p in (row.get('positive_images') or []) if p and Path(p).is_file()),None)
+        negative=row.get('engine_image')
+        if not positive or not negative or not Path(negative).is_file():continue
+        if row.get('review_hash'):
+            actual=hashlib.sha256(Path(positive).read_bytes()+Path(negative).read_bytes()).hexdigest()
+            if decision.get('review_hash')!=row['review_hash'] or actual!=row['review_hash']:continue
+        if row.get('status') not in {'accepted_negative','candidate_without_measured_defect','unreviewed_engine_candidate'}:continue
+        if decision['decision']=='prefer_candidate':positive,negative=negative,positive
+        eligible.append((row,positive,negative))
+    return eligible
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest",type=Path,default=ROOT/"data"/"siglip_pairs"/"manifest.jsonl")
     parser.add_argument("--approvals",type=Path,default=ROOT/"data"/"siglip_pairs"/"approvals.jsonl",
-                        help="JSONL of human-reviewed {pair_id, decision:'accept'} rows")
+                        help="JSONL human choices: accept, prefer_candidate, or skip; image hashes must match")
     parser.add_argument("--model",type=Path,default=ROOT/"models"/"siglip")
     parser.add_argument("--output",type=Path,default=ROOT/"models"/"siglip-ranker.pt")
     parser.add_argument("--epochs",type=int,default=60)
@@ -48,22 +72,7 @@ def main():
     if not args.manifest.is_file():
         raise SystemExit(f"No SigLIP pair manifest at {args.manifest}; generate and review pairs first.")
     rows=[json.loads(line) for line in args.manifest.read_text().splitlines() if line.strip()]
-    approved=set()
-    if args.approvals.is_file():
-        for line in args.approvals.read_text().splitlines():
-            if not line.strip():continue
-            decision=json.loads(line)
-            if decision.get("decision")=="accept":approved.add(decision.get("pair_id"))
-    eligible=[]
-    for row in rows:
-        positives=row.get("positive_images") or []
-        positive=next((p for p in positives if p and Path(p).is_file()),None)
-        negative=row.get("engine_image")
-        if (row.get("status") in {"accepted_negative","candidate_without_measured_defect"}
-                and row.get("pair_id") in approved
-                and positive and negative
-                and Path(negative).is_file()):
-            eligible.append((row,positive,negative))
+    eligible=reviewed_pairs(rows,args.approvals)
     if len(eligible)<20:
         raise SystemExit(f"Need at least 20 accepted same-domain pairs; found {len(eligible)}. No weights were trained.")
     groups={"train":[],"validation":[]}

@@ -45,10 +45,10 @@ def _job(task):
     torch.set_num_threads(1)
     from scripts.replay_qwen_engine import replay
     from unittest.mock import patch
-    spec,case,row,record,compare=task
+    spec,case,row,record,compare,baseline=task
     def source_for(split,key):return deepcopy(row['source_design'])
     kwargs=dict(source_for=source_for,allow_incomplete=True)
-    before=None
+    before=deepcopy(baseline['after']) if baseline else None
     if compare:
         # Exact pre-change ablation, same engine/selector/decoded model values.
         # Only this change's new candidate-axis contracts are disabled.
@@ -93,7 +93,8 @@ def publish(run,packet,spec):
     opts=''.join(f'<option value="{k}">{v}</option>' for k,v in labels.items())
     page='<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unified MagiCanvas review</title><style>'+STYLE+'</style><header><h1>Unified engine regression review</h1><p>18 official conversions · 8 alternate conversions · 12 complex dataset cases. Qwen enabled in every case. Original and Resized only.</p><p class="muted">Fixed development cohort, not a blind benchmark. Same saved raw predictions, adapter and selector in all replays. Intermediate diagnostics remain in audit files. Zero automated flags does not mean aesthetic perfection.</p><p>Engine snapshot '+run.name+' · <a href="run_manifest.json">Provenance</a> · <a href="summary.json">Before/after evidence</a></p><label>Show <select id="group"><option value="">All 38 conversions</option>'+opts+'</select></label></header><main>'+''.join(cards)+'</main><script>const s=document.getElementById("group");s.value=new URLSearchParams(location.search).get("group")||"";function update(){document.querySelectorAll("article[data-cohort]").forEach(c=>c.hidden=!!s.value&&c.dataset.cohort!==s.value)}s.onchange=update;update()</script></html>'
     (stage/'index.html').write_text(page);(stage/'manifest.json').write_text(json.dumps(rows,indent=2)+'\n')
-    summary=dict(cases=len(results),qwen_enabled=True,fresh_model_inference=False,ablation='Same current engine with only candidate-axis contracts disabled vs enabled',results=[])
+    comparison=json.loads((run/'run_manifest.json').read_text()).get('baseline',{})
+    summary=dict(cases=len(results),qwen_enabled=True,fresh_model_inference=False,ablation=comparison.get('scope','No baseline supplied'),results=[])
     for r in results:
         a,b=r['after'],r['before'];old={e['id']:e for e in b['output_design']['elements']} if b else {}
         delta=max((abs(float(e.get(k,0))-float(old[e['id']].get(k,0))) for e in a['output_design']['elements'] if e['id'] in old for k in ('x','y','width','height','font_size')),default=0)
@@ -121,17 +122,20 @@ def main():
     p.add_argument('--packet',type=Path,default=PACK)
     p.add_argument('--workers',type=int,choices=(1,2),default=2)
     p.add_argument('--compare-before',action='store_true',help='Disable only the new copy-axis contract in the baseline; both arms have Qwen enabled.')
+    p.add_argument('--baseline-run',type=Path,help='Frozen earlier run for all before/after comparisons; Qwen remains enabled.')
     p.add_argument('--check',action='store_true',help='Check whether the published viewer matches current code and frozen inputs.')
-    args=p.parse_args();spec=json.loads(args.config.read_text());fp=fingerprint(args.config)
-    fp.update(compare_before=args.compare_before,qwen_enabled=True,fresh_model_inference=False)
+    args=p.parse_args();args.config=args.config.resolve();spec=json.loads(args.config.read_text());fp=fingerprint(args.config)
+    if args.baseline_run and args.compare_before:p.error('Choose baseline-run or compare-before, not both')
+    baseline_fp=sha256((args.baseline_run/'run_manifest.json').read_bytes()).hexdigest() if args.baseline_run else None
+    fp.update(compare_before=args.compare_before,qwen_enabled=True,fresh_model_inference=False,baseline_manifest_sha256=baseline_fp)
     signature=sha256(json.dumps(fp,sort_keys=True).encode()).hexdigest()[:16]
     run=ROOT/'data/qwen_lora/regression_suite'/signature
     if args.check:
         current=args.packet/'review/regression_suite/run_manifest.json'
-        ok=current.is_file() and json.loads(current.read_text())['fingerprint']['files_sha256']==fp['files_sha256']
+        ok=current.is_file() and all(json.loads(current.read_text())['fingerprint'].get(k)==fp.get(k) for k in ('files_sha256','model','model_weights','adapter'))
         print('CURRENT' if ok else 'STALE: run scripts/refresh_regression_viewer.py');return 0 if ok else 1
     run.mkdir(parents=True,exist_ok=True)
-    (run/'run_manifest.json').write_text(json.dumps(dict(fingerprint=fp,cohort=spec,scope='Frozen raw Qwen predictions through the complete current engine; no Qwen-off arm or fresh generation timing.'),indent=2)+'\n')
+    (run/'run_manifest.json').write_text(json.dumps(dict(fingerprint=fp,cohort=spec,baseline=dict(path=str(args.baseline_run) if args.baseline_run else None,scope='Frozen prior engine vs current, same saved Qwen predictions' if args.baseline_run else 'Same current engine with only candidate-axis contracts disabled vs enabled' if args.compare_before else 'No baseline supplied'),scope='Frozen raw Qwen predictions through the complete current engine; no Qwen-off arm or fresh generation timing.'),indent=2)+'\n')
     reports={};gold_records={};tasks=[]
     for i,case in enumerate(spec['cases']):
         if (run/f'{i:02d}.json').exists():continue
@@ -146,14 +150,16 @@ def main():
             record=gold_records[gold_path][case['pair_id']]
         if record is None:
             record={k:row[k] for k in ('pair_id','source_split','target_canvas','family_id') if k in row}
-        tasks.append((i,(spec,case,row,record,args.compare_before)))
+        baseline=json.loads((args.baseline_run/f'{i:02d}.json').read_text()) if args.baseline_run else None
+        if baseline and baseline['case']['pair_id']!=case['pair_id']:raise ValueError('Baseline cohort/order mismatch')
+        tasks.append((i,(spec,case,row,record,args.compare_before,baseline)))
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         pending={pool.submit(_job,t):i for i,t in tasks}
         for future in as_completed(pending):
             i=pending[future];result=future.result()
             (run/f'{i:02d}.json').write_text(json.dumps(result)+'\n')
             print(f'Completed {i+1}/{len(spec["cases"])} {result["case"]["pair_id"]}',flush=True)
-    if fingerprint(args.config)!= {k:v for k,v in fp.items() if k not in ('compare_before','qwen_enabled','fresh_model_inference')}:
+    if fingerprint(args.config)!= {k:v for k,v in fp.items() if k not in ('compare_before','qwen_enabled','fresh_model_inference','baseline_manifest_sha256')}:
         raise SystemExit('Inputs or code changed during the run; nothing published. Rerun with a consistent snapshot.')
     summary=publish(run,args.packet,spec)
     print(json.dumps(dict(cases=summary['cases'],run=str(run),viewer=str(args.packet/'review/regression_suite/index.html'))))

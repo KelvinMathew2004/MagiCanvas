@@ -32,13 +32,17 @@ def _load():
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        device = "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu"
-        load_dtype = torch.float16 if device == "mps" else "auto"
+        from engine.runtime import select_runtime
+        runtime=select_runtime(torch,'qwen')
+        device,load_dtype=runtime.device,runtime.dtype
         tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR), local_files_only=True)
         model = AutoModelForCausalLM.from_pretrained(
             str(MODEL_DIR), local_files_only=True, torch_dtype=load_dtype,
             low_cpu_mem_usage=True,
         )
+        if os.environ.get('MAGICANVAS_REQUIRE_QWEN_ADAPTER')=='1':
+            from scripts.verify_qwen_adapter import verify
+            verify(ADAPTER_DIR,MODEL_DIR)
         if ADAPTER_DIR.is_dir():
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, str(ADAPTER_DIR), is_trainable=False,
@@ -57,7 +61,9 @@ def _load():
         model.to(device)
         model.eval()
         return model, tokenizer, torch, device, prompt_version
-    except Exception:
+    except Exception as exc:
+        if os.environ.get('MAGICANVAS_REQUIRE_QWEN_ADAPTER')=='1':
+            raise RuntimeError(f'Required offline Qwen adapter failed to load: {exc}') from exc
         return None
 
 
@@ -146,6 +152,13 @@ class QwenEarlyStoppingCriteria:
                 elif ch == '[': s_depth += 1
                 elif ch == ']': s_depth -= 1
 
+        if s_depth == 0 and c_depth == 0 and not in_str and len(text.strip()) > 10:
+            try:
+                payload=json.loads(text.strip())
+                if isinstance(payload,dict) and isinstance(payload.get('elements'),list):
+                    self.stopped_early=True;self.reason='json-closed'
+                    return True
+            except (ValueError,TypeError):pass
         if self.expected_ids and self.expected_ids.issubset(set(unique_ids)):
             if s_depth == 0 and c_depth == 0 and len(text.strip()) > 10:
                 self.stopped_early = True
@@ -333,11 +346,18 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
             sc_list = StoppingCriteriaList([stop_criteria])
         except ImportError:
             sc_list = [stop_criteria]
+        from engine.runtime import synchronize
+        from time import perf_counter
+        synchronize(torch,device);generation_started=perf_counter()
         with torch.inference_mode():
             output = model.generate(**inputs, max_new_tokens=max_tokens,
-                                    do_sample=False, use_cache=True,
+                                    do_sample=False, repetition_penalty=1.0, use_cache=True,
                                     pad_token_id=tokenizer.eos_token_id,
                                     stopping_criteria=sc_list)
+        synchronize(torch,device)
+        diagnostics['generation_seconds']=perf_counter()-generation_started
+        diagnostics['device']=str(device)
+        diagnostics['repetition_penalty']=1.0
         generated = output[0, inputs["input_ids"].shape[1]:]
         response = tokenizer.decode(generated, skip_special_tokens=True)
         # Check if response needs clean closing after early stopping
@@ -438,21 +458,14 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
         expected = set(by_id)
         missing = expected-set(proposals)
         diagnostics.update(model_elements=deepcopy(proposals),missing_ids=sorted(missing),fallback_anchors={})
-        if len(missing)>max(2,int(len(expected)*.20)) or not proposals:
-            return None,f'Qwen omitted too many IDs ({len(missing)}/{len(expected)})'
         if missing:
-            base_by_id={e['id']:e for e in base_elements}
-            # Use only model-supplied anchors, so one recovered omission cannot
-            # propagate a speculative transform through the remaining IDs.
-            anchors=deepcopy(proposals)
-            for element_id in sorted(missing):
-                fallback=base_by_id.get(element_id)
-                if fallback is None:
-                    # Background elements are reassembled independently.
-                    fallback=by_id[element_id]
-                proposal,anchor=_missing_proposal(by_id[element_id],by_id,anchors,fallback)
-                diagnostics['fallback_anchors'][element_id]=anchor
-                proposals[element_id]=proposal
+            from engine.proposal_completion import complete_missing
+            completed,completion=complete_missing(source,proposals,base_elements,target_canvas) if json_complete else (None,{})
+            if completed is None:return None,f'Qwen omitted too many or unrepairable IDs ({len(missing)}/{len(expected)})'
+            proposals=completed
+            diagnostics['completion']=completion
+            diagnostics['completed_proposal']=True
+            diagnostics['fallback_anchors']={eid:note['anchor'] for eid,note in completion.items()}
         result = deepcopy(base_elements)
         raw_decoded=[]
         for base in result:

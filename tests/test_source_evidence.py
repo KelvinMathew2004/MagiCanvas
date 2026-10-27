@@ -86,7 +86,7 @@ def test_output_budget_reserves_all_ids_and_respects_remaining_context():
     assert _output_budget(Tokenizer(),source,2,8000)<=192
 
 
-def test_early_stop_requires_every_expected_alias_to_be_closed():
+def test_closed_json_stops_without_claiming_complete_alias_inventory():
     from engine.qwen_seed import QwenEarlyStoppingCriteria
     expected={f'e{i:03d}' for i in range(17)}
     class Tokenizer:
@@ -95,7 +95,9 @@ def test_early_stop_requires_every_expected_alias_to_be_closed():
     tok=Tokenizer();criterion=QwenEarlyStoppingCriteria(tok,0,expected);ids=np.array([[0]*4])
     tok.value=json.dumps({'elements':[{'id':f'e{i:03d}','box':[1,2,3,4]} for i in range(16)]})
     criterion._counter=15
-    assert not criterion(ids)
+    assert criterion(ids)
+    assert criterion.reason=='json-closed'
+    assert len(json.loads(tok.value)['elements'])<len(expected)
     tok.value=json.dumps({'elements':[{'id':f'e{i:03d}','box':[1,2,3,4]} for i in range(17)]})
     criterion._counter=15
     assert criterion(ids)
