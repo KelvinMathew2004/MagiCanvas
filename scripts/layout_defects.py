@@ -42,18 +42,8 @@ def assess_engine_layout(source,design,report):
     weak=winner.get('low_contrast',[])
     regression=winner.get('contrast_regressions',
         [eid for eid in weak if not source_contrast.get(eid,{}).get('low',True)])
-    overflow={}
-    originals={e['id']:e for e in source['elements']}
-    for e in design.get('elements',[]):
-        if e.get('type')!='text':continue
-        ink=_render_text_ink(e)
-        if ink is not None:
-            bx,by=_source_ink_overhang(e,originals.get(e['id']))
-            amount=max(0.,-ink[0]-bx,-ink[1]-by,ink[2]-round(e['width']),ink[3]-round(e['height']),
-                       -e['x']-ink[0],-e['y']-ink[1],
-                       e['x']+ink[2]-design['canvas']['width'],
-                       e['y']+ink[3]-design['canvas']['height'])
-            if amount>.01:overflow[e['id']]=round(amount,3)
+    from engine.raster_metrics import glyph_overflow
+    overflow=glyph_overflow(source,design.get('elements',[]),design['canvas']['width'],design['canvas']['height'])
     structural=self_check(source,design)
     flags=[]
     if missing or extra or duplicates:flags.append('element_ids')

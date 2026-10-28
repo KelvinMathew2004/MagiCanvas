@@ -228,7 +228,119 @@ def _fit_band(blocks,slot,source,align='left'):
     return result
 
 
-def candidates(source,width,height):
+
+def measured_candidates(source, blocks, box, width, height, proposal=None):
+    """Coarse model bands and source-order measured packing share one realizer.
+
+    Predicted leaf dimensions/font guesses never enter realization. Substantial
+    source leaves vote on their group's proposed center; thin rules do not.
+    Raw Qwen candidates remain available independently in the main selector.
+    """
+    from engine.container_flow import measured_columns
+    # Use existing source peer evidence so a repeated row gets one allocation.
+    # Joining is legal only when every peer unit is already a complete atom.
+    from engine.resize import _analyze
+    by_ids={frozenset(e['id'] for e in es):es for es in blocks};peer_rows={}
+    for unit in _analyze(source)[1]:
+        if unit.get('peer_ids'):
+            ids=frozenset(e['id'] for e in unit['items'])
+            if ids in by_ids:peer_rows.setdefault(tuple(unit['peer_ids']),[]).append(ids)
+    for key,row in peer_rows.items():
+        if len(row)!=len(key) or len(row)<2:continue
+        members=[e for ids in row for e in by_ids[ids]]
+        blocks=[es for es in blocks if frozenset(e['id'] for e in es) not in row]+[members]
+    if not 4 <= len(blocks) <= 40:
+        return []
+    area=source['canvas']['width']*source['canvas']['height']
+    # A loose ornament has no established flow parent. Do not invent a new
+    # slot for it while reflowing copy; existing arrangement families remain.
+    if any(not any(e['type']=='text' or e['type']=='image' and e['width']*e['height']>.025*area for e in block) for block in blocks):
+        return []
+    sw, sh = source['canvas']['width'], source['canvas']['height']
+    reference = sqrt(width * height / (sw * sh))
+    source_axis = 0 if sw / sh >= 1.6 else 1
+    ordered = sorted(blocks, key=lambda es: (bounds(es)[source_axis], bounds(es)[1-source_axis]))
+    predictions = {e['id']: e for e in proposal or []}
+    centers = []
+    for block in blocks:
+        votes = []
+        for e in block:
+            q = predictions.get(e['id'])
+            if q is None or not all(k in q for k in ('x', 'y', 'width', 'height')):
+                continue
+            if e['type'] != 'text' and min(e['width'], e['height']) < max(4., .008 * min(sw, sh)):
+                continue
+            # Source mass, never a noisy predicted giant rectangle, sets weight.
+            weight = max(1., e['width'] * e['height'])
+            votes.append((q['x'] + q['width']/2, q['y'] + q['height']/2, weight))
+        if not votes:
+            centers = []
+            break
+        def weighted_median(axis):
+            values = sorted((v[axis], v[2]) for v in votes);half = sum(v[1] for v in values)/2;total = 0.
+            for value, weight in values:
+                total += weight
+                if total >= half:
+                    return value
+        centers.append((weighted_median(0), weighted_median(1), block))
+    result = []
+    for columns in (range(2, min(6, len(blocks)) + 1) if width/height>=1.35 else range(1,min(2,len(blocks))+1)):
+        orders = [('macro-measured-columns', ordered)]
+        if centers and width/height>=1.35:
+            sorted_centers = sorted(centers, key=lambda p: (p[0], p[1]))
+            cuts = sorted(sorted(range(1, len(centers)),
+                key=lambda i: sorted_centers[i][0]-sorted_centers[i-1][0], reverse=True)[:columns-1])
+            bands = [0] + cuts + [len(centers)]
+            model_order = [p[2] for a,b in zip(bands,bands[1:]) for p in sorted(sorted_centers[a:b], key=lambda p:p[1])]
+            # Keep the model's band membership as well as its coarse order.
+            orders.append(('qwen-macro-band-flow', model_order))
+        for family, order in orders:
+            for multiplier in (.8, 1., 1.2):
+                if family.startswith('qwen-'):
+                    items = []
+                    x,y,w,h = box;gap=max(3., .045*min(w,h));cw=(w-gap*(columns-1))/columns
+                    for i,(a,b) in enumerate(zip(bands,bands[1:])):
+                        group = [p[2] for p in sorted(sorted_centers[a:b],key=lambda p:p[1])]
+                        fitted = measured_columns(group,(x+i*(cw+gap),y,cw,h),source,reference*multiplier,(width,height),1)
+                        if fitted is None:
+                            items = None
+                            break
+                        items += fitted
+                else:
+                    items = measured_columns(order,box,source,reference*multiplier,(width,height),columns)
+                if items:
+                    result.append(dict(name=f'{family}-{columns}-{multiplier}', elements=items,
+                        energy=0., macro_locked=True, source_attached=True,
+                        learned_macro=family.startswith('qwen-'), macro_family=family,
+                        macro_realization=dict(columns=columns,font_scale=reference*multiplier,
+                            order=[[e['id'] for e in es] for es in order])))
+    if centers and width/height<1.35:
+        # The same group law also applies to tall/square outputs: model Y
+        # clusters allocate bands; measured X packing realizes their children.
+        sorted_centers=sorted(centers,key=lambda p:(p[1],p[0]))
+        x,y,w,h=box;gap=max(3., .045*min(w,h))
+        for rows in range(2,min(4,len(blocks))+1):
+            cuts=sorted(sorted(range(1,len(centers)),key=lambda i:sorted_centers[i][1]-sorted_centers[i-1][1],reverse=True)[:rows-1])
+            bands=[0]+cuts+[len(centers)];bh=(h-gap*(rows-1))/rows
+            for multiplier in (.8,1.,1.2):
+                items=[];order=[]
+                for i,(a,b) in enumerate(zip(bands,bands[1:])):
+                    group=[p[2] for p in sorted(sorted_centers[a:b],key=lambda p:p[0])];order+=group
+                    fitted=None
+                    for columns in range(1,min(3,len(group))+1):
+                        fitted=measured_columns(group,(x,y+i*(bh+gap),w,bh),source,reference*multiplier,(width,height),columns)
+                        if fitted:break
+                    if not fitted:
+                        items=None;break
+                    items+=fitted
+                if items:
+                    result.append(dict(name=f'qwen-macro-band-flow-rows-{rows}-{multiplier}',elements=items,
+                        energy=0.,macro_locked=True,source_attached=True,learned_macro=True,
+                        macro_family='qwen-macro-band-flow',macro_realization=dict(rows=rows,
+                            font_scale=reference*multiplier,order=[[e['id'] for e in es] for es in order])))
+    return result
+
+def candidates(source,width,height,proposal=None):
     from engine.resize import _analyze,_energy
     prepared=_prepared(source);spec=composites(prepared);blocks=spec['blocks']
     if len(blocks)<2:return []
@@ -286,18 +398,32 @@ def candidates(source,width,height):
                     from engine.layout_contracts import _grow_controls,center_control_labels
                     _grow_controls(items,source,width,height);center_control_labels(items,source,width,height)
                     result.append(dict(name=f'macro-media-split-{share}-{n}-{k}',elements=items,energy=0.,macro_locked=True,source_attached=True))
+    for c in measured_candidates(prepared, blocks, (left,top,w,h), width, height, proposal):
+        c['elements'] += deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
+        clamp_edge_strips(c['elements'],source,width,height)
+        from engine.layout_contracts import center_control_labels
+        center_control_labels(c['elements'],source,width,height)
+        c['macro_links']=spec['links']
+        result.append(c)
     # Geometry quality preselects a bounded diverse render budget, not an oracle.
     _,units=_analyze(source)
     from engine.resize import _assemble
     backgrounds=_analyze(source)[0]
     for c in result:c['precheck']=checks(source,_assemble(c['elements'],backgrounds,source,width,height),units,{},c['name'])
     ranked=sorted(result,key=lambda c:(c['precheck']['flagged'],len(c['precheck']['defect_flags']),quality(c['elements'],source,width,height)['cost']));chosen=[];families=set()
+    # Reserve measured and learned macro alternatives without starving the
+    # existing families or allowing an unbounded render sweep.
+    for family in ('qwen-macro-band-flow','macro-measured-columns'):
+        match=next((c for c in ranked if c.get('macro_family')==family),None)
+        if match:chosen.append(match)
     for c in ranked:
-        family=c['name'].split('-')[3]
-        if family not in families:chosen.append(c);families.add(family)
-    for c in ranked:
-        if c not in chosen:chosen.append(c)
+        family=c.get('macro_family') or c['name'].split('-')[3]
+        if c not in chosen and family not in families:
+            chosen.append(c);families.add(family)
         if len(chosen)>=8:break
+    for c in ranked:
+        if len(chosen)>=8:break
+        if c not in chosen:chosen.append(c)
     return chosen
 
 
@@ -362,7 +488,7 @@ def quality(elements,source,width,height):
                 subpanel_axis_error=local_axes,source_gap_deficit=source_gap,near_center_error=center_error,median_font=medfont,minimum_font=minfont,relative_font_median=median(ratios) if ratios else 0.,orphaned_attachments=orphans,attachment_drift=drift,margin_imbalance=balance)
 
 
-def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,render_rank):
+def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,render_rank,proposal=None):
     """Only a measured, materially better sibling can replace the incumbent."""
     from engine.resize import _assemble
     old_doc=_assemble(incumbent['elements'],incumbent.get('backgrounds',backgrounds),source,width,height)
@@ -379,7 +505,7 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
     eligible=bool(local) or (len(source['elements'])>=14 and (old_checks['flagged'] or flow_opportunity or shift>=1.6 and (before['cost']>20. or before.get('orphaned_attachments',0)>=2 or min(before['width_use'],before['height_use'])<.45)))
     diagnostics=dict(considered=eligible,incumbent=incumbent['name'],before=before,old_flags=old_checks['defect_flags'],candidates=[])
     if not eligible:return incumbent,visual,diagnostics
-    alternatives=local+(candidates(source,width,height) if len(source['elements'])>=14 else [])
+    alternatives=local+(candidates(source,width,height,proposal) if len(source['elements'])>=14 else [])
     if not alternatives:return incumbent,visual,diagnostics
     for c in alternatives:
         winner,report=render_rank([c],backgrounds,units,source,width,height,desired)
@@ -390,7 +516,20 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
         diagnostics['candidates'].append(item)
         # A previously clean layout can only be replaced by another clean
         # layout with at least 20% quality improvement and a two-point margin.
-        if gate['flagged']:continue
+        critical=set(gate['defect_flags'])-{'control_readability'}
+        if critical:continue
+        from engine.layout_contracts import issues
+        from engine.layout_contracts import control_font_floor
+        def readability_deficit(es):
+            return sum(d.get('amount',0.)/max(1.,control_font_floor(source,d['ids'][1],width,height))
+                       for d in issues(es,source,width,height,units) if d['kind']=='control_readability')
+        deficit=readability_deficit(winner['elements'])
+        item['readability_deficit']=deficit
+        # A bounded readable-but-imperfect fallback may replace an already
+        # defective result. Bounds, ink overlap/clipping, attachment collisions
+        # and contrast remain mandatory. Never replace a clean result this way.
+        tier=1 if gate['flagged'] else 0
+        if tier and (not old_checks['flagged'] or score['cost']+25.*deficit >= before['cost']+25.*readability_deficit(incumbent['elements'])):continue
         if not old_checks['flagged'] and score['cost']>=before['cost']-max(2.,before['cost']*.15):continue
         # Median type size overweights tiny annotations. The measured quality
         # cost already checks readability; use occupied union area here so a
@@ -407,8 +546,9 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
                 score.get('headline_font',0.)<.90*before.get('headline_font',0.)):
             item['rejection_reason']='Clean incumbent retains stronger combined primary prominence'
             continue
-        if diagnostics.get('selected_cost',float('inf'))<=score['cost']:continue
-        diagnostics.update(selected=c['name'],selected_cost=score['cost']);best=(winner,report)
+        selection=(tier,score['cost']+25.*deficit)
+        if tuple(diagnostics.get('selected_key',(float('inf'),float('inf'))))<=selection:continue
+        diagnostics.update(selected=c['name'],selected_cost=selection[1],selected_key=list(selection),remaining_flags=gate['defect_flags']);best=(winner,report)
     if 'selected' in diagnostics:
         winner,report=best;report['prior_selection']=dict(winner=incumbent['name'],flags=old_checks['defect_flags'],quality=before)
         return winner,report,diagnostics
@@ -422,6 +562,8 @@ def checks(source,doc,units,visual,name):
     w,h=doc['canvas']['width'],doc['canvas']['height'];es=doc['elements']
     flags=[d['kind'] for d in issues(es,source,w,h,units)]
     if self_check(source,doc):flags.append('structural_check')
+    from engine.raster_metrics import glyph_overflow
+    if glyph_overflow(source,es,w,h):flags.append('glyph_overflow')
     if _unintended_text_overlaps(es,units):flags.append('text_on_text')
     if _unintended_control_overlaps(es,source):flags.append('control_collision')
     if _source_occlusion_defects(es,source):flags.append('text_hero_occlusion')

@@ -26,6 +26,7 @@ import re
 from typing import Any
 
 from renderer.converter.assets import visible_content_bounds
+from engine.request_cache import asset_lookup_state, asset_lookup_request
 
 
 _ASSETS_DIR=Path(__file__).resolve().parents[1]/'brand_kit'/'assets'
@@ -42,6 +43,19 @@ def _rgb_pixels(image):
 
 def _asset_root(element):
     """Find the root against which an element's asset_id is stored."""
+    state=asset_lookup_state()
+    if state is None:return _uncached_asset_root(element)
+    key=(str(element.get('asset_id','')),os.environ.get('MAGICANVAS_DATASET_ASSETS_DIR'),id(_ASSETS_DIR),id(_DATASET_SPLIT_DIRS))
+    state['calls']+=1
+    if key in state['roots']:
+        state['hits']+=1
+        return state['roots'][key]
+    result=_uncached_asset_root(element);state['roots'][key]=result
+    return result
+
+
+def _uncached_asset_root(element):
+    """Source asset files are stable during one adaptation, then rediscovered."""
     asset_id=str(element.get('asset_id',''))
     if not asset_id:
         return _ASSETS_DIR
@@ -4672,7 +4686,7 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
     ratio_shift=max(abs(state['delta']),1/max(1e-9,abs(state['delta'])))
     has_reflow=any(c['name']!='proportional' for c in candidates)
     shortlist=[];families=set()
-    qwen_candidates=[c for c in candidates if c['name'].startswith('qwen-') and not c.get('macro_locked')]
+    qwen_candidates=[c for c in candidates if c['name'].startswith('qwen-') and (not c.get('macro_locked') or c.get('learned_macro'))]
     for candidate in candidates:
         name=candidate['name']
         if name.startswith('qwen-'):continue
@@ -5802,6 +5816,7 @@ def _preserve_backed_containment(proposal,units,width,height):
     return result,sorted(set(repaired))
 
 
+@asset_lookup_request
 def _adapt_with_diagnostics(source,target_canvas):
     start=perf_counter()
     sw,sh=source['canvas']['width'],source['canvas']['height']
@@ -6390,7 +6405,7 @@ def _adapt_with_diagnostics(source,target_canvas):
     geometry_time=perf_counter()-start
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
     from engine.macro_layout import upgrade
-    winner,visual,macro_diagnostics=upgrade(winner,visual,backgrounds,units,source,width,height,desired,_visual_rerank)
+    winner,visual,macro_diagnostics=upgrade(winner,visual,backgrounds,units,source,width,height,desired,_visual_rerank,proposal=qwen_diagnostics.get('model_elements'))
     qwen_diagnostics['macro_reflow']=macro_diagnostics
     # No geometry mutations after render verification. Store the selected
     # structural evidence and deliver the exact geometry that was judged.

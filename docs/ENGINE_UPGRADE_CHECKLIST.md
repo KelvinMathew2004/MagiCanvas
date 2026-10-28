@@ -74,13 +74,33 @@ No design IDs or reference target geometry may drive engine behavior.
 - [x] Prepare a same-renderer preference page with explicit choices and export
   of real labels. Include flag-free tiny-content/balanced-reflow pairs.
 - [x] Verify renderer compatibility/SSIM provenance and connected-family split.
-- [ ] **Waiting for broader labels:** 60 real occupancy-only choices received and
-  image hashes verified; 46 pass fidelity gates. A new 21-pair randomized current-engine
-  candidate batch across seven training families addresses the user’s valid concern that the first batch was
-  too easy and taught only scale. More diverse preferences remain pending.
-- [ ] **Gated:** train the existing frozen-backbone ranking head only on approved
-  pairs; publish validation metrics, compare with zero-shot, and preserve the
-  incumbent head if the promotion gate fails. Do not synthesize approvals.
+- [x] Import all 168 campaign choices, retaining the unchanged first 44 and
+  verifying image hashes/side mappings. Six of eight consistency repeats agree;
+  quarantine two ambiguous originals without inventing replacement votes.
+  Seven unsafe preferred layouts remain diagnostic-only. Combined eligible
+  corpus: 178 pairs, 64 family components (45 train, seven validation, 12 test).
+- [x] Complete the 160-comparison queue plus eight disclosed repeats: 56 new
+  Level 3-style comparisons, 104 dataset comparisons, all six formats, Qwen on.
+- [x] Bind feature caches to image/model bytes and use family-disjoint folds.
+  Test embeddings/pair scores are deferred until validation passes. No pilot
+  consumes reserved test comparisons or writes under models/.
+- [x] Train the complete reviewed corpus with the predeclared head configuration:
+  122 train pairs, 17 validation pairs; best epoch seven. Validation is 9/17
+  for both combined head and zero-shot baseline. No head saved or deployed;
+  the 39 test pairs were not scored because validation failed.
+- [ ] **Gated:** a ranking head must beat zero-shot on validation AND independent
+  test, then pass engine regression. Collecting more arbitrary pairs alone is
+  not established as useful; investigate native detail/features/candidate limits.
+- [x] Fix generic growth of source-attached backing panels: retain their shared
+  media edge and grow away from it only while the target still has that contact
+  and there is safe canvas room. Detached reflows/intentional overlays unchanged.
+  Two labelled widescreen outliers now select a cleaner larger reflow; the two
+  leaderboard cases remain flagged for control readability/padding.
+- [x] Regression after attachment fix: no winner flips/new flags; 36/38 pixels
+  identical, two caption shifts <0.35 px visually inspected; 311 tests pass.
+- [x] Add bounded, request-owned asset lookup memoization after profiling;
+  verify parallel-request isolation, error reset and newly available assets.
+  Frozen 38-case winners, JSON geometry and pixels remain identical.
 
 ## Submission and release
 
@@ -129,3 +149,28 @@ floating-point precision (maximum gap difference <2e-13 px).
 the Docker daemon is unavailable, so a build/offline container smoke test is
 still pending. A public repository and pinned commit are also still pending.
 Full 89/309 release sweeps remain future checks, not completed items here.
+
+## October 27 follow-up: dense container packing
+
+The current decision record is [DENSE_REFLOW_AUDIT.md](DENSE_REFLOW_AUDIT.md).
+Earlier counts/results above retain their historical snapshot scope.
+
+- [x] Add measured text/native-backing and bounded contiguous-column packing.
+- [x] Reorient source-adjacent photo/caption compounds without new overlaps.
+- [x] Preserve peer membership and offer wrapped control rows/grids.
+- [x] Add separately audited Qwen-driven macro columns and tall/square bands.
+- [x] Allow only a measured readability-only fallback, retaining its flags;
+  bounds, inventory, clipping, overlap, padding and contrast remain gates.
+- [x] Guard unresolved decorations and atomic source line counts after the
+  broader human-rejected replay exposed visually worse low-cost alternatives.
+- [x] Leave model/head training and adapter publication unchanged/deferred.
+- [x] Record final guarded-code regression, 20-case arms, four attachment tasks
+  and deduplicated human-rejected task results; inspect changed outputs.
+- [x] Refresh canonical viewer, preview process and compact Gemini packet.
+
+Final guarded-code verification: 321 tests / 34 subtests; 38/38 frozen pixel
+buffers identical, zero winner flips/new flags. Both diagnosed leaderboards
+improve (8.0%→97.5% width use; 1.125→5.4px median type). Fifteen deduplicated
+human-rejected tasks were replayed; many remain aesthetically weak. The two
+saved 20-case model arms keep their previous metrics and five learned-family
+wins each. No learned macro candidate won; no model/head promotion or retraining.

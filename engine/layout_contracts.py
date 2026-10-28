@@ -118,6 +118,46 @@ def center_control_labels(elements,source,width,height):
         label['y']=max(0.,min(height-label['height'],label['y']))
 
 
+def _attached_growth(panel,original,proposed,source,out,width,height,margin):
+    """Keep a source contact edge when a text backing needs more room.
+
+    A detached/reflowed label has no such target contact. Only an unrotated
+    backing beside a substantial foreground image qualifies; intentional
+    source overlaps and full-canvas backgrounds are not inferred attachments.
+    None means the requested growth cannot honor the contacts inside canvas.
+    """
+    if any(abs(float(e.get('rotation',0)))>.1 for e in (panel,original)):return proposed
+    sw,sh=source['canvas']['width'],source['canvas']['height'];tolerance=max(1.,.005*min(sw,sh))
+    contacts=[]
+    for old in source['elements']:
+        target=out.get(old['id'])
+        if old['type']!='image' or target is None or old['width']*old['height']<.025*sw*sh:continue
+        if old['width']>=.98*sw and old['height']>=.98*sh:continue
+        if any(abs(float(e.get('rotation',0)))>.1 for e in (old,target)):continue
+        for axis,cross in (('y','x'),('x','y')):
+            extent='height' if axis=='y' else 'width';other='width' if axis=='y' else 'height'
+            overlap=min(original[cross]+original[other],old[cross]+old[other])-max(original[cross],old[cross])
+            if overlap<.8*max(original[other],old[other]):continue
+            scale=target[extent]/max(1.,old[extent])
+            for after in (True,False):
+                gap=(original[axis]-old[axis]-old[extent] if after else old[axis]-original[axis]-original[extent])
+                current=(panel[axis]-target[axis]-target[extent] if after else target[axis]-panel[axis]-panel[extent])
+                if not -1.<=gap<=tolerance or abs(current-gap*scale)>max(2.,panel[extent]*.25):continue
+                edge=target[axis]+target[extent]+max(0.,gap)*scale if after else target[axis]-max(0.,gap)*scale-proposed[extent]
+                contacts.append((axis,edge,target))
+    if not contacts:return proposed
+    result=dict(proposed)
+    for axis,edge,_ in contacts:
+        # Multiple distinct edges on one axis cannot both remain fixed while
+        # growing. Leave the original backing rather than invent an overlap.
+        if any(a==axis and abs(e-edge)>1. for a,e,_ in contacts):return None
+        result[axis]=edge
+    if (result['x']<margin-1e-6 or result['y']<margin-1e-6 or
+            result['x']+result['width']>width-margin+1e-6 or
+            result['y']+result['height']>height-margin+1e-6):return None
+    return result
+
+
 def _grow_controls(elements,source,width,height):
     from engine.resize import _set_font_size,_render_text_ink,_text_info
     out={e['id']:e for e in elements};src={e['id']:e for e in source['elements']}
@@ -146,8 +186,11 @@ def _grow_controls(elements,source,width,height):
             aspect=src[pid]['width']/src[pid]['height'];wanted_w=max(wanted_w,wanted_h*aspect);wanted_h=wanted_w/aspect
         if wanted_w>width-2*margin or wanted_h>height*.3:continue
         cx,cy=panel['x']+panel['width']/2,panel['y']+panel['height']/2
-        panel.update(width=wanted_w,height=wanted_h,x=min(width-margin-wanted_w,max(margin,cx-wanted_w/2)),
-                     y=min(height-margin-wanted_h,max(margin,cy-wanted_h/2)))
+        proposed=dict(width=wanted_w,height=wanted_h,x=min(width-margin-wanted_w,max(margin,cx-wanted_w/2)),
+                      y=min(height-margin-wanted_h,max(margin,cy-wanted_h/2)))
+        proposed=_attached_growth(panel,src[pid],proposed,source,out,width,height,margin)
+        if proposed is None:continue
+        panel.update(proposed)
         body=control_body(panel)
         _set_font_size(label,desired)
         label['width']=max(natural+3.,min(label['width'],body[2]-body[0]-2*padding))

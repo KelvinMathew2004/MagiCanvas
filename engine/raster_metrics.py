@@ -22,3 +22,18 @@ def glyph_statistics(background,mask,color,opacity=1.):
     return dict(minimum=float(contrasts[0]),lower_quintile=float(contrasts[len(contrasts)//5]),
                 p05=float(contrasts[len(contrasts)//20]),ink_pixels=len(active),roughness=rough,
                 luma_std=float(b.std()),background_rgb_jump=float(np.ptp(pixels,axis=0).max()))
+
+
+def glyph_overflow(source,elements,width,height):
+    """Exact shared glyph/frame/canvas overflow, retaining source bearings."""
+    from engine.resize import _render_text_ink,_source_ink_overhang
+    originals={e['id']:e for e in source['elements']};overflow={}
+    for e in elements:
+        if e.get('type')!='text':continue
+        ink=_render_text_ink(e)
+        if ink is None:continue
+        bx,by=_source_ink_overhang(e,originals.get(e['id']))
+        amount=max(0.,-ink[0]-bx,-ink[1]-by,ink[2]-round(e['width']),ink[3]-round(e['height']),
+                   -e['x']-ink[0],-e['y']-ink[1],e['x']+ink[2]-width,e['y']+ink[3]-height)
+        if amount>.01:overflow[e['id']]=round(amount,3)
+    return overflow

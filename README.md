@@ -107,23 +107,39 @@ local testing only: final rules still require publicly accessible weights. The
 public `submission` target supports `QWEN_MODEL`, `QWEN_MODEL_REVISION`,
 `QWEN_ADAPTER_REPO` and `QWEN_ADAPTER_REVISION`; base and adapter must match.
 
-The initial `prepare_siglip_preferences.py` batch measures only occupancy with
-controlled shrinking; it is insufficient for general ranking. Its 60 reviewed
-labels are preserved locally (46 pass fidelity gates). The replacement batch
-has 21 randomized comparisons of actual Qwen-enabled engine candidates from
-seven training families, with no human reference always winning one side.
-Prepare it with `python scripts/prepare_engine_preferences.py` and review at
-`http://127.0.0.1:8766/review/preferences/review.html`. Both batches support
-JSONL export and create no approvals automatically. Collect broader preferences
-before promoting a general ranker. After reviewing/exporting, train explicitly:
+The first occupancy-only review is preserved, but does not establish general
+ranking quality. The current [preference campaign plan](docs/PREFERENCE_CAMPAIGN_PLAN.md)
+uses randomized comparisons of actual Qwen-enabled candidates, including new
+20–22-element authored designs, six themes, and all six tested target formats.
+Related palette variants stay in the same family. Review the live queue at
+`http://127.0.0.1:8766/review/preferences_campaign/review.html`; export labels
+from the page. Original/resized regression inputs are excluded from preference
+training. Acceptable ties, “neither is good” and repeated consistency checks
+are kept separate from training preferences.
 
 ```bash
-python scripts/train_siglip_ranker.py --manifest data/siglip_engine_review_v2/manifest.jsonl --approvals /path/to/siglip-engine-preferences-v2.jsonl
+.venv/bin/python scripts/import_preference_labels.py --labels /path/to/siglip-campaign-preferences-v3.jsonl
+.venv/bin/python scripts/train_siglip_ranker.py --manifest data/siglip_reviewed_corpus/manifest.jsonl --approvals data/siglip_reviewed_corpus/approvals.jsonl --check-only
 ```
 
-A candidate preference is supported as well as a target preference; ties are
-excluded. Image hashes guard stale labels, and connected families stay in one
-split. The head is saved only if its existing held-out promotion gate passes.
+Import validates exact image hashes and randomized-side mapping. It combines
+eligible real labels locally, without inventing approvals. Training uses frozen
+SigLIP2 features and independent family folds: at least 20 train, five validation
+and five test families. Validation selects the epoch; test is evaluated only
+after fitting. Promotion requires beating zero-shot on both. A diagnostic
+`--pilot --output data/siglip_ranker_experiments/pilot.pt` never consumes test
+labels or writes production weights. The completed 168-slot export yields 178 eligible preferences across all
+three campaigns. The complete training run scores 9/17 validation preferences,
+equal to zero-shot, so it fails promotion. No ranking head is saved or deployed;
+the 39 reserved test pairs remain unscored. The earlier 44-label pilot (8/15
+versus 7/15) is historical.
+
+Request-local asset discovery is cached exactly and reset between adaptations,
+including errors; it does not cache geometry across requests. Set
+`MAGICANVAS_ASSET_LOOKUP_CACHE=0` for a diagnostic uncached comparison. All 38
+frozen regression documents, winners and rendered pixel buffers remained
+identical after enabling it. Reduced filesystem lookup counts are verified;
+no portable end-to-end speedup is promised.
 
 Hardware overrides are opt-in: `MAGICANVAS_QWEN_DEVICE=auto|cpu|mps|cuda`,
 `MAGICANVAS_QWEN_DTYPE=auto|float32|float16|bfloat16`,
@@ -131,3 +147,22 @@ Hardware overrides are opt-in: `MAGICANVAS_QWEN_DEVICE=auto|cpu|mps|cuda`,
 `MAGICANVAS_RENDER_WORKERS=1|2`. Vision stays on CPU and renderer concurrency
 stays at one by default until local measurements justify changing them. Linux
 Docker uses CPU, not the macOS host's Metal GPU. No fixed speedup is promised.
+
+The generic attachment fix keeps a growing text backing outside adjacent media.
+Measured container packing now reflows text and native backings before allocating
+columns, keeps peer badges together, and can place a source-adjacent caption
+beside its photo. `qwen-macro-band-flow` offers model-driven macro grouping with
+measured child geometry; raw Qwen and existing candidates remain available.
+Unsupported decorative groups retain their arrangement. Raster clipping remains
+a hard gate even when a separate readability warning is present.
+
+The guarded 38-case replay preserves all selected output geometry and winners,
+with no new automated flags. Both diagnosed dense leaderboards now select a
+larger measured layout. Additional replays cover 15 distinct human-rejected
+source/format tasks; many still look weak despite passing automated checks.
+**321 tests and 34 subtests pass.** These development checks are not a new full
+89/309 release sweep, fresh model inference, or evidence of aesthetic perfection.
+See [audit decisions](docs/DENSE_REFLOW_AUDIT.md),
+[attachment examples](http://127.0.0.1:8766/review/attachment_growth/index.html),
+and [reviewed outliers](http://127.0.0.1:8766/review/reviewed_outliers/index.html).
+Adapter publication and the final adapter-required Docker test remain deferred.
