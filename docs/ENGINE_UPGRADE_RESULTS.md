@@ -1,5 +1,8 @@
 # Engine upgrade implementation and evidence — October 27, 2026
 
+Latest October 28 work: [runtime, experimental features and skyscraper testing](RUNTIME_AND_EXPERIMENTS.md). The unified viewer retains the fixed 38, eight fresh independent conversions, and adds 13 supplied/skyscraper stress conversions. Historical results below retain their original scope.
+Earlier dated results below retain their original scope.
+
 Work is tracked in ENGINE_UPGRADE_CHECKLIST.md. This document records actual
 measurements rather than the supplied review's speed estimates.
 

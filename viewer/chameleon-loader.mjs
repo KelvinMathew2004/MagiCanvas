@@ -199,7 +199,7 @@ export class ChameleonLoader {
   initScales() {
     this.scales = [];
     // Spacing for tactile reptile cobblestone scales
-    const spacing = Math.max(8, Math.min(15, Math.round(Math.min(this.width, this.height) / 25)));
+    const spacing = 12;
     const cols = Math.ceil(this.width / spacing) + 3;
     const rows = Math.ceil(this.height / spacing) + 3;
 

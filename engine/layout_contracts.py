@@ -281,7 +281,12 @@ def _primary_axis(elements,source,units,width,height,apply=False):
     def painted(es):
         boxes=[_text_visible_bounds(e) if e['type']=='text' else _bounds([e]) for e in es]
         return (min(b[0] for b in boxes),min(b[1] for b in boxes),max(b[2] for b in boxes),max(b[3] for b in boxes))
-    for ids in groups(source)['members']:
+    from engine.nested_structure import regional_surfaces
+    if regional_surfaces(source):
+        from engine.macro_layout import composites
+        members=[[e['id'] for e in block] for block in composites(source)['blocks']]
+    else:members=groups(source)['members']
+    for ids in members:
         if not any(semantics.get(i) in ('logo','hero','headline','subheading','body','cta') for i in ids):continue
         if not all(i in out for i in ids):continue
         before=painted([src[i] for i in ids])
@@ -292,6 +297,21 @@ def _primary_axis(elements,source,units,width,height,apply=False):
     issues=[]
     for es,delta in candidates:
         if abs(delta)>.004*width:issues.append(dict(kind='primary_axis',ids=[e['id'] for e in es],amount=abs(delta)))
+        # A lone left-set line may have an unused full-column frame that
+        # prevents an otherwise legal source-evidenced center translation.
+        # Only trim that spare frame on this blocked path, and only if a real
+        # renderer confirms identical glyph bounds/wraps. Never tighten every
+        # row field or control as a global preparation step.
+        if (apply and len(es)==1 and es[0]['type']=='text'
+                and es[0].get('text_align','left') in ('left','justify')
+                and es[0]['x']+delta>=0 and es[0]['x']+es[0]['width']+delta>width):
+            from engine.resize import _render_text_ink,_text_info
+            e=es[0];ink=_render_text_ink(e)
+            if ink:
+                probe=dict(e,width=min(e['width'],max(1.,ceil(max(ink[2],_text_info(e)[1]))+2.)))
+                if (probe['x']+probe['width']+delta<=width and _render_text_ink(probe)==ink
+                        and _text_info(probe)[2:]==_text_info(e)[2:]):
+                    e['width']=probe['width']
         if apply and all(e['x']+delta>=0 and e['x']+e['width']+delta<=width for e in es):
             for e in es:e['x']+=delta
     return issues

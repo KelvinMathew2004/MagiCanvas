@@ -8,7 +8,7 @@ from functools import lru_cache
 from itertools import combinations
 from statistics import median
 from math import sqrt,ceil
-import json
+import json,os
 
 
 def edge_strips(source):
@@ -44,26 +44,33 @@ def bounds(items):
     return min(p[0] for p in b),min(p[1] for p in b),max(p[2] for p in b),max(p[3] for p in b)
 
 
-def composites(source):
-    return deepcopy(_composites(json.dumps(source,sort_keys=True,separators=(',',':'))))
+def composites(source,tight=None):
+    return deepcopy(_composites(json.dumps(source,sort_keys=True,separators=(',',':')),tight))
 
 
 @lru_cache(maxsize=256)
-def _composites(payload):
+def _composites(payload,tight=None):
     from engine.resize import _analyze,_overlap,_text_visible_bounds
     source=json.loads(payload);w,h=source['canvas']['width'],source['canvas']['height']
     from engine.geometry_policy import ambient_shape
+    from engine.nested_structure import regional_surfaces, repeated_text_rows, unpainted_ids
+    surfaces=regional_surfaces(source)
     bg,_=_analyze(source);fixed={e['id'] for e in bg}|set(edge_strips(source))
     # Backgrounds and edge strips have their own realization paths. A layer
     # may also be translucent, but must only be emitted once.
-    ambient={e['id'] for e in source['elements'] if ambient_shape(e,source)}-fixed
+    # A translucent hairline is still a divider. Alpha alone cannot detach
+    # row leaders from the same source neighbors as opaque rules.
+    rules={e['id'] for e in source['elements'] if e['type']=='shape'
+           and e.get('shape_type','rectangle') in ('rectangle','line')
+           and 0<min(e['width'],e['height'])<=max(6.,.008*min(w,h))}
+    ambient=(({e['id'] for e in source['elements'] if ambient_shape(e,source)}-rules)|set(surfaces)|unpainted_ids(source))-fixed
     excluded=fixed|ambient
     src={e['id']:e for e in source['elements'] if e['id'] not in excluded};parent={i:i for i in src};links=[]
     # A previously established compact emblem is already a complete functional
     # unit. Whitespace between its leaves is not permission to split it.
     from engine.source_structure import groups as source_groups
     shared=source_groups(source)['members']
-    if len(shared)==1 and set(shared[0])==set(src):
+    if not surfaces and tight is not False and len(shared)==1 and set(shared[0])==set(src):
         box=bounds(list(src.values()))
         if (box[2]-box[0])*(box[3]-box[1])<=.65*w*h:
             return dict(blocks=[list(src.values())],links=[],edge_ids=list(edge_strips(source)),ambient_ids=sorted(ambient))
@@ -79,6 +86,17 @@ def _composites(payload):
             g=e['group_id']
             if g in explicit:join(explicit[g],e['id'],'explicit')
             else:explicit[g]=e['id']
+    from engine.nested_structure import control_captions
+    for p,t,c in control_captions(source):
+        if p in src and c in src:join(p,c,'control-caption')
+    for a,b in repeated_text_rows(list(src.values()),source['canvas']):
+        join(a,b,'repeated-row')
+        left,right=src[a],src[b]
+        for rule in src.values():
+            if rule['id'] not in rules or rule['width']<.6*(right['x']+right['width']-left['x']):continue
+            if (abs(rule['x']-left['x'])<=4 and rule['x']+rule['width']<=right['x']+right['width']+4
+                    and max(left['y'],right['y'])<rule['y']<=max(left['y']+left['height'],right['y']+right['height'])+4):
+                join(a,rule['id'],'row-divider')
     for p in src.values():
         if p['type']=='text' or p['width']*p['height']>.70*w*h:continue
         pb=bounds([p]);area=p['width']*p['height'];children=[]
@@ -95,6 +113,8 @@ def _composites(payload):
     for photo in photos:
         for p in src.values():
             if p is photo or p['type']=='image' or p['width']<=0:continue
+            # A tall regional panel following a photo is not its caption.
+            if p['height'] > .25*photo['height']:continue
             if abs(p['width']/photo['width']-1)>.08:continue
             if abs(p['x']-photo['x'])>.04*photo['width']:continue
             if abs(p['y']-(photo['y']+photo['height']))<=max(2.,.02*h):join(photo['id'],p['id'],'caption')
@@ -122,6 +142,25 @@ def _composites(payload):
             if t['type']!='text':continue
             q=bounds([t]);dx=max(0.,b[0]-q[2],q[0]-b[2]);dy=max(0.,b[1]-q[3],q[1]-b[3]);choices.append((dx*dx+dy*dy,t))
         if choices:join(art['id'],min(choices,key=lambda p:p[0])[1]['id'],'mark')
+    if tight is True:
+        # Existing hierarchy supplies compact functional lockups, rather than
+        # matching every isolated text line to a separate human template zone.
+        # Background paint cannot bridge groups; native ownership above wins.
+        for members in shared:
+            ids=[i for i in members if i in src]
+            if len(ids)<2:continue
+            b=bounds([src[i] for i in ids])
+            if (b[2]-b[0])*(b[3]-b[1])<=.65*w*h:
+                for i in ids[1:]:join(ids[0],i,'hierarchy')
+    if tight is False:
+        # Relax only the inferred whole-poster union. Existing compact atomic
+        # units (e.g. a number and its suffix) still own their children.
+        for u in _analyze(source)[1]:
+            es=[e for e in u['items'] if e['id'] in src]
+            if len(es)<2:continue
+            b=bounds(es)
+            if (b[2]-b[0])*(b[3]-b[1])<.18*w*h:
+                for e in es[1:]:join(es[0]['id'],e['id'],'unit')
     blocks={}
     for i,e in src.items():blocks.setdefault(root(i),[]).append(e)
     return dict(blocks=list(blocks.values()),links=links,edge_ids=list(edge_strips(source)),ambient_ids=sorted(ambient))
@@ -129,6 +168,8 @@ def _composites(payload):
 
 def _ambient_layers(source,width,height,ids):
     """Carry translucent paint outside normal flow, preserving artwork aspect."""
+    from engine.nested_structure import unpainted_ids
+    unpainted=unpainted_ids(source)
     sw,sh=source['canvas']['width'],source['canvas']['height'];result=[]
     for old in source['elements']:
         if old['id'] not in ids:continue
@@ -136,8 +177,55 @@ def _ambient_layers(source,width,height,ids):
         w,h=old['width']*s,old['height']*s
         cx=(old['x']+old['width']/2)/sw*width;cy=(old['y']+old['height']/2)/sh*height
         e.update(width=w,height=h,x=max(0.,min(width-w,cx-w/2)),y=max(0.,min(height-h,cy-h/2)))
+        if old['id'] in unpainted:
+            # Style fields are immutable. Retain opacity exactly; a source
+            # layer with no viewport footprint gets a minimal bounded box.
+            e.update(width=1.,height=1.)
+            if e['type']=='text':
+                from engine.resize import _set_font_size
+                _set_font_size(e,.1)
+            e['x']=max(0.,min(width-e['width'],e['x']));e['y']=max(0.,min(height-e['height'],e['y']))
         result.append(e)
     return result
+
+
+def _fit_regional_surfaces(items,source,width,height):
+    """Wrap scope paint around its children without welding their layout."""
+    from engine.nested_structure import regional_surfaces
+    surfaces=regional_surfaces(source);out={e['id']:e for e in items}
+    scale=min(width/source['canvas']['width'],height/source['canvas']['height'])
+    originals={e['id']:e for e in source['elements']}
+    for pid,ids in surfaces.items():
+        children=[out[i] for i in ids if i in out and i not in surfaces]
+        if pid not in out or not children:continue
+        old=originals[pid];sb=bounds([originals[i] for i in ids if i in out and i not in surfaces]);b=bounds(children)
+        pads=[max(0.,sb[0]-old['x']),max(0.,sb[1]-old['y']),
+              max(0.,old['x']+old['width']-sb[2]),max(0.,old['y']+old['height']-sb[3])]
+        pads=[min(p*scale,.05*min(width,height)) for p in pads]
+        x=max(0.,b[0]-pads[0]);y=max(0.,b[1]-pads[1])
+        right=min(width,b[2]+pads[2]);bottom=min(height,b[3]+pads[3])
+        out[pid].update(x=x,y=y,width=max(1.,right-x),height=max(1.,bottom-y))
+
+
+def _cap_control_growth(items,source,width,height):
+    """An isolated flow slot cannot reverse the authored type hierarchy."""
+    from engine.layout_contracts import controls,control_font_floor
+    from engine.source_structure import _transform
+    from engine.nested_structure import photo_caption_panels
+    captions=photo_caption_panels(source)
+    old={e['id']:e for e in source['elements']};out={e['id']:e for e in items}
+    texts=[e for e in source['elements'] if e['type']=='text' and e['id'] in out]
+    if not texts:return
+    title=max(texts,key=lambda e:e['font_size']);target=out[title['id']]
+    for pid,tid in controls(source):
+        if pid not in out or tid not in out or tid==title['id'] or pid in captions:continue
+        label=out[tid];limit=max(control_font_floor(source,tid,width,height),
+            target['font_size']*old[tid]['font_size']/max(1.,title['font_size'])*1.35)
+        if label['font_size']<=limit:continue
+        pair=[out[pid],label];b=bounds(pair);s=limit/label['font_size']
+        adjusted=_transform(pair,s,(b[0]+b[2]-(b[2]-b[0])*s)/2,
+            (b[1]+b[3]-(b[3]-b[1])*s)/2,b)
+        for e in adjusted:out[e['id']].update(e)
 
 
 def _fit_flow(blocks,slot,source,axis,align='left'):
@@ -237,6 +325,26 @@ def measured_candidates(source, blocks, box, width, height, proposal=None):
     Raw Qwen candidates remain available independently in the main selector.
     """
     from engine.container_flow import measured_columns
+    # Complete explicit siblings may change row count together. Their backing
+    # panels remain separate atoms; regional paint never becomes the parent.
+    from collections import defaultdict
+    siblings=defaultdict(list)
+    for es in blocks:
+        ids={e.get('group_id') for e in es}
+        if len(ids)!=1 or None in ids or len(es)<2:continue
+        signature=tuple(sorted(e['type'] for e in es))
+        parents={e.get('parent_group_id') for e in es}
+        key=('parent',next(iter(parents))) if len(parents)==1 and None not in parents else ('signature',signature)
+        siblings[key].append(es)
+    for family in siblings.values():
+        if len(family)<3:continue
+        bs=[bounds(es) for es in family]
+        areas=[(b[2]-b[0])*(b[3]-b[1]) for b in bs]
+        if max(areas)>3*max(1.,min(areas)):continue
+        xs=[(b[0]+b[2])/2 for b in bs];ys=[(b[1]+b[3])/2 for b in bs]
+        if min((max(xs)-min(xs))/source['canvas']['width'],(max(ys)-min(ys))/source['canvas']['height'])>.04:continue
+        members={e['id'] for es in family for e in es}
+        blocks=[es for es in blocks if not any(e['id'] in members for e in es)]+[sum(family,[])]
     # Use existing source peer evidence so a repeated row gets one allocation.
     # Joining is legal only when every peer unit is already a complete atom.
     from engine.resize import _analyze
@@ -252,10 +360,12 @@ def measured_candidates(source, blocks, box, width, height, proposal=None):
     if not 4 <= len(blocks) <= 40:
         return []
     area=source['canvas']['width']*source['canvas']['height']
-    # A loose ornament has no established flow parent. Do not invent a new
-    # slot for it while reflowing copy; existing arrangement families remain.
-    if any(not any(e['type']=='text' or e['type']=='image' and e['width']*e['height']>.025*area for e in block) for block in blocks):
-        return []
+    # Small independent artwork does not become a copy column. Place it in
+    # proven free space after the primary flow; never fall back onto content.
+    floating=[block for block in blocks if not any(e['type']=='text' or
+        e['type']=='image' and e['width']*e['height']>.025*area for e in block)]
+    blocks=[b for b in blocks if b not in floating]
+    if len(blocks)<4:return []
     sw, sh = source['canvas']['width'], source['canvas']['height']
     reference = sqrt(width * height / (sw * sh))
     source_axis = 0 if sw / sh >= 1.6 else 1
@@ -338,12 +448,32 @@ def measured_candidates(source, blocks, box, width, height, proposal=None):
                         energy=0.,macro_locked=True,source_attached=True,learned_macro=True,
                         macro_family='qwen-macro-band-flow',macro_realization=dict(rows=rows,
                             font_scale=reference*multiplier,order=[[e['id'] for e in es] for es in order])))
+    if floating:
+        from engine.free_space import free_rectangles,place
+        from engine.source_structure import _transform
+        complete=[]
+        for c in result:
+            items=c['elements'];ok=True
+            for block in floating:
+                b=bounds(block);swid=max(1.,b[2]-b[0]);shei=max(1.,b[3]-b[1])
+                anchor=((b[0]+b[2])/2/sw*width,(b[1]+b[3])/2/sh*height)
+                slots=free_rectangles(width,height,[bounds([e]) for e in items],margin=.025*min(width,height),padding=2.)
+                fitted=place((swid,shei),slots,anchor,(width,height),scale_cap=reference)
+                if not fitted or fitted['scale']<.15*reference:ok=False;break
+                items+=_transform(block,fitted['scale'],fitted['x'],fitted['y'],b)
+            if ok:complete.append(c)
+        result=complete
     return result
 
-def candidates(source,width,height,proposal=None):
+def candidates(source,width,height,proposal=None,*,tight=None,extras=True):
     from engine.resize import _analyze,_energy
-    prepared=_prepared(source);spec=composites(prepared);blocks=spec['blocks']
-    if len(blocks)<2:return []
+    prepared=_prepared(source);spec=composites(source,tight=tight)
+    ready={e['id']:e for e in prepared['elements']}
+    blocks=[[ready[e['id']] for e in block] for block in spec['blocks']]
+    if len(blocks)<2:
+        sw,sh=source['canvas']['width'],source['canvas']['height']
+        shift=max((width/height)/(sw/sh),(sw/sh)/(width/height))
+        return candidates(source,width,height,proposal,tight=False,extras=extras) if tight is not False and shift>=1.8 and len(composites(prepared,tight=False)['blocks'])>1 else []
     sw,sh=source['canvas']['width'],source['canvas']['height'];axis=0 if sw/sh>1.6 else 1
     margin=.045*min(width,height);gap=.04*min(width,height)
     edges=edge_strips(source);src={e['id']:e for e in source['elements']}
@@ -398,18 +528,45 @@ def candidates(source,width,height,proposal=None):
                     from engine.layout_contracts import _grow_controls,center_control_labels
                     _grow_controls(items,source,width,height);center_control_labels(items,source,width,height)
                     result.append(dict(name=f'macro-media-split-{share}-{n}-{k}',elements=items,energy=0.,macro_locked=True,source_attached=True))
-    for c in measured_candidates(prepared, blocks, (left,top,w,h), width, height, proposal):
+    for c in measured_candidates(source, blocks, (left,top,w,h), width, height, proposal):
         c['elements'] += deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
         clamp_edge_strips(c['elements'],source,width,height)
         from engine.layout_contracts import center_control_labels
         center_control_labels(c['elements'],source,width,height)
         c['macro_links']=spec['links']
         result.append(c)
+    additions=[]
+    if extras and os.environ.get('MAGICANVAS_EXPERIMENTAL_MACRO_LIBRARY')=='1':
+        sw,sh=source['canvas']['width'],source['canvas']['height']
+        shift=max((width/height)/(sw/sh),(sw/sh)/(width/height))
+        signature=lambda spec:{frozenset(e['id'] for e in es) for es in spec['blocks']}
+        locked=composites(prepared,tight=True)
+        if shift>=1.8:
+            for mode in (True,False):
+                alternative=composites(prepared,tight=mode)
+                if signature(alternative)==signature(spec):continue
+                for c in candidates(source,width,height,proposal,tight=mode,extras=False)[:1]:
+                    c['name']=('macro-locked-' if mode else 'band-split-')+c['name']
+                    c['macro_family']='dual-granularity';c['grouping']='tight' if mode else 'band-split';additions.append(c)
+        from engine.retrieve import candidates as retrieved
+        for c in retrieved(prepared,locked['blocks'],width,height):
+            c['elements']+=deepcopy(ambient)+[deepcopy(e) for e in source['elements'] if e['id'] in spec['edge_ids']]
+            clamp_edge_strips(c['elements'],source,width,height)
+            from engine.layout_contracts import center_control_labels
+            center_control_labels(c['elements'],source,width,height)
+            additions.append(c)
     # Geometry quality preselects a bounded diverse render budget, not an oracle.
     _,units=_analyze(source)
     from engine.resize import _assemble
     backgrounds=_analyze(source)[0]
-    for c in result:c['precheck']=checks(source,_assemble(c['elements'],backgrounds,source,width,height),units,{},c['name'])
+    for c in result:
+        _cap_control_growth(c['elements'],source,width,height)
+        from engine.nested_structure import regional_surfaces
+        if regional_surfaces(source):
+            from engine.layout_contracts import _primary_axis
+            _primary_axis(c['elements'],source,units,width,height,apply=True)
+        _fit_regional_surfaces(c['elements'],source,width,height)
+        c['precheck']=checks(source,_assemble(c['elements'],backgrounds,source,width,height),units,{},c['name'])
     ranked=sorted(result,key=lambda c:(c['precheck']['flagged'],len(c['precheck']['defect_flags']),quality(c['elements'],source,width,height)['cost']));chosen=[];families=set()
     # Reserve measured and learned macro alternatives without starving the
     # existing families or allowing an unbounded render sweep.
@@ -424,6 +581,11 @@ def candidates(source,width,height,proposal=None):
     for c in ranked:
         if len(chosen)>=8:break
         if c not in chosen:chosen.append(c)
+    # Supplemental families do not evict the existing eight macro slots.
+    # Render at most two retrieved and two alternate-granularity proposals.
+    for family,limit in (('human-retrieved',2),('dual-granularity',2)):
+        pool=[c for c in additions if c.get('macro_family')==family]
+        chosen+=sorted(pool,key=lambda c:quality(c['elements'],source,width,height)['cost'])[:limit]
     return chosen
 
 
@@ -444,7 +606,8 @@ def quality(elements,source,width,height):
     """Geometry/ink-visible quality; excluded edge strips cannot inflate occupancy."""
     from engine.resize import _analyze,_text_visible_bounds,_overlap
     from engine.geometry_policy import ambient_shape
-    bg,units=_analyze(source);excluded={e['id'] for e in bg}|set(edge_strips(source))|{e['id'] for e in source['elements'] if ambient_shape(e,source)};original={e['id']:e for e in source['elements']};out={e['id']:e for e in elements}
+    from engine.nested_structure import regional_surfaces,unpainted_ids
+    bg,units=_analyze(source);excluded={e['id'] for e in bg}|set(edge_strips(source))|set(regional_surfaces(source))|unpainted_ids(source)|{e['id'] for e in source['elements'] if ambient_shape(e,source)};original={e['id']:e for e in source['elements']};out={e['id']:e for e in elements}
     content=[e for e in elements if e['id'] not in excluded];texts=[e for e in content if e['type']=='text' and e.get('content','').strip()]
     if not content:return dict(cost=1000.,width_use=0.,height_use=0.)
     bs=[_text_visible_bounds(e) if e['type']=='text' else bounds([e]) for e in content]
@@ -482,10 +645,21 @@ def quality(elements,source,width,height):
         if abs((sb[0]+sb[2])/2-source['canvas']['width']/2)<.08*source['canvas']['width'] and wx<.6 and abs((box[0]+box[2])/2-width/2)<.15*width:
             center_error=abs((box[0]+box[2])/2-width/2)/width
     cost+=18.*drift/max(1,len(links))+8.*orphans/max(1,len(links))+35.*local_axes+10.*source_gap+50.*center_error
+    from engine.layout_contracts import controls
+    from engine.nested_structure import photo_caption_panels
+    captions=photo_caption_panels(source)
+    prominence=0.
+    if headline and headline['font_size']>0:
+        for p,t in controls(source):
+            if t not in out or p in captions:continue
+            expected=original[t]['font_size']/original[headline['id']]['font_size']
+            actual=out[t]['font_size']/headline['font_size']
+            prominence+=max(0.,actual/max(.01,expected)-1.5)
+    cost+=35.*prominence
     return dict(cost=cost,width_use=wx,height_use=hy,content_area_share=sum(max(0,b[2]-b[0])*max(0,b[3]-b[1]) for b in bs)/(width*height),
                 content_union_share=_union_area(bs)/(width*height),
                 hero_area_share=hero_share,headline_font=headline['font_size'] if headline else 0.,
-                subpanel_axis_error=local_axes,source_gap_deficit=source_gap,near_center_error=center_error,median_font=medfont,minimum_font=minfont,relative_font_median=median(ratios) if ratios else 0.,orphaned_attachments=orphans,attachment_drift=drift,margin_imbalance=balance)
+                control_prominence_error=prominence,subpanel_axis_error=local_axes,source_gap_deficit=source_gap,near_center_error=center_error,median_font=medfont,minimum_font=minfont,relative_font_median=median(ratios) if ratios else 0.,orphaned_attachments=orphans,attachment_drift=drift,margin_imbalance=balance)
 
 
 def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,render_rank,proposal=None):
@@ -514,6 +688,13 @@ def upgrade(incumbent,visual,backgrounds,units,source,width,height,desired,rende
         score=quality(winner['elements'],source,width,height)
         item=dict(name=c['name'],flags=gate['defect_flags'],quality=score)
         diagnostics['candidates'].append(item)
+        if c.get('macro_family')=='human-retrieved':
+            item['retrieval']=c['retrieval']
+            # A library proposal must not win by erasing primary prominence.
+            if any(before.get(key,0.)>0. and score.get(key,0.)<.70*before[key]
+                   for key in ('headline_font','hero_area_share')):
+                item['rejection_reason']='Retrieved layout loses more than 30% primary prominence'
+                continue
         # A previously clean layout can only be replaced by another clean
         # layout with at least 20% quality improvement and a two-point margin.
         critical=set(gate['defect_flags'])-{'control_readability'}

@@ -52,7 +52,6 @@ function setTask(value, selectedSampleId = null) {
 }
 function applyAdaptedResult(data, id, width, height, loader) {
   result = data;
-  void loader?.updateSourcePalette(data.source, $('source'));
   void updateTheme(data.source, data.source_png, id);
   $('source').src = data.source_png;
   $('output').src = data.output_png;
@@ -61,7 +60,9 @@ function applyAdaptedResult(data, id, width, height, loader) {
   $('document').textContent = JSON.stringify(data.design, null, 2);
   $('warnings').replaceChildren(...data.warnings.map(message => {const li=document.createElement('li');li.textContent=message;return li;}));
   $('warning-count').textContent = `(${data.warnings.length})`;
-  setStatus(`${data.design.elements.length} elements · ${data.seconds}s${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
+  const backend = data.inference?.device ? ` (${data.inference.device.toUpperCase()})` : '';
+  const stages = data.cache_hit ? ' · cached previous result' : data.timings ? ` · model ${data.timings.generation?.toFixed(1) ?? '?'}s${backend} · layout + checks ${((data.timings.geometry ?? 0)+(data.timings.render_verify ?? 0)).toFixed(1)}s` : '';
+  setStatus(`${data.design.elements.length} elements · ${data.seconds}s${stages}${data.warnings.length ? ` · ${data.warnings.length} rendering ${data.warnings.length === 1 ? 'note' : 'notes'}` : ''}`, data.warnings.length ? 'warning' : '');
   ['json','png','bundle','source-preview','output-preview'].forEach(key => $(key).disabled=false);
   return loader ? loader.transitionToResult(data.output_png) : Promise.resolve();
 }
@@ -85,7 +86,6 @@ async function readAdaptStream(response, id, width, height, loader) {
       $('source').src=payload.source_png;
       $('source-size').textContent=`${payload.source_size.width} × ${payload.source_size.height}`;
       $('source-preview').disabled=false;
-      await loader?.updateSourcePalette(task.source,$('source'));
       if (id!==requestId) return;
       void updateTheme(task.source,payload.source_png,id);
       setStatus('Original ready · adapting layout…');

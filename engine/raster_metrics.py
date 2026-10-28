@@ -27,9 +27,11 @@ def glyph_statistics(background,mask,color,opacity=1.):
 def glyph_overflow(source,elements,width,height):
     """Exact shared glyph/frame/canvas overflow, retaining source bearings."""
     from engine.resize import _render_text_ink,_source_ink_overhang
+    from engine.nested_structure import unpainted_ids
+    inactive=unpainted_ids(source)
     originals={e['id']:e for e in source['elements']};overflow={}
     for e in elements:
-        if e.get('type')!='text':continue
+        if e.get('type')!='text' or e['id'] in inactive:continue
         ink=_render_text_ink(e)
         if ink is None:continue
         bx,by=_source_ink_overhang(e,originals.get(e['id']))

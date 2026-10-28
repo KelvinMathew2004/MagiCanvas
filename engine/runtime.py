@@ -1,6 +1,6 @@
 """Offline runtime capabilities; acceleration is measured, never assumed."""
 from __future__ import annotations
-import os
+import os,platform
 from dataclasses import dataclass
 
 
@@ -10,9 +10,11 @@ class Runtime:
     dtype: object
     threads: int
     reason: str
+    profile: str = 'portable-cpu'
+    merge_adapter: bool = False
 
     def diagnostics(self):
-        return dict(device=self.device,dtype=str(self.dtype),cpu_threads=self.threads,reason=self.reason)
+        return dict(device=self.device,dtype=str(self.dtype),cpu_threads=self.threads,reason=self.reason,profile=self.profile,adapter_merge=self.merge_adapter,platform=platform.system(),architecture=platform.machine())
 
 
 def select_runtime(torch,component='qwen'):
@@ -41,7 +43,17 @@ def select_runtime(torch,component='qwen'):
         threads=int(configured)
         if not 1<=threads<=max(1,os.cpu_count() or 1):raise ValueError('Invalid MAGICANVAS_CPU_THREADS')
         torch.set_num_threads(threads)
-    return Runtime(device,dtype,torch.get_num_threads(),'capability-aware; CPU BF16/accelerated vision require explicit opt-in')
+    profile='apple-metal' if device=='mps' else 'nvidia-cuda' if device=='cuda' else 'portable-cpu'
+    merge=os.environ.get('MAGICANVAS_QWEN_MERGE_ADAPTER','auto').lower()
+    if merge not in ('auto','0','1'):raise ValueError('MAGICANVAS_QWEN_MERGE_ADAPTER must be auto, 0 or 1')
+    # Merge is inference-only; the saved adapter/base stay untouched. Native
+    # Metal avoids the per-token low-rank module dispatch overhead. CPU/CUDA
+    # retain their baseline path until separately measured; explicit overrides
+    # are available for controlled comparisons.
+    merged=component=='qwen' and (merge=='1' or merge=='auto' and device=='mps')
+    return Runtime(device,dtype,torch.get_num_threads(),
+                   'Actual backend capabilities choose CUDA BF16/FP16, Metal FP16, or portable CPU FP32; ARM64 alone never implies a GPU.',
+                   profile,merged)
 
 
 def synchronize(torch,device):

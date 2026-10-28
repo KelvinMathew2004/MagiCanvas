@@ -227,5 +227,6 @@
       "text_count": 6,
       "records_file": "data/qwen_lora_expanded_v2/test.jsonl"
     }
-  ]
+  ],
+  "supplemental_config": "config/fresh_design_review.json"
 }

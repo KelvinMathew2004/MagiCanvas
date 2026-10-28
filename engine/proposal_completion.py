@@ -6,6 +6,11 @@ from statistics import median
 
 def free_rectangles(width,height,occupied):
     """Deterministic maximal empty rectangles; prune contained fragments."""
+    # Keep exact pockets on normal designs; use bounded conservative grid
+    # enumeration for very dense proposals instead of quadratic fragment growth.
+    if len(occupied)>64:
+        from engine.free_space import free_rectangles as grid_rectangles
+        return grid_rectangles(width,height,occupied)
     rects=[(0.,0.,float(width),float(height))]
     for x,y,r,b in occupied:
         next_rects=[]
@@ -49,7 +54,11 @@ def complete_missing(source,proposals,base_elements,target):
         else:
             rects=free_rectangles(w,h,occupied)
             if not rects:return None,notes
-            def fit(q):return min(scale,(q[2]-q[0])/old['width'],(q[3]-q[1])/old['height'])
+            # Source zero-area/spacer layers may be omitted by the model.
+            # Recovery already clamps its result to a one-pixel frame below;
+            # use that same minimum when evaluating free-space capacity.
+            # Keep the ID and all normal visual defect checks intact.
+            def fit(q):return min(scale,(q[2]-q[0])/max(1.,old['width']),(q[3]-q[1])/max(1.,old['height']))
             q=max(rects,key=lambda q:(fit(q),-(q[0]/w-old['x']/sw)**2-(q[1]/h-old['y']/sh)**2))
             s=fit(q);value=dict(x=q[0],y=q[1],width=old['width']*s,height=old['height']*s);method='free-rectangle'
         if old['type']=='text':value['font_size']=old['font_size']*s

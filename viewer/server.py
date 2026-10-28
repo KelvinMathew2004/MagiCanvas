@@ -153,7 +153,7 @@ def render_preview_data(design, assets_dir=None, asset_mode='demo'):
     return png_data, warnings
 
 
-def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', sample_id=None):
+def _adapt_preview_uncached(task, source_png=None, validated=None, asset_mode='demo', sample_id=None):
     # Keep one consistent module graph for the lifetime of the server. Partial
     # reloads mix new callers with stale dependent modules, and concurrent
     # requests can observe half-reloaded state. Restart after editing code.
@@ -172,6 +172,7 @@ def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', samp
     else:
         source_warnings = []
     output, diagnostics = _adapt_with_diagnostics(source, target)
+    preview_started = perf_counter()
     warnings = source_warnings + self_check(source, output)
     gate = diagnostics.get('quality_gate', {})
     if gate and not gate.get('passed', False):
@@ -193,7 +194,53 @@ def adapt_preview(task, source_png=None, validated=None, asset_mode='demo', samp
     warnings.extend(output_warnings)
     _restore_asset_ids(output, original_source)
     return dict(design=output, source=original_source, source_png=source_png, output_png=output_png,
-                warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3))
+                warnings=list(dict.fromkeys(warnings)), seconds=round(perf_counter()-started, 3),
+                timings=dict(**diagnostics.get('seconds', {}), preview_render=round(perf_counter()-preview_started,3)),
+                inference={k:diagnostics.get('qwen_diagnostics',{}).get('generation',{}).get(k) for k in ('device','dtype','generation_seconds','adapter_merged','runtime')})
+
+
+from viewer.preview_cache import PreviewCache
+_PREVIEW_CACHE=PreviewCache()
+
+
+def _preview_key(source,target,asset_mode,sample_id):
+    from hashlib import sha256
+    from engine.resize import _asset_root
+    from engine import qwen_seed
+    files=[]
+    def stamp(path):
+        path=Path(path)
+        try:
+            stat=path.stat();files.append((str(path.resolve()),stat.st_mtime_ns,stat.st_size))
+        except OSError:files.append((str(path),'missing'))
+    assets=_asset_directory(asset_mode,sample_id)
+    resolved=_with_resolved_assets(source,assets)
+    for e in resolved['elements']:
+        if e['type']=='image':stamp(_asset_root(e)/e['asset_id'])
+    # A font/weight replacement invalidates the preview and requires a server
+    # restart to reload the model. Code changes likewise require a restart.
+    for base in (ROOT/'brand_kit/fonts',qwen_seed.MODEL_DIR,qwen_seed.ADAPTER_DIR):
+        stamp(base)
+        if base.is_dir():
+            for path in sorted(base.rglob('*')):
+                if path.is_file():stamp(path)
+    stamp(DATA_ROOT/'crello_fonts.pickle');stamp(ROOT/'engine/data/layout_library.json')
+    config={k:v for k,v in os.environ.items() if k.startswith('MAGICANVAS_')}
+    return sha256(json.dumps([source,target,asset_mode,sample_id,files,config],sort_keys=True).encode()).hexdigest()
+
+
+def adapt_preview(task,source_png=None,validated=None,asset_mode='demo',sample_id=None):
+    source,target=validated or validate_task(task)
+    compute=lambda:_adapt_preview_uncached(task,source_png,(source,target),asset_mode,sample_id)
+    if os.environ.get('MAGICANVAS_PREVIEW_CACHE','1')=='0':return dict(compute(),cache_hit=False)
+    started=perf_counter()
+    response=_PREVIEW_CACHE.get_or_compute(_preview_key(source,target,asset_mode,sample_id),compute)
+    response['computed_seconds']=response['seconds']
+    response['request_seconds']=round(perf_counter()-started,3)
+    if response['cache_hit']:
+        response['seconds']=response['request_seconds']
+        if source_png is not None:response['source_png']=source_png
+    return response
 
 
 def _sse_message(event, data):
@@ -261,6 +308,7 @@ class Handler(BaseHTTPRequestHandler):
         files = {
             '/': ('index.html', 'text/html; charset=utf-8'),
             '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+            '/ai-image-loader.mjs': ('ai-image-loader.mjs', 'text/javascript; charset=utf-8'),
             '/chameleon-loader.mjs': ('chameleon-loader.mjs', 'text/javascript; charset=utf-8'),
             '/theme.mjs': ('theme.mjs', 'text/javascript; charset=utf-8'),
             '/style.css': ('style.css', 'text/css; charset=utf-8'),
@@ -268,6 +316,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in files:
             name, kind = files[path]
             return self.reply(200, (Path(__file__).parent/name).read_bytes(), kind)
+        if path.endswith('.mjs') or path.endswith('.js') or path.endswith('.css'):
+            target = (Path(__file__).parent / path.lstrip('/')).resolve()
+            if target.is_relative_to(Path(__file__).parent.resolve()) and target.is_file():
+                kind = 'text/css; charset=utf-8' if path.endswith('.css') else 'text/javascript; charset=utf-8'
+                return self.reply(200, target.read_bytes(), kind)
         self.reply(404, dict(error='Not found'))
 
     def do_POST(self):

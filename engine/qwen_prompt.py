@@ -69,7 +69,46 @@ def _overlap(a, b):
     return iw * ih
 
 
-def _v2_prompt(source, target_canvas, version=2):
+def _compact_relations(source, aliases, relations, count_tokens, budget):
+    """Keep the trained pair-tuple vocabulary; prune redundant dense links.
+
+    Local ownership precedes a minimum spanning forest of existing alignment
+    edges. Full-canvas paint does not consume the relationship budget. Collect
+    across every element before pruning so late IDs have equal consideration.
+    """
+    by_alias={aliases[e['id']]:e for e in source['elements']}
+    area=source['canvas']['width']*source['canvas']['height']
+    active={k:e for k,e in by_alias.items() if e['width']>0 and e['height']>0
+            and e['width']*e['height']<.90*area
+            and (e['type']!='text' or str(e.get('content','')).strip())}
+    rows=[r for r in relations if r[1] in active and r[2] in active]
+    owners={}
+    for r in rows:
+        if r[0]=='backing':
+            p=active[r[1]];cost=(p['width']*p['height'],r[1])
+            if r[2] not in owners or cost<owners[r[2]][0]:owners[r[2]]=(cost,r)
+    selected=[v[1] for _,v in sorted(owners.items())]
+    for kind in ('same-row','same-column'):
+        parent={k:k for k in active}
+        def root(k):
+            while parent[k]!=k:parent[k]=parent[parent[k]];k=parent[k]
+            return k
+        def distance(r):
+            a,b=active[r[1]],active[r[2]]
+            return ((a['x']+a['width']/2-b['x']-b['width']/2)/source['canvas']['width'])**2+((a['y']+a['height']/2-b['y']-b['height']/2)/source['canvas']['height'])**2
+        for r in sorted((r for r in rows if r[0]==kind),key=lambda r:(distance(r),r[1:])):
+            a,b=root(r[1]),root(r[2])
+            if a!=b:parent[b]=a;selected.append(r)
+    backed={frozenset(r[1:3]) for r in selected if r[0]=='backing'}
+    selected.extend(sorted((r for r in rows if r[0]=='overlap' and frozenset(r[1:3]) not in backed),
+                           key=lambda r:(min(active[r[1]]['width']*active[r[1]]['height'],active[r[2]]['width']*active[r[2]]['height']),r[1:])))
+    result=[]
+    for r in selected:
+        if count_tokens(json.dumps(result+[r],ensure_ascii=False,separators=(',',':')))<=budget:result.append(r)
+    return result
+
+
+def _v2_prompt(source, target_canvas, version=2, relation_token_counter=None, relation_token_budget=None):
     sw, sh = float(source["canvas"]["width"]), float(source["canvas"]["height"])
     tw, th = float(target_canvas["width"]), float(target_canvas["height"])
     aliases = {e["id"]: f"e{i:03d}" for i, e in enumerate(source["elements"])}
@@ -128,10 +167,13 @@ def _v2_prompt(source, target_canvas, version=2):
                 relations.append(["backing", aliases[a["id"]], aliases[b["id"]]])
             elif reverse_contained and b.get("z_index", 0) < a.get("z_index", 0):
                 relations.append(["backing", aliases[b["id"]], aliases[a["id"]]])
-            if len(relations) >= 120:
+            if relation_token_budget is None and len(relations) >= 120:
                 break
-        if len(relations) >= 120:
+        if relation_token_budget is None and len(relations) >= 120:
             break
+
+    if relation_token_budget is not None:
+        relations=_compact_relations(source,aliases,relations,relation_token_counter,relation_token_budget)
 
     return (
         f"Layout prediction format v{version}. Every box is normalized independently to its canvas: "
@@ -197,9 +239,9 @@ def decode_v2_completion(payload, source, target_canvas, version=2):
     return {"elements": result}
 
 
-def messages_for(source, target_canvas, completion=None, version=1):
+def messages_for(source, target_canvas, completion=None, version=1, *, relation_token_counter=None, relation_token_budget=None):
     if version not in (1,2,3):raise ValueError(f"Unsupported Qwen prompt version: {version}")
-    prompt = _v2_prompt(source, target_canvas,version) if version in (2,3) else _v1_prompt(source, target_canvas)
+    prompt = _v2_prompt(source, target_canvas,version,relation_token_counter,relation_token_budget) if version in (2,3) else _v1_prompt(source, target_canvas)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]
     if completion is not None:
         if version in (2,3):

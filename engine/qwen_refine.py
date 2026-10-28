@@ -1646,6 +1646,18 @@ def snap_source_axes(elements, source, width, height, tree=None):
     backings=[(r[1],r[2]) for r in tree['relationships'] if r[0]=='backing'
               and r[1] in out and r[2] in out]
     candidates=[]
+    def target_axis_allowed(ids,dimension,fraction):
+        # A genuine reflow can deliberately change the text anchoring. Source
+        # center relations must not undo an already shared target left edge.
+        # Retain source axes when alignment did not change (box centers still
+        # matter for many left-set emblem lockups).
+        if dimension!='x':return True
+        for eid in ids:
+            a,b=src[eid],out[eid]
+            if a.get('type')!='text' or a.get('text_align','left')==b.get('text_align','left'):continue
+            anchor={'left':0.,'center':.5,'right':1.}.get(b.get('text_align','left'))
+            if anchor is not None and fraction!=anchor:return False
+        return True
     # Source-explicit peer rows/columns are stronger than a generic nearby-axis
     # cluster. Only use true shared source centers (4px). The target tolerance
     # is intentionally wider than generic snapping: the held-out beer lockup
@@ -1672,7 +1684,7 @@ def snap_source_axes(elements, source, width, height, tree=None):
             target_values=[_axis(out[eid],(dimension,.5)) for eid in ids]
             spread=max(target_values)-min(target_values)
             limit=.08*(width if dimension=='x' else height)
-            if spread<=limit:
+            if spread<=limit and target_axis_allowed(ids,dimension,.5):
                 candidates.append((0,-len(ids),spread,0,dimension,.5,ids))
     for dimension in ('x','y'):
         limit=.03*(width if dimension=='x' else height)
@@ -1696,6 +1708,7 @@ def snap_source_axes(elements, source, width, height, tree=None):
                     # Source edge alignment itself is same-column evidence,
                     # even where the compact prompt only encoded centers.
                     ids=[e['id'] for e in group]
+                    if not target_axis_allowed(ids,dimension,fraction):continue
                     if not any(frozenset((a,b)) in pairs or
                                abs(_axis(src[a],axis)-_axis(src[b],axis))<=4
                                for i,a in enumerate(ids) for b in ids[i+1:]):continue

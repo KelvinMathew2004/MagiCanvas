@@ -13,11 +13,25 @@ import html
 import json
 from pathlib import Path
 import sys
+from copy import deepcopy
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 STYLE = '''body{font:17px/1.5 system-ui;background:#101820;color:#edf2f7;margin:0}header,main{max-width:1500px;margin:auto;padding:24px}a{color:#9ed4ff}article{padding:20px;margin:0 0 24px;background:#182532;border:1px solid #334552;border-radius:12px}.panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}figure{margin:0}figcaption{display:flex;justify-content:space-between;gap:10px;margin-bottom:10px}.size,.muted{color:#b9c8d3}img{width:100%;height:520px;object-fit:contain;background:#101820}h1,h2{margin:8px 0 16px}p{overflow-wrap:anywhere}details{margin-top:16px}@media(max-width:800px){.panels{grid-template-columns:1fr}img{height:420px}}'''
+
+
+def _preview_nonempty(render, doc, path):
+    """Zero-area layers cannot paint pixels and fail cr-renderer validation.
+
+    Omit only in this preview copy; retain exact source/output JSON and defects.
+    """
+    omitted=[e['id'] for e in doc['elements'] if e.get('width',0)<=0 or e.get('height',0)<=0]
+    if not omitted:return render(doc,path)
+    preview=deepcopy(doc)
+    preview['elements']=[e for e in preview['elements'] if e.get('width',0)>0 and e.get('height',0)>0]
+    warnings=render(preview,path)
+    return [f'Preview omitted zero-area layers (audit JSON unchanged): {omitted}',*(warnings or [])]
 
 
 def _renderer(source: dict, source_split: str | None = None):
@@ -51,7 +65,7 @@ def build(run: Path, output: Path, title: str = 'Current reflow review') -> list
         warnings = {}
         for kind, label, doc in (('source', 'Original', source), ('output', 'Resized', design)):
             png = output / f'{prefix}_{kind}.png'
-            warnings[kind] = render(doc, png)
+            warnings[kind] = _preview_nonempty(render, doc, png)
             jpg = png.with_suffix('.jpg')
             with Image.open(png) as im:
                 im.convert('RGB').save(jpg, quality=93, optimize=True)

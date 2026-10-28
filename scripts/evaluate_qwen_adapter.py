@@ -164,6 +164,7 @@ def run_engine_mode(records,source_for,adapter_dir,model_dir=None,checkpoint_pat
                     raw_relative_font_mae=raw_measure['font_mae'] if not official else None,
                     raw_json_complete=bool(generation.get('json_complete')),
                     qwen_status=report.get('qwen'),source_split=row.get('source_split','official'),
+                    generation=generation,
                     target_canvas=canvas,official_path=official,source_design=source,output_design=design,
                     required_families=(report.get('visual') or {}).get('required_families',{}),
                     shortlist_coverage=(report.get('visual') or {}).get('shortlist_coverage',{}),

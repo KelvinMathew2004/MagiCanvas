@@ -112,11 +112,17 @@ def test_readability_fallback_cannot_bypass_hard_defects():
             assert report['remaining_flags']==['control_readability']
 
 
-def test_unattached_decorations_do_not_get_invented_flow_slots():
+def test_unattached_decorations_use_free_space_without_a_copy_column():
     blocks=[[label(str(i),100,80+i*80,400,40,'Heading',size=24)] for i in range(4)]
     blocks.append([dict(id='loose',type='image',x=10,y=100,width=25,height=25,z_index=1)])
     source=dict(canvas=dict(width=600,height=900),elements=sum(blocks,[]))
-    assert not measured_candidates(source,blocks,(10,5,700,80),728,90)
+    candidates=measured_candidates(source,blocks,(10,5,700,80),728,90)
+    assert candidates
+    from engine.resize import _overlap
+    for c in candidates:
+        art=next(e for e in c['elements'] if e['id']=='loose')
+        assert all(_overlap(bounds([art]),bounds([e]))==0 for e in c['elements'] if e['type']=='text')
+        assert all('loose' not in ids for ids in c['macro_realization']['order'])
 
 
 def test_atomic_tracked_lettering_keeps_source_line_count_after_scaling():

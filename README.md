@@ -57,7 +57,7 @@ MAGICANVAS_QWEN_ADAPTER_DIR=models/qwen3-layout-lora-v2-expanded-1.7b \
 python -m engine.main
 ```
 
-Qwen skips prompts exceeding 4,096 tokens, bounds output at 4,096 tokens and uses at most 8,192 combined tokens (or the model's smaller limit). It stops early on completed or repetitive output. A skipped or invalid proposal does not prevent deterministic fallback. The preview separately limits upload size and canvas dimensions. See [rules](RULES.md), [FAQ](FAQ.md), and [implementation notes](docs/IMPLEMENTATION.md) for the full contract.
+Qwen admits prompts up to 6,000 tokens only when an inventory-sized JSON output reserve fits within 8,192 combined tokens (or the model's smaller limit). Dense prompts crossing the former 4,096-token boundary use a 900-token relationship budget with the same pair-tuple schema. Output remains bounded at 4,096 tokens. It stops early on completed or repetitive output. A skipped or invalid proposal does not prevent deterministic fallback. The preview separately limits upload size and canvas dimensions. See [rules](RULES.md), [FAQ](FAQ.md), and [implementation notes](docs/IMPLEMENTATION.md) for the full contract.
 
 ## Formats and testing
 
@@ -71,7 +71,7 @@ Historical audits, limitations and replay instructions are in [rigid artwork rev
 
 ## Current visual regression review
 
-The single local review viewer combines **18 official conversions, 8 independent alternate-design conversions, and 12 complex dataset cases**. Every case has Qwen enabled and shows only Original and Resized. After major engine changes, refresh all cases together and rebuild the Gemini packet:
+The single local review viewer combines the **fixed 38 cases (18 official, 8 original alternates, 12 complex dataset cases) plus 8 fresh independent conversions and 13 supplied/skyscraper stress conversions**. Every case has Qwen enabled and shows only Original and Resized. After major engine changes, refresh all cases together and rebuild the Gemini packet:
 
 ```bash
 .venv/bin/python scripts/refresh_regression_viewer.py --workers 2
@@ -80,7 +80,7 @@ The single local review viewer combines **18 official conversions, 8 independent
 # Existing local review server: http://127.0.0.1:8766/review/main_engine_qwen_outputs/index.html
 ```
 
-This development workflow needs the local Crello assets/fonts, weights and saved prediction reports named in `config/regression_review.json`; these large research artifacts are not bundled with Git. It replays exact recorded Qwen predictions to isolate engine changes, and does not measure fresh generation speed. Incomplete runs do not replace the current viewer. See [diagnosis, regression workflow and next steps](docs/REGRESSION_REVIEW_AND_NEXT_STEPS.md). The existing 1.7B A/B did not justify promotion; no additional training is needed to fix the current post-processing alignment defect. The visual backbone already is SigLIP2; preference-head training needs reviewed labels first.
+This development workflow needs the local Crello assets/fonts, weights and saved prediction reports named in `config/regression_review.json`; these large research artifacts are not bundled with Git. It replays exact recorded Qwen predictions to isolate engine changes, and does not measure fresh generation speed. Incomplete runs do not replace the current viewer. See [diagnosis, regression workflow and next steps](docs/REGRESSION_REVIEW_AND_NEXT_STEPS.md). The existing 1.7B A/B did not justify promotion; no additional training is needed to fix the current post-processing alignment defect. The visual backbone is SigLIP2; the human-labelled structural-ranker pilot is recorded separately and is not deployed.
 
 ## Data and artifacts
 
@@ -166,3 +166,77 @@ See [audit decisions](docs/DENSE_REFLOW_AUDIT.md),
 [attachment examples](http://127.0.0.1:8766/review/attachment_growth/index.html),
 and [reviewed outliers](http://127.0.0.1:8766/review/reviewed_outliers/index.html).
 Adapter publication and the final adapter-required Docker test remain deferred.
+
+## Measured retrieval, ranking and preview experiments
+
+See [runtime and experiment results](docs/RUNTIME_AND_EXPERIMENTS.md).
+The local optional human-zone library, Hungarian matching and dual-granularity
+macro alternatives are available with `MAGICANVAS_EXPERIMENTAL_MACRO_LIBRARY=1`;
+they must earn selection through existing safety/improvement gates. Build the
+training-derived library locally with `scripts/build_layout_library.py` (requires
+the local corpus; the geometry library is not redistributed). These experimental
+families are off by default until they demonstrate a useful quality gain.
+
+A ten-feature human-calibrated ranker improved aggregate pair accuracy but is
+**not deployed**: its actual-engine validation subset only tied the baseline.
+No Qwen retraining or model-default change is implied by that pilot.
+
+The interactive preview caches exact repeated requests (at most eight / 32 MiB)
+and labels cache hits. New designs/formats still run Qwen. One actual local HTTP
+check took 42.12 seconds fresh versus 9 ms for the identical cached repeat; this
+is not a fresh-generation speed claim. Set `MAGICANVAS_PREVIEW_CACHE=0` for speed
+benchmarks. Native Metal automatically merges LoRA in memory to remove per-token adapter
+dispatch without editing saved weights. `MAGICANVAS_QWEN_MERGE_ADAPTER=0` keeps the
+unmerged comparison path; CPU/CUDA defaults are unchanged.
+Restart the preview server after engine/font/weight changes.
+
+## Native Apple Silicon / CUDA / CPU runtime
+
+No M5-specific flag is required for a native macOS run. Actual Torch backend
+capabilities select Metal/MPS FP16 with inference-only LoRA merging, CUDA BF16
+when supported (FP16 otherwise), or portable CPU FP32. ARM64 alone does not
+imply GPU availability. Check the detected configuration without loading weights:
+
+```bash
+.venv/bin/python scripts/runtime_diagnostics.py
+.venv/bin/python viewer/server.py
+# http://127.0.0.1:5050 — fresh results show the actual device and phase timings
+```
+
+On the available M1 Pro, eight fresh new-design conversions took 303.35 seconds
+combined versus 331.74 seconds unmerged (about 8.6% less); all eight final JSON
+outputs were unchanged, although five raw completions differed. This is one
+development comparison, **not an M5 Pro measurement** or universal optimum.
+
+Linux Docker on an M5 Pro cannot access Metal/MPS. The required Linux/amd64
+container uses the portable CPU path on that host; native macOS and emulated
+Docker timings must be reported separately. See [runtime, experiments and skyscraper test scope](docs/RUNTIME_AND_EXPERIMENTS.md).
+
+## Dense prompts and the optional 1.7B model
+
+See [capacity and model decisions](docs/PROMPT_CAPACITY_AND_MODEL_DECISIONS.md).
+The 1.7B base and its matching local adapter are supported through the same
+interface; a larger model still shares the engine's context and safety limits.
+To select it explicitly for native preview after stopping the running server:
+
+```bash
+MAGICANVAS_QWEN_ENABLED=1 \
+MAGICANVAS_QWEN_DIR=models/qwen3-1.7b \
+MAGICANVAS_QWEN_ADAPTER_DIR=models/qwen3-layout-lora-v2-expanded-1.7b \
+.venv/bin/python viewer/server.py --port 5050
+```
+
+Both directories must exist locally. This does not download or publish weights.
+The production default remains subject to measured quality and runtime gates.
+
+The latest [nested reflow audit](docs/NESTED_REFLOW_AUDIT.md) documents regional
+backing scopes, repeated row/card ownership and measured container sizing.
+The unified viewer can filter changed outputs, current flags and newly added
+flag types while retaining just Original and Resized panels. These are frozen
+Qwen-enabled development replays; inspect native-size renders and audit JSON
+before treating an unflagged output as visually good.
+
+The [Gemini follow-up decisions](docs/GEMINI_FOLLOWUP_DECISIONS.md) cover all 25
+review proposals, including measured variable-width peer wrapping, button/caption
+ownership and alignment-safe axis snapping. Larger model/ranker/crop experiments
+remain gated; the review packet records accepted changes and residual defects.

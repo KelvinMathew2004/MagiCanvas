@@ -59,6 +59,11 @@ def replay(records, cached, adapter, model, checkpoint, source_for=None, allow_i
 
     def generate(source,target,base_elements,diagnostics=None):
         row=queues[(tuple(e['id'] for e in source['elements']),target['width'],target['height'])].popleft()
+        if allow_incomplete and not row.get('qwen_model_elements') and row.get('qwen_status'):
+            # Preserve a recorded no-proposal outcome (e.g. a prompt-budget
+            # refusal). Never manufacture coordinates or run fresh inference
+            # while replaying a frozen engine regression cohort.
+            return None, row['qwen_status']
         if (not allow_incomplete and not row.get('raw_proposal_valid',bool(row.get('official_path')))) or not row.get('qwen_model_elements'):
             raise ValueError(f"Cannot replay incomplete raw prediction: {row['pair_id']}")
         aliases={e['id']:f'e{i:03d}' for i,e in enumerate(source['elements'])}

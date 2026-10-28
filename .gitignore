@@ -28,3 +28,12 @@ models/*
 # Local Crello downloads/exports contain dataset previews, embedded artwork, and
 # fonts. Keep these generated local copies and review outputs out of Git.
 /data
+
+# Training-derived retrieval geometry is generated locally, not redistributed.
+/engine/data/layout_library.json
+
+# Private local competitor research; retained on disk for our audit only.
+/docs/CHAMELEON_*.md
+/docs/*COMPETITOR*.md
+/scripts/audit_chameleon_import.py
+/scripts/audit_competitor_repositories.py

@@ -1,5 +1,8 @@
 # Shared copy axes and the regression workflow
 
+Latest October 28 work: [runtime, experimental features and skyscraper testing](RUNTIME_AND_EXPERIMENTS.md). The unified viewer retains the fixed 38, eight fresh independent conversions, and adds 13 supplied/skyscraper stress conversions. Historical results below retain their original scope.
+Earlier dated results below retain their original scope.
+
 **Latest:** see [ENGINE_UPGRADE_RESULTS.md](ENGINE_UPGRADE_RESULTS.md) and
 [ENGINE_UPGRADE_CHECKLIST.md](ENGINE_UPGRADE_CHECKLIST.md) for the fresh 20-case
 A/B, the current 296-test/38-case verification, preference-label status and

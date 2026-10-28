@@ -1,5 +1,8 @@
 # Engine upgrade checklist — reviewed October 27, 2026
 
+Latest October 28 work: [runtime, experimental features and skyscraper testing](RUNTIME_AND_EXPERIMENTS.md). The unified viewer retains the fixed 38, eight fresh independent conversions, and adds 13 supplied/skyscraper stress conversions. Historical results below retain their original scope.
+Earlier dated results below retain their original scope.
+
 Source: the supplied “Detailed Analysis of the Latest Code & 38-Case Regression
 Suite” review. Items below distinguish verified existing work, changes to
 implement, experiments, and actions requiring human labels or publication.

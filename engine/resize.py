@@ -211,16 +211,18 @@ def _unintended_control_overlaps(elements,source):
     src={e['id']:e for e in source['elements']};sw,sh=source['canvas']['width'],source['canvas']['height']
     result=[]
     from engine.layout_contracts import controls
+    from engine.nested_structure import unpainted_ids
+    unpainted=unpainted_ids(source)
     inferred=dict(controls(source))
     def control(e):
         return e['id'] in inferred or (e.get('type')=='shape' and e.get('group_id') is not None
                 and e['width']*e['height']<.16*sw*sh and float(e.get('opacity',1.))>=.98)
     for i,a in enumerate(elements):
         sa=src.get(a['id'])
-        if sa is None:continue
+        if sa is None or a['id'] in unpainted:continue
         for b in elements[i+1:]:
             sb=src.get(b['id'])
-            if sb is None or not (control(sa) or control(sb)):continue
+            if sb is None or b['id'] in unpainted or not (control(sa) or control(sb)):continue
             if sa.get('group_id') and sa.get('group_id')==sb.get('group_id'):continue
             if float(sa.get('opacity',1.))<.98 or float(sb.get('opacity',1.))<.98:continue
             if any(e.get('type')!='text' and e['width']*e['height']>.8*sw*sh for e in (sa,sb)):continue
@@ -890,7 +892,20 @@ def _advances(content, family, bold, italic, runs):
         if c == '\n':
             result.append(0)
         elif selected is not None:
-            result.append(selected.getlength(c)/1000)
+            try:
+                advance = selected.getlength(c)/1000
+            except OSError:
+                # Some font programs exceed FreeType's execution limit. The
+                # renderer's own metrics remain usable; don't abort a request
+                # merely because the auxiliary Pillow measurement failed.
+                rb, ri = bold, italic
+                for start, end, run_bold, run_italic in runs:
+                    if start <= i < end:
+                        rb = bold if run_bold is None else run_bold
+                        ri = italic if run_italic is None else run_italic
+                measured = _skia_advances(c, family, rb, ri, 1000)
+                advance = measured[0]/1000 if measured else (.30 if c.isspace() else .56)
+            result.append(advance)
         else:
             result.append(.30 if c.isspace() or c in "ilI.,'!:;|" else .90 if c in 'MW@#%&' else .65 if c.isupper() else .56)
     return tuple(result)
@@ -2072,14 +2087,16 @@ def _text_pair_ink_overlap(a,b):
 def _unintended_text_overlaps(elements, units):
     """Return overlapping text pairs unless that overlap was present in source."""
     source_text={e['id']:e for unit in units for e in unit['items']
-                 if e.get('type')=='text' and e.get('content','').strip()}
+                 if e.get('type')=='text' and e.get('content','').strip()
+                 and e['width']>0 and e['height']>0 and float(e.get('opacity',1))>0}
     intentional=set()
     source_values=list(source_text.values())
     for i,a in enumerate(source_values):
         for b in source_values[:i]:
             if _text_pair_ink_overlap(a,b)>1.:
                 intentional.add(frozenset((a['id'],b['id'])))
-    candidate=[e for e in elements if e.get('type')=='text' and e.get('content','').strip()]
+    candidate=[e for e in elements if e.get('type')=='text' and e.get('content','').strip()
+               and e['id'] in source_text]
     collisions=[]
     for i,a in enumerate(candidate):
         box_a=_text_visible_bounds(a)
@@ -3138,8 +3155,13 @@ def _safe_grid(units, width, height, scale):
     output = []
     for i, u in enumerate(sorted(units,key=_semantic_order)):
         block = _unit(u, cw*.92, ch*.92, scale, fill=False)
-        _,_,w,h = _bounds(block)
-        output.extend(_move(block,margin+(i%cols)*cw+(cw-w)/2,margin+(i//cols)*ch+(ch-h)/2))
+        # A unit can have transparent/unused frame padding beyond its painted
+        # bounds. Fit and translate raw frames (including rotated corners),
+        # rather than centering only the ink and exporting an off-canvas box.
+        block = _fit_raw_block(block,cw*.92,ch*.92)
+        l,t,r,b = _raw_bounds(block);w,h=r-l,b-t
+        output.extend(_shift(block,margin+(i%cols)*cw+(cw-w)/2-l,
+                             margin+(i//cols)*ch+(ch-h)/2-t))
     return output
 
 
@@ -4239,6 +4261,8 @@ def _objective_layout_cost(elements,units,source,width,height,desired,
                            allow_text_visual_overlap=False):
     """Score geometry and text defects without template or style preferences."""
     originals={e['id']:e for e in source['elements']}
+    from engine.nested_structure import unpainted_ids
+    unpainted=unpainted_ids(source)
     from engine.layout_contracts import issues
     cost=1000.*len(_unintended_text_overlaps(elements,units))
     cost+=100.*len(issues(elements,source,width,height,units))
@@ -4254,7 +4278,7 @@ def _objective_layout_cost(elements,units,source,width,height,desired,
                                     (source['canvas']['width'],source['canvas']['height']),width,height):
             cost+=1500.*(max(0.,-e['x'],e['x']+e['width']-width)/width
                          +max(0.,-e['y'],e['y']+e['height']-height)/height)
-        if e.get('type')=='text':
+        if e.get('type')=='text' and e['id'] not in unpainted:
             ink=_render_text_ink(e)
             if ink is None:
                 h,w,_=_text(e);ink=(0.,0.,w,h)
@@ -4902,8 +4926,10 @@ def _visual_rerank(candidates, backgrounds, units, source, width, height, desire
                 under_array=np.asarray(under);ink_array=np.asarray(ink)
                 cost,checked,weak,busy,invisible=0.,0,[],[],[]
                 contrast_by_text={}
+                from engine.nested_structure import unpainted_ids
+                source_unpainted=unpainted_ids(source)
                 for e in doc['elements']:
-                    if e['type']!='text' or not e.get('content','').strip():
+                    if e['type']!='text' or e['id'] in source_unpainted or not e.get('content','').strip():
                         continue
                     color=_rgba(e.get('color',''))
                     if not color or abs(e.get('rotation',0))>1:
@@ -6402,7 +6428,8 @@ def _adapt_with_diagnostics(source,target_canvas):
             optimized.append(dict(name='source-attached-flow' if flow else 'source-attached-proportional',
                                   elements=attached,source_attached=True,
                                   energy=_energy(attached,units,source,width,height,desired)))
-    geometry_time=perf_counter()-start
+    geometry_time=perf_counter()-start-generation_time
+    verification_started=perf_counter()
     winner,visual=_visual_rerank(optimized,backgrounds,units,source,width,height,desired)
     from engine.macro_layout import upgrade
     winner,visual,macro_diagnostics=upgrade(winner,visual,backgrounds,units,source,width,height,desired,_visual_rerank,proposal=qwen_diagnostics.get('model_elements'))
@@ -6423,7 +6450,7 @@ def _adapt_with_diagnostics(source,target_canvas):
                 visual=visual,qwen=qwen_status,qwen_diagnostics=qwen_diagnostics,
                 hard_constraints_passed=_physical_layout_safe(
                     winner['elements'],units,source,width,height),
-                seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),total=round(perf_counter()-start,4)))
+                seconds=dict(generation=round(generation_time,4),geometry=round(geometry_time,4),render_verify=round(perf_counter()-verification_started,4),total=round(perf_counter()-start,4)))
     return output,report
 
 

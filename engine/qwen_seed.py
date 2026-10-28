@@ -47,6 +47,12 @@ def _load():
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, str(ADAPTER_DIR), is_trainable=False,
                                               local_files_only=True)
+        merged=False
+        if runtime.merge_adapter and ADAPTER_DIR.is_dir():
+            model=model.merge_and_unload(safe_merge=True)
+            merged=True
+        model._magicanvas_adapter_merged=merged
+        model._magicanvas_runtime=runtime.diagnostics()
         version_file = ADAPTER_DIR / "magicanvas_prompt_version.txt"
         try:
             if os.environ.get("MAGICANVAS_QWEN_PROMPT_VERSION"):
@@ -177,8 +183,7 @@ class QwenEarlyStoppingCriteria:
         return False
 
 
-def _output_budget(tokenizer,source,version,prompt_tokens,context_limit=8192):
-    """Estimate the actual JSON token cost and reserve space for every ID."""
+def _estimated_output_tokens(tokenizer,source,version):
     rows=[]
     for index,e in enumerate(source['elements']):
         if version in (2,3):
@@ -188,8 +193,22 @@ def _output_budget(tokenizer,source,version,prompt_tokens,context_limit=8192):
             row={'id':e['id'],'x':123.456,'y':123.456,'width':123.456,'height':123.456}
             if e['type']=='text':row['font_size']=123.456
         rows.append(row)
-    estimated=len(tokenizer(json.dumps({'elements':rows},separators=(',',':')),
-                            add_special_tokens=False)['input_ids'])
+    return len(tokenizer(json.dumps({'elements':rows},separators=(',',':')),
+                         add_special_tokens=False)['input_ids'])
+
+
+def _prompt_capacity(tokenizer,source,version,context_limit):
+    # Reserve inventory-sized JSON space before admitting a longer prompt.
+    # The generation budget may use all remaining context, up to 4096 tokens.
+    estimated=_estimated_output_tokens(tokenizer,source,version)
+    reserve=max(512,64*len(source['elements'])+128,int(estimated*1.15)+128)
+    return max(0,min(6000,context_limit-reserve)),reserve
+
+
+def _output_budget(tokenizer,source,version,prompt_tokens,context_limit=8192):
+    """Estimate the actual JSON token cost and reserve space for every ID."""
+    estimated=_estimated_output_tokens(tokenizer,source,version)
+    rows=source['elements']
     available=max(0,context_limit-prompt_tokens)
     return min(4096,available,max(512,96*len(rows)+256,int(estimated*1.75)+128))
 
@@ -312,11 +331,15 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
     marker=ADAPTER_DIR/'magicanvas_prompt_version.txt'
     if requested and marker.is_file() and marker.read_text().strip()!=requested:
         return None,'Qwen adapter prompt-version marker disagrees with requested format'
+    from time import perf_counter
+    load_started=perf_counter()
     loaded = _load()
+    load_seconds=perf_counter()-load_started
     if loaded is None:
         return None, f"Qwen unavailable (local weights/dependencies missing at {MODEL_DIR})"
     model, tokenizer, torch, device, prompt_version = loaded
     diagnostics={} if diagnostics is None else diagnostics
+    diagnostics.update(model_load_seconds=load_seconds,adapter_merged=bool(getattr(model,'_magicanvas_adapter_merged',False)),dtype=str(getattr(model,'dtype','unknown')),runtime=getattr(model,'_magicanvas_runtime',{}))
     by_id = {e["id"]: e for e in source["elements"]}
     targets = list(source["elements"])
     if not targets:
@@ -332,11 +355,24 @@ def generate_seed(source, target_canvas, base_elements, diagnostics=None):
             prompt = tokenizer.apply_chat_template(messages, tokenize=False,
                                                    add_generation_prompt=True)
         inputs = tokenizer(prompt, return_tensors="pt", truncation=False)
-        if inputs["input_ids"].shape[1] > 4096:
-            return None, (f"Qwen prompt exceeds the 4096-token safety limit "
-                          f"({inputs['input_ids'].shape[1]} tokens)")
-        inputs = {key: value.to(device) for key, value in inputs.items()}
         context_limit=min(8192,int(getattr(model.config,'max_position_embeddings',8192)))
+        original_tokens=int(inputs['input_ids'].shape[1])
+        compact=False
+        if prompt_version in (2,3) and len(targets)>16 and original_tokens>4096:
+            count=lambda text:len(tokenizer(text,add_special_tokens=False)['input_ids'])
+            messages=messages_for(source,target_canvas,version=prompt_version,
+                                  relation_token_counter=count,relation_token_budget=900)
+            try:prompt=tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True,enable_thinking=False)
+            except TypeError:prompt=tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
+            inputs=tokenizer(prompt,return_tensors='pt',truncation=False);compact=True
+        max_prompt,reserve=_prompt_capacity(tokenizer,source,prompt_version,context_limit)
+        diagnostics.update(original_prompt_tokens=original_tokens,prompt_tokens=int(inputs['input_ids'].shape[1]),
+                           relationship_compacted=compact,context_limit=context_limit,
+                           prompt_token_limit=max_prompt,minimum_output_reserve=reserve)
+        if inputs['input_ids'].shape[1]>max_prompt:
+            return None,(f"Qwen prompt exceeds context budget ({inputs['input_ids'].shape[1]} > {max_prompt} tokens; "
+                         f"{reserve} output tokens reserved within {context_limit})")
+        inputs = {key: value.to(device) for key, value in inputs.items()}
         max_tokens=_output_budget(tokenizer,source,prompt_version,inputs['input_ids'].shape[1],context_limit)
         if max_tokens<128:return None,'Qwen has insufficient remaining context for JSON output'
         expected_ids = {f"e{i:03d}" for i in range(len(source["elements"]))} if prompt_version in (2, 3) else set(by_id)

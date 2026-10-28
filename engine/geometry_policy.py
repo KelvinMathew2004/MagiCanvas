@@ -30,7 +30,9 @@ def ambient_shape(element, source=None):
                   and t['x']>=element['x']-1 and t['y']>=element['y']-1
                   and t['x']+t['width']<=element['x']+element['width']+1
                   and t['y']+t['height']<=element['y']+element['height']+1]
-        if len(children)>=2:return False
+        compact_copy=(len(children)==1 and element['width']*element['height']<.35*source['canvas']['width']*source['canvas']['height']
+                      and children[0]['width']*children[0]['height']>.45*element['width']*element['height'])
+        if len(children)>=2 or compact_copy:return False
     return alpha<.4
 
 
@@ -43,7 +45,8 @@ def _elastic_shapes(payload):
     source = json.loads(payload)
     sw, sh = source['canvas']['width'], source['canvas']['height']
     texts = [e for e in source['elements'] if e['type'] == 'text']
-    elastic = set()
+    from engine.nested_structure import regional_surfaces
+    elastic = set(regional_surfaces(source))
     for e in source['elements']:
         if e['type'] != 'shape' or e.get('shape_type', 'rectangle') not in ('rectangle', 'rounded_rectangle', 'line'):
             continue

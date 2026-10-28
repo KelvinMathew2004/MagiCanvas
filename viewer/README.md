@@ -46,6 +46,28 @@ uses standard-library HTTP serving, not a new backend framework. Browser preview
 limits (12,000px per side / 40 million pixels / 500 elements / 4 MB task JSON) are
 resource guards for development only, not engine constraints.
 
+## Repeated-request latency and timings
+
+The preview keeps up to eight exact results / 32 MiB in memory. A repeat uses
+that exact prior Qwen-enabled result and is explicitly labelled **cached previous
+result**; it is not described as fresh inference. Keys bind source, target,
+assets, fonts and model configuration. Changes invalidate the result; failed
+requests are never cached. Concurrent preview computations are serialized so
+one local model/GPU is not oversubscribed. This does not parallelize tokens or
+make a new target size instantaneous.
+
+Fresh status shows model time separately from layout/verification. Timings are
+also in response JSON (`timings`, `inference`, `cache_hit`, `computed_seconds`).
+For generation benchmarks set `MAGICANVAS_PREVIEW_CACHE=0`. Weights/fonts/code
+remain loaded in process: restart the server after replacing them.
+
+Native Metal automatically uses an in-memory LoRA merge. Eight fresh independent
+conversions retained identical final outputs while taking about 8.6% less time
+in one M1 Pro comparison. Five raw completions changed, so this is not a bit-exact
+model equivalence promise. `MAGICANVAS_QWEN_MERGE_ADAPTER=0` disables merging for
+comparison; `=1` explicitly enables it elsewhere. Downloaded weights stay unchanged.
+See [full measurements](../docs/CHAMELEON_ALGORITHM_UPGRADES.md).
+
 ## Content-derived appearance
 
 The viewer starts with neutral light/dark surfaces and follows the operating

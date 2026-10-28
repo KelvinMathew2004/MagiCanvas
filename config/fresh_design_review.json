@@ -1,0 +1,123 @@
+{
+  "description": "Supplemental fresh, supplied and portrait-to-skyscraper development cases; excluded from the fixed 38 and training labels.",
+  "cases": [
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f01__to__square",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f01__to__portrait",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f02__to__widescreen",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f02__to__square",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f03__to__leaderboard",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f03__to__story",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f04__to__portrait",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "fresh",
+      "pair_id": "fresh:f04__to__square",
+      "prediction_report": "data/chameleon_upgrade_audit/fresh_apple/report.json"
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u02__to__requested",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u02__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u03__to__requested",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u03__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u04__to__requested",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u04__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u05__to__requested",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "supplied",
+      "pair_id": "supplied:u05__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "User-supplied complex stress design; illustrative local artwork and Solstice fonts substituted with permission. Original geometry/text retained; festival duplicate ID renamed only in this test copy. Not an official or confirmed hidden-test sample."
+    },
+    {
+      "cohort": "skyscraper",
+      "pair_id": "portrait:n04__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "Portrait source selected by source complexity and family diversity, resized to 160\u00d7600. No human target or target geometry used."
+    },
+    {
+      "cohort": "skyscraper",
+      "pair_id": "portrait:5e4facf31cc98b350aeffeeb__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "Portrait source selected by source complexity and family diversity, resized to 160\u00d7600. No human target or target geometry used."
+    },
+    {
+      "cohort": "skyscraper",
+      "pair_id": "portrait:5ef32868499b85dcc76e66fc__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "Portrait source selected by source complexity and family diversity, resized to 160\u00d7600. No human target or target geometry used."
+    },
+    {
+      "cohort": "skyscraper",
+      "pair_id": "portrait:5f3b7921a637ee11e3188a19__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "Portrait source selected by source complexity and family diversity, resized to 160\u00d7600. No human target or target geometry used."
+    },
+    {
+      "cohort": "skyscraper",
+      "pair_id": "portrait:5f0415c7499b85dcc7a2d9b1__to__skyscraper",
+      "prediction_report": "data/prompt_capacity_ab/0.6b/report.json",
+      "source_note": "Portrait source selected by source complexity and family diversity, resized to 160\u00d7600. No human target or target geometry used."
+    }
+  ]
+}

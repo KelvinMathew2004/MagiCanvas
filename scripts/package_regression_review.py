@@ -27,7 +27,7 @@ def package(packet=PACK,test_log=None):
     viewer=packet/'review/regression_suite'
     manifest=json.loads((viewer/'run_manifest.json').read_text())
     fp=fingerprint(ROOT/'config/regression_review.json')
-    if fp['files_sha256']!=manifest['fingerprint']['files_sha256']:
+    if any(fp.get(k)!=manifest['fingerprint'].get(k) for k in ('files_sha256','model','model_weights','adapter','layout_experiments')):
         raise SystemExit('Viewer is stale: replay the fixed cohort before packaging.')
     summary=json.loads((viewer/'summary.json').read_text());rows=json.loads((viewer/'manifest.json').read_text())
     changed=[r for r in summary['results'] if r['max_geometry_change']>1e-4]
@@ -42,7 +42,10 @@ def package(packet=PACK,test_log=None):
     flow_note='No additional dense-packing replay summary supplied.'
     if flow:
         hashes={str(p.relative_to(ROOT)):sha256(p.read_bytes()).hexdigest() for p in (ROOT/'engine').glob('*.py')}
-        if flow.get('engine_sha256')!=hashes:raise SystemExit('Dense reflow evidence is stale; regenerate its summary.')
+        if flow.get('engine_sha256')!=hashes:
+            flow=None
+            flow_note='Older dense reflow evidence belongs to its recorded earlier engine snapshot. It is historical and excluded from this current compact packet; the fixed 38 below were freshly replayed.'
+    if flow:
         flow_note=(f"Measured text/backing packing and Qwen-driven macro bands are now available. "
             f"The four attachment tasks have {sum(bool(r['flags']) for r in flow['attachments'])} flagged outputs; "
             f"both reviewed leaderboards replace their tiny proportional fallback. "
@@ -52,18 +55,18 @@ def package(packet=PACK,test_log=None):
             "Many human-rejected outputs remain unchanged. See docs/DENSE_REFLOW_AUDIT.md, "
             "evidence/dense_reflow_summary.json and the additional image sheets. "
             "No claim that every rejected design is fixed or that zero flags means visually perfect.")
-    latest=f'''# Current unified regression review — October 27, 2026
+    latest=f'''# Current unified regression review — October 28, 2026
 
 Open `review/regression_suite/index.html` (the main-engine URL points here).
-All {len(rows)} conversions share one engine snapshot: 18 official, eight
-independently authored alternate conversions, eight complex held-out and four
-complex validation dataset cases. Only Original and Resized are displayed.
+All {len(rows)} conversions share one engine snapshot: the fixed 38
+(18 official, eight original alternates and 12 complex dataset cases) plus
+{summary.get('supplemental_cases',0)} supplemental conversions, including fresh independent designs and supplied/skyscraper stress cases. Only Original and Resized are displayed.
 Intermediates, actual raw validity and selected-candidate diagnostics are in
 per-case audit JSON. Zero automated flags is not proof of aesthetic perfection.
 
 ## Current changes
 
-Read docs/ENGINE_UPGRADE_CHECKLIST.md and docs/ENGINE_UPGRADE_RESULTS.md first.
+Read docs/NESTED_REFLOW_AUDIT.md for the latest source-scope, repeated-row, card-grid and measured-type changes, then docs/ENGINE_UPGRADE_CHECKLIST.md and docs/ENGINE_UPGRADE_RESULTS.md.
 Implemented bounded missing-ID completion, gated atomic sibling grid/row/column
 candidates, exact full-document/backing render reuse, equivalent vectorized
 glyph statistics, capability-aware runtimes and fail-closed adapter-required
@@ -74,7 +77,7 @@ than duplicated. No design IDs or content strings drive the engine.
 
 Both arms keep Qwen enabled and use the same cached raw predictions and adapter.
 The baseline is the frozen prior engine; the after arm uses current code.
-This 38-case comparison is not Qwen-off or fresh model generation.
+The fixed 38-case comparison is not Qwen-off or fresh model generation. Supplemental cases use recorded Qwen-enabled outcomes, including explicit no-proposal refusals, then frozen replay; inference provenance is recorded separately.
 {len(changed)} output geometries changed; {len(flips)} winners flipped;
 {len(added)} cases acquired new automated flag types. {len(flagged)} current
 outputs still have automated flags. Inspect those outliers and winner changes
@@ -87,7 +90,7 @@ cases were chosen by complexity/family diversity, not selected for good outputs.
 
 ## Next steps
 
-Prior fresh generation, replayed through the current engine, is documented in evidence/engine_upgrade_dense_ab_summary.json
+Historical fresh generation and its earlier selector replay are documented in evidence/engine_upgrade_dense_ab_summary.json
 and review/dense_ab/index.html in the full local packet. Generation seconds
 belong to the earlier inference run. Raw exact IDs improve
 12/20 to 20/20 with 1.7B, but final learned-family wins stay 5/20 in both arms.
@@ -96,13 +99,14 @@ takes ~1.8 times longer. The default remains 0.6B. No Qwen retraining is indicat
 by the missing-ID experiment alone; the larger model still loses seven/eight
 authored layouts to deterministic candidates despite complete inventories.
 
-The completed 168-slot export is verified; the previous 44 choices are unchanged.
-Six/eight repeats agree. Two ambiguous originals are quarantined and no repeated
-vote inflates training. The combined safe corpus has 178 pairs / 64 family
-components (45 train, seven validation, 12 test). The fixed-configuration ranker
-matches zero-shot at 9/17 validation preferences, so no head is saved/deployed.
-All 39 test comparisons remain unscored. Read PREFERENCE_CAMPAIGN_PLAN.md and
-evidence/engine_upgrade_preference_complete_training.json. No Qwen retraining.
+The completed human campaign has 178 eligible pairs, with repeats/quarantines
+preserved. The earlier 768-dimensional image head tied at 9/17 validation and
+was not deployed. A subsequent fixed ten-feature structural/raster pilot matched
+14/17 validation and 31/37 verified test preferences (versus 9/17 and 26/37).
+Five exact-pixel reconstruction failures were excluded. The actual campaign
+validation subset only tied at 5/8, so the new head also is not deployed. The
+37 test outcomes have now been consumed; do not call them sealed or tune to them.
+Read docs/CHAMELEON_ALGORITHM_UPGRADES.md and evidence/chameleon_structural_ranker_report.json.
 
 A generic source-contact growth fix prevents a backing from expanding into
 adjacent media. Measured container packing now addresses short-slot capacity;
@@ -133,7 +137,7 @@ One complete replay reduced filesystem discovery from 54,437 calls to 307
 rendered pixel buffers identical; the later contact fix has the scope above. Timings were noisy under concurrent
 work; no portable speedup or 6–12 second runtime is claimed.
 
-The compact sibling ZIP contains all 38 current original/resized contact sheets,
+The compact sibling ZIP contains all current original/resized contact sheets,
 selected output/raw/source JSON, important current code and evidence. It excludes
 weights, full assets and fonts and is a review packet, not a runnable submission.
 '''
@@ -141,7 +145,7 @@ weights, full assets and fonts and is a review packet, not a runnable submission
     prompt='''# Gemini review request
 
 Read LATEST_UPDATE.md, docs/ENGINE_UPGRADE_RESULTS.md and the checklist first.
-Review the 38 current original/resized comparisons. Distinguish model proposals
+Review the current unified original/resized comparisons (the fixed 38 plus the supplemental cohorts in config/fresh_design_review.json). Distinguish model proposals
 from engine-selected layouts. Identify repeated root causes, avoid design-ID
 patches, and propose bounded changes with regression checks. Do not assume that
 zero flags means clean alignment, that 1.7B is automatically better, or that
@@ -155,7 +159,7 @@ Historical documents have their own earlier scope; current evidence is named
 unified_regression_*. No adapter or full assets are distributed in this packet.
 '''
     (packet/'GEMINI_REVIEW_PROMPT.md').write_text(prompt)
-    (packet/'README_FOR_GEMINI.md').write_text('Current review: read LATEST_UPDATE.md and GEMINI_REVIEW_PROMPT.md first. Open review/regression_suite/index.html for all 38 current Original/Resized comparisons. Important code and evidence are refreshed by package_regression_review.py. Other review folders and audit documents are historical checkpoints with their own scope. The sibling compact ZIP is the small current upload; neither packet includes model weights or full assets/fonts.\n')
+    (packet/'README_FOR_GEMINI.md').write_text('Current review: read LATEST_UPDATE.md and GEMINI_REVIEW_PROMPT.md first. Open review/regression_suite/index.html for all current Original/Resized comparisons. Important code and evidence are refreshed by package_regression_review.py. Other review folders and audit documents are historical checkpoints with their own scope. The sibling compact ZIP is the small current upload; neither packet includes model weights or full assets/fonts.\n')
     for dirname in ('code/engine','code/scripts','code/tests','docs','evidence','config'):(packet/dirname).mkdir(parents=True,exist_ok=True)
     sources=list((ROOT/'engine').glob('*.py'))+[ROOT/p for p in (
         'scripts/refresh_regression_viewer.py','scripts/package_regression_review.py','scripts/replay_qwen_engine.py',
@@ -168,14 +172,23 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         'scripts/prepare_preference_campaign.py','scripts/preference_campaign_sources.py',
         'scripts/preference_campaign_view.py','scripts/benchmark_asset_lookup.py',
         'scripts/audit_attachment_growth.py','scripts/replay_campaign_attachments.py',
+        'scripts/audit_chameleon_import.py','scripts/audit_competitor_repositories.py','scripts/build_layout_library.py',
+        'scripts/build_fresh_review_designs.py','scripts/build_novel_level3_designs.py','scripts/evaluate_fresh_review_designs.py','scripts/runtime_diagnostics.py',
+        'tests/test_native_runtime.py','tests/test_fresh_review_designs.py','tests/test_user_design_stress.py','tests/test_replay_pairs.py',
+        'scripts/audit_nested_reflow.py','tests/test_nested_structure.py','tests/test_followup_layout.py','docs/GEMINI_FOLLOWUP_DECISIONS.md','scripts/prepare_user_design_stress.py','scripts/evaluate_skyscraper_stress.py','scripts/compare_capacity_models.py','scripts/publish_capacity_comparison.py','tests/test_prompt_capacity.py',
+        'scripts/benchmark_layout_retrieval.py','scripts/calibrate_structural_ranker.py','scripts/profile_viewer_request.py',
+        'tests/test_retrieval_algorithms.py','tests/test_structural_ranker.py','tests/test_preview_cache.py',
+        'viewer/server.py','viewer/preview_cache.py','viewer/app.js','engine/data/README.md',
         'scripts/replay_reviewed_outliers.py','scripts/summarize_dense_reflow.py',
         'tests/test_copy_axis_contracts.py','tests/test_layout_mechanics.py','tests/test_macro_layout.py',
         'tests/test_measured_container_flow.py','tests/test_upgrade_primitives.py','tests/test_request_cache.py','tests/test_control_attachment_growth.py','tests/test_preference_labels.py','tests/test_qwen_pipeline.py','tests/test_source_evidence.py','Dockerfile')]
+    sources += sorted((ROOT/'tests/fixtures/user_level3_sources').glob('u*.json'))
     for p in sources:
         target=packet/'code'/p.relative_to(ROOT);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,target)
-    for name in ('DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
+    for name in ('GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','COMPETITOR_REPOSITORY_AUDIT.md','CHAMELEON_ALGORITHM_UPGRADES.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
         shutil.copy2(ROOT/'docs'/name,packet/'docs'/name)
     shutil.copy2(ROOT/'config/regression_review.json',packet/'config/regression_review.json')
+    shutil.copy2(ROOT/'config/fresh_design_review.json',packet/'config/fresh_design_review.json')
     shutil.copy2(ROOT/'README.md',packet/'CURRENT_PROJECT_README.md')
     for src,name in [(viewer/'summary.json','unified_regression_summary.json'),(viewer/'run_manifest.json','unified_regression_manifest.json')]:
         shutil.copy2(src,packet/'evidence'/name)
@@ -195,12 +208,46 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     for source,name in [(upgrade/'attachment_growth/report.json','attachment_growth_candidates.json'),(upgrade/'attachment_engine_replay/summary.json','attachment_growth_engine.json'),(upgrade/'attachment_engine_replay/contact.jpg','attachment_growth_comparison.jpg'),(upgrade/'attachment_regression_contact.jpg','attachment_regression_comparison.jpg')]:
         if source.is_file():shutil.copy2(source,packet/'evidence'/name)
     for name in ('dense_reflow_summary.json','dense_reflow_attachments.jpg','dense_reflow_reviewed.jpg'):
-        if (upgrade/name).is_file():shutil.copy2(upgrade/name,packet/'evidence'/name)
+        if flow and (upgrade/name).is_file():shutil.copy2(upgrade/name,packet/'evidence'/name)
+    # Metadata/reports only: normalized training library and weights remain local.
+    study=ROOT/'data/chameleon_upgrade_audit'
+    for path in ('summary.json','branches/branch_inventory.json','branches/isolated_gen_probes.json',
+                 'library/summary.json','retrieval_benchmark.json','structural_ranker/report.json',
+                 'viewer_before/report.json','viewer_merged/report.json','viewer_http/report.json','viewer_http_current/report.json','competitors/summary.json',
+                 'native_fresh_comparison.json','runtime_diagnostics.json','regression_pixels.json'):
+        src=study/path
+        if src.is_file():shutil.copy2(src,packet/'evidence'/('chameleon_'+path.replace('/','_')))
+    note=ROOT/'docs/CHAMELEON_ALGORITHM_UPGRADES.md'
+    if note.exists():
+        (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Latest algorithm and latency study\n\nRead docs/CHAMELEON_ALGORITHM_UPGRADES.md, docs/COMPETITOR_REPOSITORY_AUDIT.md and evidence/chameleon_summary.json. Retrieval/dual-granularity remain experimental; the calibrated ranker is not deployed. Native Metal selects FP16 and in-memory adapter merge automatically; ARM64 Linux alone does not expose Metal. New task generation and repeat caching are measured separately.\n')
+    for src,name in [(ROOT/'data/user_design_stress/source_integrity.json','skyscraper_source_integrity.json'),
+                     (ROOT/'data/user_design_stress/run_v2/summary.json','skyscraper_fresh_summary.json')]:
+        if src.is_file():shutil.copy2(src,packet/'evidence'/name)
+    (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Supplied and skyscraper stress expansion\n\nRead docs/SKYSCRAPER_STRESS_RESULTS.md. Four supplied designs use authorized local illustrative artwork/fonts. The original duplicate-ID input remains a rejection test. Thirteen additional conversions keep Qwen enabled; nine target 160×600. The initial prompt-refusal run is historical; current capacity/model results are documented separately. Residual output defects are listed in the current unified summary. A font-program measurement crash is fixed using renderer metrics on the exceptional path. Full original/source/output geometry remains available in audit files.\n')
+    run_signature=sha256(json.dumps(manifest['fingerprint'],sort_keys=True).encode()).hexdigest()[:16]
+    reuse=ROOT/'data/qwen_lora/regression_suite'/run_signature/'reused_engine_results.json'
+    if reuse.is_file():shutil.copy2(reuse,packet/'evidence/unified_regression_reused_engine_results.json')
+    capacity=ROOT/'data/prompt_capacity_ab'
+    for path in ('capacity_probe.json','grouping_audit.json','prior46_render_check/report.json','selector/comparison.json','selector/manifest.json',
+                 '0.6b/run_manifest.json','1.7b/run_manifest.json'):
+        src=capacity/path
+        if src.is_file():shutil.copy2(src,packet/'evidence'/('capacity_'+path.replace('/','_')))
+    (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Prompt capacity and model comparison\n\nRead docs/PROMPT_CAPACITY_AND_MODEL_DECISIONS.md and evidence/capacity_selector_comparison.json. Dense prompts keep the leaf schema and pair-tuple relation vocabulary; a 900-token relation budget and dynamic output reservation replace the old 4096-token veto. The historical model arms used matching adapters and the same selector recorded in their manifests. They are not newly replayed after the nested-reflow changes; stale alternatives are hidden in the current viewer. Original incomplete inventories remain incomplete for raw-validity reporting. A zero-denominator recovery guard retains normal defect gates. The structural ranker and macro-only model contract remain experimental; no public adapter upload or new training occurred.\n')
+    nested=ROOT/'data/nested_reflow_audit/final/summary.json'
+    if nested.is_file():
+        evidence=json.loads(nested.read_text())
+        if evidence.get('run','').endswith(run_signature):
+            shutil.copy2(nested,packet/'evidence/nested_reflow_summary.json')
+            (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Nested reflow release audit\n\nRead docs/NESTED_REFLOW_AUDIT.md and evidence/nested_reflow_summary.json for source ownership, exact baseline/render identity checks and remaining limitations.\n')
+    followup=ROOT/'data/gemini_followup_audit/final/summary.json'
+    if followup.is_file() and json.loads(followup.read_text()).get('run','').endswith(run_signature):
+        shutil.copy2(followup,packet/'evidence/followup_reflow_summary.json')
+        (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Gemini follow-up verification\n\nRead docs/GEMINI_FOLLOWUP_DECISIONS.md and evidence/followup_reflow_summary.json for decisions on all 25 proposals, exact baseline comparisons and remaining defects. This is saved-proposal engine verification, not fresh inference or a model upgrade.\n')
     # The private adapter context contains weights and is deliberately never copied.
     overview=packet/'review/index.html'
-    overview.write_text('<!doctype html><meta charset="utf-8"><title>MagiCanvas review</title><h1>Current engine review</h1><p><a href="regression_suite/index.html">Unified 38-case Original/Resized viewer</a></p><p><a href="attachment_growth/index.html">Current source-attachment outliers</a></p><p><a href="reviewed_outliers/index.html">Human-rejected tasks: current replay</a></p><p><a href="dense_ab/index.html">Fresh 20-case model A/B (experimental)</a></p><p><a href="preferences_campaign/review.html">Large actual-engine preference campaign</a></p><p>Read LATEST_UPDATE.md and ENGINE_UPGRADE_RESULTS.md. No model-off arm, public upload or automatically generated approvals.</p>')
+    overview.write_text('<!doctype html><meta charset="utf-8"><title>MagiCanvas review</title><h1>Current engine review</h1><p><a href="regression_suite/index.html">Unified Original/Resized viewer</a></p><p><a href="attachment_growth/index.html">Source-attachment outliers (snapshot in audit)</a></p><p><a href="reviewed_outliers/index.html">Human-rejected tasks (snapshot in audit)</a></p><p><a href="dense_ab/index.html">Historical 20-case model A/B</a></p><p><a href="preferences_campaign/review.html">Large actual-engine preference campaign</a></p><p>Read LATEST_UPDATE.md and ENGINE_UPGRADE_RESULTS.md. No model-off arm, public upload or automatically generated approvals.</p>')
     page=viewer/'index.html'
-    nav='<p id="upgrade-links"><a href="../attachment_growth/index.html">Measured attachment outliers</a> · <a href="../reviewed_outliers/index.html">Human-rejected task replay</a> · <a href="../dense_ab/index.html">Fresh model A/B experiment</a> · <a href="../preferences_campaign/review.html">Human preference campaign</a></p>'
+    nav='<p id="upgrade-links"><a href="../attachment_growth/index.html">Attachment outliers (audit snapshot)</a> · <a href="../reviewed_outliers/index.html">Human-rejected tasks (audit snapshot)</a> · <a href="../dense_ab/index.html">Historical model A/B</a> · <a href="../preferences_campaign/review.html">Human preference campaign</a></p>'
     body=page.read_text()
     if 'id="upgrade-links"' not in body:page.write_text(body.replace('</header>',nav+'</header>'))
     else:
@@ -214,10 +261,12 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     for p in sources:
         dest=stage/'code'/p.relative_to(ROOT);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
     shutil.copy2(ROOT/'config/regression_review.json',stage/'config/regression_review.json')
+    shutil.copy2(ROOT/'config/fresh_design_review.json',stage/'config/fresh_design_review.json')
     for p in (packet/'docs').glob('*.md'):
-        if p.name in ('DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
+        if p.name in ('GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','COMPETITOR_REPOSITORY_AUDIT.md','CHAMELEON_ALGORITHM_UPGRADES.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
     for p in (packet/'evidence').glob('*'):
-        if p.name.startswith(('unified_regression_','copy_axis_','engine_upgrade_','attachment_','dense_reflow_','preference_campaign_','asset_lookup_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
+        if not flow and p.name.startswith('dense_reflow_'):continue
+        if p.name.startswith(('chameleon_','unified_regression_','copy_axis_','engine_upgrade_','attachment_','dense_reflow_','preference_campaign_','asset_lookup_','skyscraper_','capacity_','nested_reflow_','followup_reflow_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
     additional=packet/'review/reviewed_outliers'
     if additional.is_dir():
         for p in additional.glob('*_audit.json'):shutil.copy2(p,stage/'cases'/('additional_'+p.name))
@@ -233,8 +282,24 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         (stage/'cases'/f'{i:02d}_audit.json').write_text(json.dumps(audit,indent=2)+'\n')
         shutil.copy2(viewer/row['json'],stage/'cases'/f'{i:02d}_output.json')
         cards.append(f'<article><h2>{html.escape(row["case"])}</h2><img loading="lazy" src="{image}" alt="Original and resized"><p>{html.escape(row["cohort"])} · {html.escape(row["winner"])} · flags {html.escape(str(row["defect_flags"]))}</p><a href="cases/{i:02d}_audit.json">Audit JSON</a></article>')
-    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All 38 current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. <a href="evidence/dense_reflow_attachments.jpg">Current attachment repair</a> · <a href="evidence/dense_reflow_reviewed.jpg">Current human-rejected tasks</a>.</p>'+''.join(cards))
-    (stage/'README_FOR_GEMINI.md').write_text('Read LATEST_UPDATE.md, then GEMINI_REVIEW_PROMPT.md. Open index.html for all 38 comparisons. Current engine code and per-case raw/source/output geometry are included. Historical archives, model weights, full assets and fonts are excluded. This packet is not runnable standalone.\n')
+    alternatives=viewer/'model_17';extra_images=0
+    comparison=ROOT/'data/prompt_capacity_ab/selector/comparison.json'
+    if alternatives.is_dir() and comparison.is_file():
+        different={r['pair_id'] for r in json.loads(comparison.read_text())['comparisons'] if not r['same_output']}
+        for i,row in enumerate(json.loads((alternatives/'manifest.json').read_text())):
+            key=f'model17_{i:02d}'
+            shutil.copy2(alternatives/row['audit'],stage/'cases'/f'{key}_audit.json')
+            shutil.copy2(alternatives/row['json'],stage/'cases'/f'{key}_output.json')
+            if row['pair_id'] not in different:continue
+            sheet=Image.new('RGB',(1200,700),'#182532');draw=ImageDraw.Draw(sheet)
+            for col,(label,field) in enumerate((('Original','source'),('Resized · 1.7B','image'))):
+                with Image.open(alternatives/row[field]) as im:
+                    im=im.convert('RGB');im.thumbnail((580,650));sheet.paste(im,(col*600+(600-im.width)//2,38+(650-im.height)//2))
+                draw.text((col*600+10,12),label,fill='white')
+            image=f'images/{key}.jpg';sheet.save(stage/image,quality=82,optimize=True);extra_images+=1
+            cards.append(f'<article><h2>1.7B alternative · {html.escape(row["case"])}</h2><img loading="lazy" src="{image}" alt="Original and resized with 1.7B"><p>Same current selector · flags {html.escape(str(row["defect_flags"]))}. Ten other final outputs are identical to the default arm.</p><a href="cases/{key}_audit.json">Audit JSON</a></article>')
+    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. Read docs/CHAMELEON_ALGORITHM_UPGRADES.md for current experiments; older dense outlier evidence retains its own snapshot.</p>'+''.join(cards))
+    (stage/'README_FOR_GEMINI.md').write_text('Read LATEST_UPDATE.md, then GEMINI_REVIEW_PROMPT.md. Open index.html for all comparisons. Current engine code and per-case raw/source/output geometry are included. Historical archives, model weights, full assets and fonts are excluded. This packet is not runnable standalone.\n')
     digest_manifest(stage)
     backup=small.with_name(small.name+'.previous')
     if backup.exists():shutil.rmtree(backup)
@@ -247,7 +312,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     with zipfile.ZipFile(temporary) as z:
         if z.testzip():raise RuntimeError('ZIP verification failed')
     temporary.replace(dest);digest_manifest(packet)
-    print(json.dumps(dict(cases=len(rows),images=len(rows),compact_zip=str(dest),zip_bytes=dest.stat().st_size,changed=len(changed),winner_flips=len(flips),new_flag_cases=len(added),flagged=len(flagged))))
+    print(json.dumps(dict(cases=len(rows),images=len(rows)+extra_images,compact_zip=str(dest),zip_bytes=dest.stat().st_size,changed=len(changed),winner_flips=len(flips),new_flag_cases=len(added),flagged=len(flagged))))
 
 
 if __name__=='__main__':
