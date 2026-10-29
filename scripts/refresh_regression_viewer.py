@@ -48,7 +48,9 @@ def fingerprint(config):
     # Model weights stay local; record size/mtime plus configuration, without
     # hashing/loading a multi-GB base on each refresh.
     weights={p.name:[p.stat().st_size,p.stat().st_mtime_ns] for p in sorted((ROOT/spec['model']).glob('*.safetensors'))}
-    return dict(files_sha256=hashes,model=spec['model'],model_weights=weights,adapter=spec['adapter'],layout_experiments=dict(macro_library=os.environ.get('MAGICANVAS_EXPERIMENTAL_MACRO_LIBRARY')=='1'))
+    return dict(files_sha256=hashes,model=spec['model'],model_weights=weights,adapter=spec['adapter'],layout_experiments=dict(
+        macro_library=os.environ.get('MAGICANVAS_EXPERIMENTAL_MACRO_LIBRARY')=='1',
+        vision_tiled=os.environ.get('MAGICANVAS_SIGLIP_TILED','').strip().lower() in ('1','true','yes','on')))
 
 
 def _job(task):
@@ -79,6 +81,18 @@ def _job(task):
     return dict(case=case,record=record,before=before,after=after)
 
 
+def documents_differ(a,b):
+    """Ignore sub-micro-pixel roundoff in the review filter, retain exact audits."""
+    from numbers import Real
+    from math import isclose
+    if isinstance(a,Real) and isinstance(b,Real):return not isclose(a,b,rel_tol=0.,abs_tol=1e-6)
+    if isinstance(a,dict) and isinstance(b,dict):
+        return a.keys()!=b.keys() or any(documents_differ(a[k],b[k]) for k in a)
+    if isinstance(a,list) and isinstance(b,list):
+        return len(a)!=len(b) or any(documents_differ(x,y) for x,y in zip(a,b))
+    return a!=b
+
+
 def publish(run,packet,spec):
     from scripts.build_focus_reflow_viewer import build,STYLE
     stage=packet/'review/regression_suite.next'
@@ -101,7 +115,7 @@ def publish(run,packet,spec):
     cards=[]
     for entry,case,result in zip(rows,spec['cases'],results):
         before=result.get('before');after=result['after'];source=after['source_design']
-        changed=bool(before and before['output_design']!=after['output_design'])
+        changed=bool(before and documents_differ(before['output_design'],after['output_design']))
         added=sorted(set(after['defect_flags'])-set(before['defect_flags'])) if before else []
         entry.update(pair_id=case['pair_id'],cohort=case['cohort'],changed=changed,new_flags=added,
             before_winner=before.get('winner') if before else None)

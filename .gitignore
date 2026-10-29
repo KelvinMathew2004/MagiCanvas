@@ -37,3 +37,7 @@ models/*
 /docs/*COMPETITOR*.md
 /scripts/audit_chameleon_import.py
 /scripts/audit_competitor_repositories.py
+
+# Archived competitor research remains private too.
+/docs/archive/CHAMELEON_*.md
+/docs/archive/*COMPETITOR*.md

@@ -467,9 +467,54 @@ def _skyscraper_seed(units,width,height,source_size):
     return output
 
 
+def _fit_rotated_control_label(label, authored, parent, source_parent, source, width, height):
+    """Fit owned type in its parent's local frame without moving/growing art.
+
+    Rotated labels and panels rotate about different centers. A global X/Y
+    widening pass cannot represent their available capacity. Measure locally,
+    preserve source line count and tracking, then use painted-ink centering.
+    """
+    from engine.layout_contracts import control_body,control_font_floor
+    body=control_body(parent);old_body=control_body(source_parent)
+    bw,bh=body[2]-body[0],body[3]-body[1]
+    sw,sh=old_body[2]-old_body[0],old_body[3]-old_body[1]
+    padx=max(0.,min(authored['x']-old_body[0],old_body[2]-authored['x']-authored['width']))
+    pady=max(0.,min(authored['y']-old_body[1],old_body[3]-authored['y']-authored['height']))
+    available_w=bw-2*padx*bw/max(1.,sw);available_h=bh-2*pady*bh/max(1.,sh)
+    ink=_render_text_ink(label)
+    if ink is None:return label,dict(unfittable=True,reason='local glyph measurement unavailable')
+    lines=max(1,_text_info(authored)[2])
+    if (ink[0]>=0 and ink[1]>=0 and ink[2]<=round(label['width']) and ink[3]<=round(label['height'])
+            and ink[2]-ink[0]<=available_w and ink[3]-ink[1]<=available_h and _text_info(label)[2]<=lines):
+        return label,None
+    if min(available_w,available_h)<1:return label,dict(unfittable=True,reason='no local parent capacity')
+    size=float(label['font_size']);floor=min(size,max(1.,control_font_floor(source,label['id'],width,height)))
+    def probe(font):
+        item=deepcopy(label);_set_font_size(item,font)
+        item.update(width=available_w,height=available_h)
+        bounds=_render_text_ink(item)
+        ok=bool(bounds and bounds[0]>=0 and bounds[1]>=0 and bounds[2]<=round(available_w)
+                and bounds[3]<=round(available_h) and _text_info(item)[2]<=lines)
+        return item,bounds,ok
+    fitted,bounds,ok=probe(size)
+    if not ok:
+        fitted,bounds,ok=probe(floor)
+        if not ok:return label,dict(unfittable=True,reason='readable type cannot fit its owned panel')
+        low,high=floor,size
+        for _ in range(12):
+            mid=(low+high)/2;item,ink,ok=probe(mid)
+            if ok:low=mid;fitted,bounds=item,ink
+            else:high=mid
+    fitted['height']=max(1.,ceil(bounds[3])+1.)
+    return fitted,dict(rotated_control_local_fit=True,font_before=size,font_after=fitted['font_size'],
+                       parent_id=parent['id'],measured_with='skia-render')
+
+
 def _calibrate_text_boxes(elements,source,width,height,tree=None):
     """Widen into empty space, then adjust height, then shrink only as needed."""
     result=deepcopy(elements);out={e['id']:e for e in result};src={e['id']:e for e in source['elements']}
+    from engine.layout_contracts import controls
+    control_parents={tid:pid for pid,tid in controls(source)}
     notes=[]
     for e in result:
         if e.get('type')!='text' or not e.get('content','').strip():continue
@@ -481,6 +526,11 @@ def _calibrate_text_boxes(elements,source,width,height,tree=None):
             and abs(float(e.get('rotation',0)))>.5
             and abs(float(out[sid].get('rotation',0))-float(e.get('rotation',0)))<.5),None)
         if rotated_parent is not None:
+            if control_parents.get(e['id'])==rotated_parent['id']:
+                fitted,note=_fit_rotated_control_label(e,authored,rotated_parent,src[rotated_parent['id']],source,width,height)
+                e.update(fitted)
+                if note:notes.append(dict(element_id=e['id'],**note))
+                continue
             # A shared rotated panel owns local glyph coordinates. Clamping
             # its label into the global axis-aligned panel box shifts and
             # shrinks correctly centered type on every fitting round.

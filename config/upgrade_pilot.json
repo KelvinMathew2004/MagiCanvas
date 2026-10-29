@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "model_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+      "directory": "models/qwen2.5-coder-1.5b-instruct",
+      "modality": "text"
+    },
+    {
+      "model_id": "google/siglip2-base-patch16-naflex",
+      "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+      "directory": "models/siglip2-naflex",
+      "modality": "vision"
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-2B",
+      "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "directory": "models/qwen3.5-2b",
+      "modality": "vision_language"
+    },
+    {
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "revision": "89644892e4d85e24eaac8bacfd4f463576704203",
+      "directory": "models/qwen3-vl-2b-instruct",
+      "modality": "vision_language"
+    }
+  ],
+  "production_changed": false
+}

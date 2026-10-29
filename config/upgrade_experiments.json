@@ -1,0 +1,598 @@
+{
+  "version": 2,
+  "reviewed_on": "2026-10-28",
+  "source": "User-provided Gemini suggestions plus primary-source model search",
+  "production_changed": true,
+  "priorities": {
+    "P0": "Cheap diagnostic first",
+    "P1": "Strong candidate for staged experiment",
+    "P2": "Conditional follow-up",
+    "P3": "Longer research track"
+  },
+  "evaluation": {
+    "qwen_enabled": true,
+    "model_quality": "Fresh inference, fixed selector and renderer",
+    "engine_quality": "Frozen raw proposals, fixed selector unless selector is treatment",
+    "release": "89 held-out development test + 309 validation, per-aspect reports; 59 reviewed development cases are not unseen",
+    "promotion": "No new hard violations; blind changed-winner review; measured quality/runtime/memory tradeoff; preserve all Stage-1 IDs/content"
+  },
+  "models": [
+    {
+      "model_id": "Qwen/Qwen3-0.6B",
+      "reason": "current_baseline",
+      "modality": "text",
+      "source": "https://huggingface.co/Qwen/Qwen3-0.6B"
+    },
+    {
+      "model_id": "Qwen/Qwen3-1.7B",
+      "reason": "existing_ab",
+      "modality": "text",
+      "source": "https://huggingface.co/Qwen/Qwen3-1.7B"
+    },
+    {
+      "model_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "reason": "alternate_text",
+      "modality": "text",
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    },
+    {
+      "model_id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+      "reason": "alternate_text_license_check",
+      "modality": "text",
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct"
+    },
+    {
+      "model_id": "microsoft/Phi-4-mini-instruct",
+      "reason": "alternate_text",
+      "modality": "text",
+      "source": "https://huggingface.co/microsoft/Phi-4-mini-instruct"
+    },
+    {
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "reason": "older_vlm_comparator",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct"
+    },
+    {
+      "model_id": "google/gemma-3-4b-it",
+      "reason": "older_vlm_comparator",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/google/gemma-3-4b-it"
+    },
+    {
+      "model_id": "google/siglip2-base-patch16-224",
+      "reason": "current_visual_baseline",
+      "modality": "vision",
+      "source": "https://huggingface.co/google/siglip2-base-patch16-224"
+    },
+    {
+      "model_id": "google/siglip2-base-patch16-512",
+      "reason": "high_resolution_ab",
+      "modality": "vision",
+      "source": "https://huggingface.co/google/siglip2-base-patch16-512"
+    },
+    {
+      "model_id": "google/siglip2-so400m-patch14-384",
+      "reason": "high_cost_visual_ab",
+      "modality": "vision",
+      "source": "https://huggingface.co/google/siglip2-so400m-patch14-384"
+    },
+    {
+      "model_id": "google/siglip2-base-patch16-naflex",
+      "reason": "priority_visual_ab",
+      "modality": "vision",
+      "source": "https://huggingface.co/google/siglip2-base-patch16-naflex"
+    },
+    {
+      "model_id": "facebook/dinov2-small",
+      "reason": "saliency_ab",
+      "modality": "vision",
+      "source": "https://huggingface.co/facebook/dinov2-small"
+    },
+    {
+      "model_id": "apple/aimv2-large-patch14-224",
+      "reason": "saliency_ab_license_check",
+      "modality": "vision",
+      "source": "https://huggingface.co/apple/aimv2-large-patch14-224"
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-0.8B",
+      "reason": "priority_small_new_model",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B"
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-2B",
+      "reason": "priority_new_model",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen3.5-2B"
+    },
+    {
+      "model_id": "Qwen/Qwen3.5-4B",
+      "reason": "upper_cost_new_model",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen3.5-4B"
+    },
+    {
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "reason": "priority_vlm_comparator",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+      "reason": "upper_cost_vlm",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct"
+    },
+    {
+      "model_id": "google/gemma-4-E2B-it",
+      "reason": "eligibility_check_total_parameters",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/google/gemma-4-E2B-it"
+    },
+    {
+      "model_id": "google/gemma-4-E4B-it",
+      "reason": "eligibility_check_total_parameters",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/google/gemma-4-E4B-it"
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolLM3-3B",
+      "reason": "alternate_text",
+      "modality": "text",
+      "source": "https://huggingface.co/HuggingFaceTB/SmolLM3-3B"
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+      "reason": "small_vlm_comparator",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    },
+    {
+      "model_id": "LiquidAI/LFM2.5-1.2B-Instruct",
+      "reason": "conditional_license_and_runtime_review",
+      "modality": "text",
+      "source": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct"
+    },
+    {
+      "model_id": "LiquidAI/LFM2.5-VL-1.6B",
+      "reason": "conditional_license_and_runtime_review",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B"
+    },
+    {
+      "model_id": "microsoft/Phi-4-mini-flash-reasoning",
+      "reason": "hybrid_runtime_compatibility_check",
+      "modality": "text",
+      "source": "https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning"
+    },
+    {
+      "model_id": "LiquidAI/LFM3-1.7B",
+      "reason": "conditional_license_and_runtime_review",
+      "modality": "text",
+      "source": "https://huggingface.co/LiquidAI/LFM3-1.7B"
+    },
+    {
+      "model_id": "LiquidAI/LFM3-VL-2B",
+      "reason": "conditional_license_and_runtime_review",
+      "modality": "vision_language",
+      "source": "https://huggingface.co/LiquidAI/LFM3-VL-2B"
+    },
+    {
+      "model_id": "LiquidAI/LFM2.5-2.6B",
+      "reason": "conditional_license_and_runtime_review",
+      "modality": "text",
+      "source": "https://huggingface.co/LiquidAI/LFM2.5-2.6B"
+    },
+    {
+      "model_id": "microsoft/Phi-4-mini-reasoning",
+      "reason": "google_followup_concrete_small_reasoning",
+      "modality": "text",
+      "source": "https://huggingface.co/microsoft/Phi-4-mini-reasoning"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Coder-Next",
+      "reason": "excluded_small_active_large_total",
+      "modality": "text",
+      "source": "https://huggingface.co/Qwen/Qwen3-Coder-Next"
+    }
+  ],
+  "proposals": [
+    {
+      "id": "M01",
+      "title": "Code-pretrained text generators",
+      "status": "pinned_coder15_downloaded_untuned_grammar_pilot_no_learned_resize_wins",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "M02",
+      "title": "Phi-4-mini dense reasoning",
+      "status": "needs_matching_adapter",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "M03",
+      "title": "Source-image VLM generation",
+      "status": "qwen3_vl2_native_source_image_and_text_pilots_identical_decoded_geometry",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "M04",
+      "title": "Fixed-inventory tensor generator / diffusion / CVAE",
+      "status": "needs_dataset_and_training",
+      "priority": "P3",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "M05",
+      "title": "High-resolution or NaFlex visual judge",
+      "status": "178_preference_retrospective_plus89_pair_selector_ab_tiling_optional_default_off_naflex_not_promoted",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "M06",
+      "title": "Semantic saliency using DINO/AIM/SigLIP",
+      "status": "134_task_low_level_raster_calm_proxy_tested_semantic_subject_grounder_not_implemented",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "D01",
+      "title": "Exact ordered-ID grammar (XGrammar/Outlines/logits processor)",
+      "status": "implemented_optin_native06_pilot_usable_fields3_to6_of6_final_outputs_identical",
+      "priority": "P0",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "D02",
+      "title": "Renderer-solved font size / line-count contract",
+      "status": "owned_rotated_type_fit_adopted_59_selected_outputs_unchanged_391_tests_passed",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "D03",
+      "title": "Macro-tree / slicing adapter",
+      "status": "needs_new_contract_training",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "D04",
+      "title": "GRPO / DPO render-grounded tuning",
+      "status": "needs_reward_validation",
+      "priority": "P3",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "D05",
+      "title": "Batched diverse best-of-K proposals",
+      "status": "sequential_k3_four_task_pilot_no_final_gain_samples_physically_unsafe_not_promoted",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "D06",
+      "title": "Dense synthetic / transitive / partial training pairs",
+      "status": "needs_family_split_audit",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "F01",
+      "title": "Shared-scale intact-container growth",
+      "status": "134_requests19_changes_geometry_gain_font_regression_visual_edge_crowding_rejected_for_production",
+      "priority": "P2",
+      "document": "docs/ALGORITHM_FOLLOWUP.md",
+      "evidence_document": "docs/ALGORITHM_FOLLOWUP.md"
+    },
+    {
+      "id": "F02",
+      "title": "Exact glyph order-statistic partition",
+      "status": "32366_exact_calls_only0p221s_total_saved_not_meaningful_end_to_end_rejected_for_production",
+      "priority": "P2",
+      "document": "docs/ALGORITHM_FOLLOWUP.md",
+      "evidence_document": "docs/ALGORITHM_FOLLOWUP.md"
+    },
+    {
+      "id": "F03",
+      "title": "CTA hierarchy and width caps",
+      "status": "source_relative_logic_exists",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "F04",
+      "title": "Fold short annotations into copy columns",
+      "status": "generic_ownership_experiment",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "F05",
+      "title": "Sparse-output structural-ranker tie-break",
+      "status": "134_task_existing_head_finalist_ab_7_changes_reference_mae_worse_not_promoted",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "A01",
+      "title": "CP-SAT discrete macro packing",
+      "status": "134_tasks_74_packing_proposals_33_rendered_3_changes_source_lockup_regressions_not_promoted",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "A02",
+      "title": "Ordered variable-width peer row DP",
+      "status": "already_implemented",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "A03",
+      "title": "L-BFGS-B continuous micro-polish",
+      "status": "134_task_rigid_lbfgsb_pilot_32_rendered_no_replacement_margin_met",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "A04",
+      "title": "Distance-transform whitespace / floating placement",
+      "status": "134_task_histogram_vs_distance_transform_float_pilot_no_final_changes",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "A05",
+      "title": "Rendered glyph-ink centering",
+      "status": "already_implemented_bbox_not_centroid",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "A06",
+      "title": "Nearest calm-zone search / source-owned scrim",
+      "status": "134_task_bounded_color_texture_translation_2_official_changes_visual_lockup_regression_not_promoted",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "A07",
+      "title": "Expanded retrieval library / hierarchical matching",
+      "status": "267_training_only_layouts_105_families_134_task_retrieval_ab_mixed_visuals_reference_mae_worse",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "R01",
+      "title": "Merged quantized GGUF / ONNX Docker backend",
+      "status": "isolated_cpu_backend_ab",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "R02",
+      "title": "Draft-target speculative decoding",
+      "status": "native_17_target_06_draft_three_actual_resizes_all_slower_token_parity2_of3_not_promoted",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md"
+    },
+    {
+      "id": "R03",
+      "title": "Prompt lookup decoding",
+      "status": "local_probe",
+      "priority": "P0",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "R04",
+      "title": "Font metrics lookup table",
+      "status": "exact_caches_exist_profile_first",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "R05",
+      "title": "Coarse-to-fine render shortlist",
+      "status": "134_requests_quota_funnel_lost2_required_families_only2p76pct_render_saving_rejected_for_production",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/ALGORITHM_FOLLOWUP.md"
+    },
+    {
+      "id": "U01",
+      "title": "Six-format campaign matrix and brand report",
+      "status": "stage2_feature",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U02",
+      "title": "Pin / lock and reflow",
+      "status": "stage2_constraint_contract",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U03",
+      "title": "Three diverse safe candidate options",
+      "status": "stage2_feature",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U04",
+      "title": "User-approved condense / omission mode",
+      "status": "stage2_only_never_automatic_legal_drop",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U05",
+      "title": "X-ray guides / contrast / transition preview",
+      "status": "stage2_metric_accuracy_required",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U06",
+      "title": "Natural-language validated layout constraints",
+      "status": "stage2_feature",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "U07",
+      "title": "Animated HTML5 export",
+      "status": "stage2_export_project",
+      "priority": "P3",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "N01",
+      "title": "Newer small Qwen3.5 and Qwen3-VL",
+      "status": "qwen35_2b_and_vl2b_pinned_downloaded_native_pilots_no_production_promotion",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md",
+      "evidence_document": "docs/archive/UPGRADE_PILOT_RESULTS.md"
+    },
+    {
+      "id": "N02",
+      "title": "Newer Gemma4 / Smol / Liquid / Phi-flash alternatives",
+      "status": "metadata_verified_needs_eligibility_ab",
+      "priority": "P2",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "N03",
+      "title": "Google AI follow-up: Coder sub-3B / reasoning / VL / flow matching",
+      "status": "names_and_size_claims_verified_or_corrected",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "B01",
+      "title": "Judge-facing swappable model packages vs adapter transfer",
+      "status": "two_local_pairs_checked_cross_size_rejected_runtime_profiles_planned",
+      "priority": "P0",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "B02",
+      "title": "Follow-up model, license and kernel audit",
+      "status": "primary_terms_and_installed_code_checked_causal_claims_not_proven",
+      "priority": "P0",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "B03",
+      "title": "Dependency-free prefix forcing and source-defect follow-ups",
+      "status": "revised_prototype_requirements_no_speed_or_completion_guarantee",
+      "priority": "P1",
+      "document": "docs/archive/UPGRADE_EXPLORATION_AND_EVALUATION.md"
+    },
+    {
+      "id": "S01",
+      "title": "Line-count and bounded width-slack type recovery",
+      "status": "134_tasks_source_goal_no_edit_raw_goal10_changes4_unsafe_not_promoted",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "S02",
+      "title": "Dual raw/rotated envelope clamp",
+      "status": "500_random_rotation_property_checks_cited_test_leak_roundoff_no_final_mutation",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "S03",
+      "title": "Topological lockup fracture and occupancy gate",
+      "status": "14_prior_changes_filtered8_owned_survivors89_pair_mae_worse_not_promoted",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "S04",
+      "title": "Dense micro-banner quarantine and floor relaxation",
+      "status": "existing_no_paint_rules_verified3_grid_caps_and_dual_clamp_no_clean_readable_solution",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "S05",
+      "title": "Aspect/top-two/margin tiled critic",
+      "status": "178_cached_preferences_gate13_accuracy107_vs109_global_not_promoted_no_latency_guarantee",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "S06",
+      "title": "Native training-target cleaning and line sidecars",
+      "status": "1231_geometry_audits32_native_targets_no_auto_deletion_or_prompt_change",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "X01",
+      "title": "Per-text isolated/leave-one-out glyph auditing",
+      "status": "32_targets111_texts_offline_only_no_new_training",
+      "priority": "P1",
+      "document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "I01",
+      "title": "Renderer-measured paragraph balancing",
+      "status": "134_requests13_proposals9_changes_no89_pair_change_rejected_for_production",
+      "priority": "P2",
+      "document": "docs/INDUSTRY_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/INDUSTRY_ALGORITHM_DECISIONS.md"
+    },
+    {
+      "id": "I02",
+      "title": "Bounded intact-group neighborhood search",
+      "status": "134_requests621_proposals1_survivor_no_general_quality_gain_rejected_for_production",
+      "priority": "P2",
+      "document": "docs/INDUSTRY_ALGORITHM_DECISIONS.md",
+      "evidence_document": "docs/INDUSTRY_ALGORITHM_DECISIONS.md"
+    }
+  ],
+  "source_sha256": "2b7a85ee667f3f1ccb3ac92697540f578c161c9d1d62fe780ff88ef9a1d5f6b2",
+  "priority_update": "Judge preference: verify and select model packages atomically; existing LoRA adapters do not transfer across different bases.",
+  "model_profiles": "config/layout_model_profiles.json",
+  "followup_source_sha256": "3884ac29b76a102a57b087715259fc781af6b7d3c8561d5c51cddf00ecbce5d3",
+  "pilot_config": "config/upgrade_pilot.json",
+  "pilot_results": "docs/archive/UPGRADE_PILOT_RESULTS.md",
+  "production_change_scope": "Owned-label repair plus optional fixed global/tiled SigLIP scoring; tiling off by default. Generator and default selector unchanged.",
+  "training_free_scale_results": "docs/archive/TRAINING_FREE_SCALE_RESULTS.md",
+  "surgical_followup_document": "docs/SURGICAL_ALGORITHM_DECISIONS.md",
+  "surgical_source_sha256": "2adbc57df9e6fa3ec9ec3cb2d4cf5145d48f97d02714cc637ae7ff4769967e4d",
+  "latest_algorithm_followup": "docs/INDUSTRY_ALGORITHM_DECISIONS.md"
+}

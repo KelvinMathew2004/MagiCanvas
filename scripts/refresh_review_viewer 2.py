@@ -24,7 +24,7 @@ def refresh(packet: Path = PACK) -> None:
         dest=review/'chameleon_audit';dest.mkdir(exist_ok=True)
         for path in audit.iterdir():
             if path.is_file():shutil.copy2(path,dest/path.name)
-        shutil.copy2(ROOT/'docs/CHAMELEON_PORT_REVIEW.md',packet/'docs/CHAMELEON_PORT_REVIEW.md')
+        shutil.copy2(ROOT/'docs/archive/CHAMELEON_PORT_REVIEW.md',packet/'docs/archive/CHAMELEON_PORT_REVIEW.md')
         for name in ('audit_chameleon_import.py','refresh_review_viewer.py'):
             dest=packet/'code/scripts'/name;dest.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(ROOT/'scripts'/name,dest)
@@ -41,7 +41,7 @@ def refresh(packet: Path = PACK) -> None:
     if (review/'official_fixes/index.html').exists():
         links.insert(0,('official_fixes/index.html','Official resize fixes · before / after','Artwork proportions and text/image clearance, compared with the frozen prior engine.'))
     tiles=''.join(f'<a class="tile" href="{url}"><h2>{html.escape(title)}</h2><p class="muted">{html.escape(detail)}</p></a>' for url,title,detail in links)
-    (review/'index.html').write_text('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MagiCanvas · latest verified review</title><style>'+STYLE+'</style><header><p class="tag">Updated October 26, 2026</p><h1>Latest verified engine outputs</h1><p class="muted">Current render checkpoint: '+html.escape(checkpoint)+'. Exact earlier model predictions replayed through the verified engine.</p><p class="notice">The Chameleon review is an implementation plan. These images show the current MagiCanvas engine. Passing automated checks does not establish aesthetic perfection.</p><nav class="nav"><a href="../docs/RIGID_ART_REVIEW.md">Engine changes and limitations</a><a href="../docs/CHAMELEON_PORT_REVIEW.md">Chameleon porting analysis</a></nav></header><main class="tiles">'+tiles+'</main></html>')
+    (review/'index.html').write_text('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MagiCanvas · latest verified review</title><style>'+STYLE+'</style><header><p class="tag">Updated October 26, 2026</p><h1>Latest verified engine outputs</h1><p class="muted">Current render checkpoint: '+html.escape(checkpoint)+'. Exact earlier model predictions replayed through the verified engine.</p><p class="notice">The Chameleon review is an implementation plan. These images show the current MagiCanvas engine. Passing automated checks does not establish aesthetic perfection.</p><nav class="nav"><a href="../docs/archive/RIGID_ART_REVIEW.md">Engine changes and limitations</a><a href="../docs/archive/CHAMELEON_PORT_REVIEW.md">Chameleon porting analysis</a></nav></header><main class="tiles">'+tiles+'</main></html>')
     labels={'novel_designs':'New authored designs','novel_validation':'Validation designs','dataset_diversity':'Additional held-out','official':'Official levels 1–3','crello':'Crello / 0.6B','crello_1p7b':'Crello / 1.7B'}
     def group(row):
         if row.get('group') in labels:return row['group']

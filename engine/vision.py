@@ -174,7 +174,7 @@ def _relationship_prompts(context):
     return tuple(positive),tuple(negative)
 
 
-def score_layouts(images, reference_image=None, layout_context=None):
+def _score_layouts_global(images, reference_image=None, layout_context=None):
     """Rank candidate renders by learned design quality.
 
     Args:
@@ -247,3 +247,39 @@ def score_layouts(images, reference_image=None, layout_context=None):
         return scores,note
     except Exception as exc:
         return None, f"SigLIP scoring failed: {exc}"
+
+
+def _layout_tiles(image):
+    """Three bounded square views at native aspect; square inputs need one."""
+    width,height=image.size;side=min(width,height)
+    if width==height:return [image]
+    offsets=[round((max(width,height)-side)*fraction) for fraction in (0.,.5,1.)]
+    return [image.crop((x,0,x+side,height) if width>height else (0,x,width,x+side)) for x in offsets]
+
+
+def score_layouts(images, reference_image=None, layout_context=None):
+    """Global default, with an opt-in fixed global/three-tile tie-break.
+
+    MAGICANVAS_SIGLIP_TILED=1 enables the measured experimental mode. It
+    retains the contextual prompts and source continuity cue. The caller's
+    physical gates and allowed cost band still decide eligibility. This is
+    not a trained text critic and does not guarantee a better design.
+    """
+    if os.environ.get('MAGICANVAS_SIGLIP_TILED','').strip().lower() not in ('1','true','yes','on'):
+        return _score_layouts_global(images,reference_image,layout_context)
+    images=list(images)
+    # Avoid applying a global-image-trained preference head to cropped views,
+    # and bound this optional path without expanding arbitrary external input.
+    if not images or len(images)>32 or _load_ranker() is not None:
+        return _score_layouts_global(images,reference_image,layout_context)
+    expanded=[];counts=[]
+    for image in images:
+        local=_layout_tiles(image);expanded.extend([image,*local]);counts.append(len(local)+1)
+    scores,note=_score_layouts_global(expanded,reference_image,layout_context)
+    if scores is None or len(scores)!=len(expanded):
+        return _score_layouts_global(images,reference_image,layout_context)
+    result=[];offset=0
+    for count in counts:
+        local=scores[offset:offset+count];offset+=count
+        result.append(.5*float(local[0])+.5*sum(float(s) for s in local[1:])/(count-1))
+    return result,note+'; optional fixed half-global/half-three-tiles'

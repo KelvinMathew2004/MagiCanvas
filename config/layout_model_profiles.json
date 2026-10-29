@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "scope": "Audited model packages for the existing environment-selected loader. This manifest does not change the running server or production default.",
+  "proposal_contract": "normalized-elements-v2",
+  "profiles": {
+    "qwen3_0p6b": {
+      "base_model_id": "Qwen/Qwen3-0.6B",
+      "model_dir": "models/qwen3-0.6b",
+      "adapter_dir": "models/qwen3-layout-lora-v2",
+      "training_base_alias": "unsloth/Qwen3-0.6B-unsloth-bnb-4bit",
+      "prompt_version": 2,
+      "model_type": "qwen3",
+      "hidden_size": 1024,
+      "base_revision": null,
+      "adapter_revision": null,
+      "status": "current_default"
+    },
+    "qwen3_1p7b": {
+      "base_model_id": "Qwen/Qwen3-1.7B",
+      "model_dir": "models/qwen3-1.7b",
+      "adapter_dir": "models/qwen3-layout-lora-v2-expanded-1.7b",
+      "training_base_alias": "Qwen/Qwen3-1.7B",
+      "prompt_version": 2,
+      "model_type": "qwen3",
+      "hidden_size": 2048,
+      "base_revision": null,
+      "adapter_revision": null,
+      "status": "optional_existing_ab_package"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "date": "2026-10-29",
+  "production_changed": false,
+  "qwen_enabled": true,
+  "fresh_inference": false,
+  "reference_geometry_for_reporting_only": true,
+  "arms": {
+    "paragraph-balance": {"minimum_width_ratio": 0.70, "width_steps": 24, "minimum_rag_gain": 0.25, "maximum_lines": 6},
+    "group-neighborhood": {"maximum_proposals": 12, "maximum_groups": 16, "split_step": 0.08, "minimum_quality_gain": 2.0}
+  },
+  "gates": {"new_flags_allowed": 0, "render_only_best_geometry_proposal_per_arm": true, "baseline_always_retained": true},
+  "scope": "134 already-consumed development requests; identical recorded Qwen predictions and current production baseline. A new candidate never overwrites production."
+}
