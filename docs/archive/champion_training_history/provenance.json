@@ -1,0 +1,51 @@
+{
+  "adapter_addition_commit": "ae0fe91c975037f74279e33727d6a53c4c8571a0",
+  "historical_files": [
+    {
+      "commit": "210a68b887c1f13f2b50117708d33a51c2cd2292",
+      "source": "docs/QWEN_LORA_COLAB.md",
+      "recovered_file": "QWEN_LORA_COLAB_210a68b.md",
+      "sha256": "4cdba4e4b011165ea1b6953ff237d884b73c17c9681b87194404e148300c6a25"
+    },
+    {
+      "commit": "210a68b887c1f13f2b50117708d33a51c2cd2292",
+      "source": "scripts/prepare_qwen_training.py",
+      "recovered_file": "prepare_qwen_training_210a68b.py",
+      "sha256": "b94c7b4d287c61b814afe59d53f0b6fd2d78d85fc663992a183b6b38fc7d636e"
+    },
+    {
+      "commit": "ae0fe91c975037f74279e33727d6a53c4c8571a0",
+      "source": "docs/QWEN_LORA_COLAB.md",
+      "recovered_file": "QWEN_LORA_COLAB_ae0fe91.md",
+      "sha256": "26e420baf528444088efc3342588b0fb82ea403847be19ae5b14e1c6ddf47c4e"
+    },
+    {
+      "commit": "ae0fe91c975037f74279e33727d6a53c4c8571a0",
+      "source": "scripts/prepare_qwen_training.py",
+      "recovered_file": "prepare_qwen_training_ae0fe91.py",
+      "sha256": "6c0ec2cfc0802e260b34132f5a8eb21b8f977e23c1eadb2bb64fd47890277800"
+    }
+  ],
+  "installed_adapter_comparison": {
+    "adapter_model.safetensors": {
+      "sha256": "6ebbbe8d20e88504a1ecbb9fb6d5c9466df1c111bde84f099a6f788089d3c63b",
+      "bytes": 40422168,
+      "matches_installed": true
+    },
+    "adapter_config.json": {
+      "sha256": "b353e7eec0bde052bdfc2cdfd59eb99d95e1599f15ca468e94c06532ff1dd5cf",
+      "bytes": 1325,
+      "matches_installed": true
+    },
+    "magicanvas_prompt_version.txt": {
+      "sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "bytes": 2,
+      "matches_installed": true
+    }
+  },
+  "limitations": [
+    "No original run log, training data hash or package lock was saved alongside this adapter.",
+    "The notebook was edited in the adapter-addition commit; both the preceding and same-commit versions are retained.",
+    "Historical scripts require their original repository context; they are not the current VLM training instructions."
+  ]
+}

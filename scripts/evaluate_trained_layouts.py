@@ -58,8 +58,29 @@ def promotion(baseline,candidate):
         note='Development/reference gates, not an unseen test. No adapter is installed automatically. Historical .04477334347 belongs to its recorded selector replay; the fresh baseline is also required.')
 
 
+def verify_recovered(adapter,model):
+    """A recovered checkpoint is evaluable, without inventing training provenance."""
+    from scripts.verify_qwen_adapter import verify
+    result=verify(adapter,model)
+    recovered=json.loads((adapter/'recovery_manifest.json').read_text())
+    for name,digest in recovered['files_sha256'].items():
+        if Path(name).name!=name or sha256((adapter/name).read_bytes()).hexdigest()!=digest:
+            raise ValueError('Recovered artifact changed: '+name)
+    if recovered['global_step']!=recovered['max_steps'] or recovered['completed_epochs']!=3:
+        raise ValueError('This comparison expects the completed three-epoch recovery')
+    cfg=json.loads((adapter/'adapter_config.json').read_text())
+    if cfg['base_model_name_or_path']!='Qwen/Qwen3-0.6B':raise ValueError('Recovered single-candidate path requires matching Qwen3-0.6B')
+    return dict(verification=result,recovery=recovered,original_training_manifest_present=(adapter/'training_manifest.json').is_file(),
+                limitation='Recovered weights are verified for evaluation; absent original bundle/environment provenance is not reconstructed.')
+
+
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--trained',type=Path,required=True);args=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__)
+    mode=p.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--trained',type=Path,help='Root containing all three finished training packages')
+    mode.add_argument('--candidate-adapter',type=Path,help='One recovered completed Qwen3-0.6B final export')
+    p.add_argument('--reuse-inference-from',type=Path,help='Replay matching saved predictions after an engine-only correction; never reuse final layouts')
+    args=p.parse_args()
     from scripts.refresh_regression_viewer import PACK,fingerprint
     from scripts.evaluate_qwen_adapter import run_engine_mode,read_sources,summarize_engine
     import engine.qwen_seed as qwen_seed
@@ -83,15 +104,23 @@ def main():
         source_map[(r['source_split'],key)]=after['source_design']
         r['pair_id']='review:'+r['pair_id'];records.append(r)
     if len(records)!=148:raise ValueError(f'Expected frozen 89+59, found {len(records)}')
+    if args.candidate_adapter:
+        # Start with current review tasks for early visual triage; every one of
+        # the 148 tasks is still required before reporting promotion gates.
+        records.sort(key=lambda r:not r['pair_id'].startswith('review:'))
     candidate_config=json.loads((ROOT/'config/training_candidates.json').read_text())
-    candidates=[s for key in candidate_config['training_queue'] for s in candidate_config['models'] if s['key']==key]
+    candidates=[] if args.candidate_adapter else [s for key in candidate_config['training_queue'] for s in candidate_config['models'] if s['key']==key]
     provider_specs={s['key']:s for s in candidates}
     specs=[('baseline',ROOT/'models/qwen3-0.6b',ROOT/'models/qwen3-layout-lora-v2')]
     specs += [(s['key'],ROOT/'models'/s['key'],args.trained/s['key']/'final') for s in candidates]
+    provenance={}
+    if args.candidate_adapter:
+        specs.append(('audited-0.6b-recovered',ROOT/'models/qwen3-0.6b',args.candidate_adapter.resolve()))
     from scripts.verify_qwen_adapter import verify
     from training.inference import verify_candidate,candidate_provider
     for name,model,adapter in specs:
         if name=='baseline':verify(adapter,model)
+        elif args.candidate_adapter:provenance[name]=verify_recovered(adapter,model)
         else:verify_candidate(adapter,model,provider_specs[name])
     from engine.resize import _asset_root
     assets={_asset_root(e)/e['asset_id'] for source in source_map.values() for e in source['elements']
@@ -101,24 +130,32 @@ def main():
         assets={str(p):sha256(p.read_bytes()).hexdigest() if p.is_file() else 'MISSING' for p in sorted(assets)},
         evaluator=sha256(Path(__file__).read_bytes()).hexdigest(),
         core_evaluator=sha256((ROOT/'scripts/evaluate_qwen_adapter.py').read_bytes()).hexdigest(),
+        inference_reuse_origin=str(args.reuse_inference_from.resolve()) if args.reuse_inference_from else None,
+        inference_reuse_code_sha256=sha256((ROOT/'scripts/reuse_adapter_inference.py').read_bytes()).hexdigest() if args.reuse_inference_from else None,
         inputs=sha256(json.dumps(dict(records=records,sources={str(k):v for k,v in source_map.items()}),sort_keys=True).encode()).hexdigest(),
         runtime_environment={k:v for k,v in os.environ.items() if k.startswith('MAGICANVAS_')},
         adapters={name:{p.name:sha256(p.read_bytes()).hexdigest() for p in sorted(adapter.iterdir())
             if p.suffix in ('.json','.txt','.safetensors')} for name,_,adapter in specs},
-        candidates=candidates,models={name:{p.name:sha256(p.read_bytes()).hexdigest() for p in sorted(model.iterdir())
+        candidates=candidates,recovered_candidate_provenance=provenance,models={name:{p.name:sha256(p.read_bytes()).hexdigest() for p in sorted(model.iterdir())
             if p.suffix in ('.json','.txt','.safetensors')} for name,model,_ in specs})
     folder=ROOT/'data/training_next/evaluation'/sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()[:16]
     folder.mkdir(parents=True,exist_ok=True);(folder/'manifest.json').write_text(json.dumps(signature,indent=2)+'\n')
+    print('Fresh paired evaluation folder:',folder,flush=True)
     os.environ['MAGICANVAS_REQUIRE_QWEN_ADAPTER']='1';os.environ['MAGICANVAS_QWEN_ENABLED']='1'
     results={}
     for name,model,adapter in specs:
-        if name=='baseline':
+        print('Starting arm:',name,'adapter:',adapter,flush=True)
+        if args.reuse_inference_from:
+            from scripts.reuse_adapter_inference import restore_predictions
+            restore_predictions(args.reuse_inference_from,folder,signature,name,records,source_map,adapter,model)
+        if name=='baseline' or args.candidate_adapter:
             results[name]=run_engine_mode(records,lambda split,sid:source_map[(split,sid)],adapter,model,folder/f'{name}.jsonl')
         else:
             with candidate_provider(provider_specs[name],model,adapter,folder/'source_images'):
                 results[name]=run_engine_mode(records,lambda split,sid:source_map[(split,sid)],adapter,model,folder/f'{name}.jsonl')
         if any(r.get('engine_error') for r in results[name]):raise RuntimeError(f'{name}: engine errors; inspect checkpoint, then resume')
-    report=dict(summaries={k:summarize_engine(v) for k,v in results.items()},
+    report=dict(summaries={k:summarize_engine(v) for k,v in results.items()},provenance=provenance,
+        qwen_enabled=True,fresh_inference=True,production_changed=False,
         gates={k:promotion(results['baseline'],results[k]) for k in results if k!='baseline'})
     (folder/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     publish(folder,results,report,PACK/'review/trained_adapters')
@@ -130,9 +167,13 @@ def publish(folder,results,report,dest):
     from renderer.converter.convert import render_design_to_png as brand_render
     dest.mkdir(parents=True,exist_ok=True);images=dest/'images';images.mkdir(exist_ok=True)
     cards=[]
+    published=[]
     for i,base in enumerate(results['baseline']):
         source=base['source_design'];split=base.get('source_split','train');official=base.get('official_path')
         def render(doc,path):
+            # Inert source spacer/zero-area elements remain in audit JSON but
+            # cannot be passed as nonpositive raster dimensions.
+            doc=deepcopy(doc);doc['elements']=[e for e in doc['elements'] if min(e['width'],e['height'])>0]
             if official:brand_render(doc,ROOT/'brand_kit/assets',path,fonts_dir=ROOT/'brand_kit/fonts')
             else:dataset_render(doc,ROOT/f'data/crello_{split}',path,ROOT/'data/crello_fonts.pickle',adjust_tight_text_widths=False)
         render(source,images/f'{i}-original.png')
@@ -140,9 +181,12 @@ def publish(folder,results,report,dest):
         for name,rows in results.items():
             r=rows[i];render(r['output_design'],images/f'{i}-{name}.png');audits[name]=r
             options.append(f'<option value="images/{i}-{name}.png">{html.escape(name)}</option>')
+        published.append(dict(index=i,pair_id=base['pair_id'],source=f'images/{i}-original.png',
+            outputs={name:f'images/{i}-{name}.png' for name in results},audit=f'{i}-audit.json'))
         (dest/f'{i}-audit.json').write_text(json.dumps(audits,ensure_ascii=False)+'\n')
         cards.append(f'<article><h2>{html.escape(base["pair_id"])}</h2><label>Resized model <select onchange="document.getElementById(\'r{i}\').src=this.value">'+''.join(options)+f'</select></label><div class="pair"><figure><figcaption>Original</figcaption><img src="images/{i}-original.png"></figure><figure><figcaption>Resized</figcaption><img id="r{i}" src="images/{i}-baseline.png"></figure></div><details><summary>Audit</summary><a href="{i}-audit.json">Raw and final geometry / flags</a></details></article>')
     (dest/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+    (dest/'manifest.json').write_text(json.dumps(published,indent=2)+'\n')
     (dest/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Fresh trained-adapter comparison</title><style>body{font:16px system-ui;background:#101820;color:#eee;margin:24px}article{padding:20px;border:1px solid #435160;margin:24px 0}.pair{display:grid;grid-template-columns:1fr 1fr}img{max-width:100%;max-height:680px;object-fit:contain}a{color:#acd5ff}</style><h1>Fresh inference: baseline and audited adapters</h1><p>All 148 development/reference tasks. Qwen enabled. Model selector changes only the Resized panel. Automatic gates do not certify aesthetic quality. <a href="report.json">Promotion report</a></p>'+''.join(cards))
 
 

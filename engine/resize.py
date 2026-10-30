@@ -5961,6 +5961,7 @@ def _adapt_with_diagnostics(source,target_canvas):
                             structural_pass_version=1,
                             container_tree={k:v for k,v in container_tree.items() if k!='source_elements'})
     if os.environ.get('MAGICANVAS_QWEN_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        proposal=None
         try:
             from engine.qwen_seed import generate_seed
             generation={}
@@ -5968,6 +5969,7 @@ def _adapt_with_diagnostics(source,target_canvas):
             qwen_diagnostics['generation']={k:v for k,v in generation.items() if k!='model_elements'}
             qwen_diagnostics['model_elements']=[dict(id=eid,**values) for eid,values in generation.get('model_elements',{}).items()]
             qwen_diagnostics['status'] = qwen_status
+            qwen_diagnostics['proposal_received'] = proposal is not None
             if proposal is not None:
                 from engine.qwen_refine import anchor_superscripts, font_variant
                 original_proposal=deepcopy(proposal)
@@ -6084,8 +6086,15 @@ def _adapt_with_diagnostics(source,target_canvas):
                     # sizes with source-scaled fonts, silently undoing the fit.
                     seeds.append(dict(name='qwen-font-fitted',elements=calibrated))
         except Exception as exc:
-            if os.environ.get('MAGICANVAS_REQUIRE_QWEN_ADAPTER')=='1':raise
-            qwen_status = f'Qwen proposal unavailable: {type(exc).__name__}: {exc}'
+            # Requiring a local adapter must fail closed during loading and
+            # generation. A later candidate-realization error is a different
+            # failure: retain its literal model diagnostics and let the other
+            # already generated candidates pass the normal visual gates.
+            if os.environ.get('MAGICANVAS_REQUIRE_QWEN_ADAPTER')=='1' and proposal is None:raise
+            if proposal is not None:
+                qwen_diagnostics['realization_error']=dict(type=type(exc).__name__,message=str(exc))
+            qwen_status = (f'Qwen decoded; realization failed: {type(exc).__name__}: {exc}' if proposal is not None
+                           else f'Qwen proposal unavailable: {type(exc).__name__}: {exc}')
             qwen_diagnostics['status'] = qwen_status
     for mode in ('split','copy-first','visual-first'):
         for share in (.30,.45,.60):

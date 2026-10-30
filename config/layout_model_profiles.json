@@ -26,6 +26,20 @@
       "base_revision": null,
       "adapter_revision": null,
       "status": "optional_existing_ab_package"
+    },
+    "qwen3_0p6b_audited_candidate": {
+      "base_model_id": "Qwen/Qwen3-0.6B",
+      "model_dir": "models/qwen3-0.6b",
+      "adapter_dir": "models/qwen3-0.6b-latest/final",
+      "training_base_alias": "Qwen/Qwen3-0.6B",
+      "prompt_version": 2,
+      "model_type": "qwen3",
+      "hidden_size": 1024,
+      "base_revision": null,
+      "adapter_revision": null,
+      "status": "evaluated_not_promoted",
+      "provenance": "Recovered checkpoint-210; original final training/environment manifest unavailable. Compatible local shape checks do not establish complete training-bundle or base-revision identity.",
+      "evaluation": "docs/RECOVERED_ADAPTER_EVALUATION.md"
     }
   }
 }

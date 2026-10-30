@@ -222,7 +222,17 @@ def test_image_conditioned_lora_backward_keeps_vision_frozen():
         labels=torch.tensor([[-100]*4+[6,7,8]]),quality_weight=torch.tensor([1.]),
         pixel_values=torch.rand(4,24),image_grid_thw=torch.tensor([[1,2,2]]),
         mm_token_type_ids=torch.tensor([[0,0,1,0,0,0,0]]))
-    loss,_=response_loss(model,inputs);loss.backward();assert torch.isfinite(loss)
+    model.eval()
+    loss,outputs=response_loss(model,inputs)
+    native={k:v for k,v in inputs.items() if k!='quality_weight'}
+    expected=model(**native).loss
+    assert torch.allclose(loss,expected,atol=1e-6)
+    # Identical text with different pixels must change the answer logits.
+    alternate={k:v for k,v in inputs.items() if k not in ('quality_weight','labels')}
+    alternate['pixel_values']=torch.zeros_like(alternate['pixel_values'])
+    with torch.no_grad():alternate_logits=model(**alternate,logits_to_keep=4).logits
+    assert not torch.equal(outputs.logits.detach(),alternate_logits)
+    loss.backward();assert torch.isfinite(loss)
     assert not any(p.requires_grad for n,p in model.named_parameters() if '.visual.' in n)
     assert any(p.grad is not None and bool((p.grad!=0).any()) for n,p in model.named_parameters() if 'lora_B' in n)
 

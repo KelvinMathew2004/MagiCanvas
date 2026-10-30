@@ -55,3 +55,16 @@ Needs the local Crello data/fonts, base/adapter and frozen prediction reports; t
 Open http://127.0.0.1:8766/review/main_engine_qwen_outputs/index.html using the existing static review server. This single viewer includes all 18 official conversions, eight independent alternate conversions, 12 complex dataset conversions and 21 supplemental stress conversions. Qwen remains enabled; deterministic winners are named honestly. The replay isolates engine changes with exact saved predictions and does not measure model generation speed. Restart `viewer/server.py` after engine, font or model edits.
 
 The wider 89 reference pairs and 309 validation rows complement the 59-case reviewed development suite. They have been used repeatedly and are not a sealed blind test. New adapter evaluation uses fresh inference: follow [TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md). Inspect winner changes and new defects; automated zero-flag results are not aesthetic approval.
+
+The recovered completed 0.6B export can be evaluated independently of the two
+pending Colab challengers:
+
+```bash
+.venv/bin/python scripts/evaluate_trained_layouts.py \
+  --candidate-adapter models/qwen3-0.6b-latest/final
+```
+
+This compares 89 reference pairs plus 59 review tasks, keeps production
+unchanged, and writes a separate Original/Resized model-comparison viewer.
+Recovery provenance, interrupted-run continuation and measured results are in
+[RECOVERED_ADAPTER_EVALUATION.md](RECOVERED_ADAPTER_EVALUATION.md).

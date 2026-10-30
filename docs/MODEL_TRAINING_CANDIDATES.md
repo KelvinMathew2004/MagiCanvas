@@ -1,8 +1,6 @@
 # Model training candidates and evidence
 
-The research is **not limited to the two existing Qwen3 bases**. Six model packages are prepared, but the prescribed first training queue contains only three jobs. The existing
-trained 0.6B remains the production incumbent; no new adapter has been trained
-or promoted on this Mac.
+The research is **not limited to the two existing Qwen3 bases**. Six model packages were prepared. The fresh 0.6B control finished in Colab, was evaluated on 89+59 tasks and was not promoted. The two remaining jobs now use a separate uniform-data bundle: VL-2B first, then 0.8B. The existing v2 adapter remains the production incumbent. No GPU training was performed on this Mac.
 
 | Package | Why it earns a training trial | Current evidence / limitation |
 |---|---|---|
@@ -75,8 +73,8 @@ and the [two-panel feasibility viewer](http://127.0.0.1:8766/review/training_can
 
 ## Implementation and next action
 
-Follow [TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md). It trains the selected three in sequence,
-resumes checkpoints on Drive and downloads separate adapters. The available Colab
+Follow [TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md). The current run selects VL-2B only and defers 0.8B, using unit weights and single-pass sampling. The launcher
+resumes only matching uniform checkpoints on Drive and downloads separate adapters. The available Colab
 T4 may attempt the unchanged sequential recipe using FP16; an L4 or larger also
 works. Each model first checks actual forward/backward/AdamW memory and finite
 gradients on long-input/long-answer rows. GPU training and 4-bit memory peaks

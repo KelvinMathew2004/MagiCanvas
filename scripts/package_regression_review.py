@@ -204,6 +204,11 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     sources += [ROOT/p for p in ('scripts/prepare_training_run.py','scripts/evaluate_trained_layouts.py','scripts/expand_training_candidates.py','tests/test_training_recipe.py')]
     sources += [ROOT/p for p in ('scripts/evaluate_scale_followup.py','scripts/report_scale_followup.py','tests/test_scale_followup.py')]
     sources += [ROOT/p for p in ('scripts/evaluate_industry_followup.py','scripts/report_industry_followup.py','tests/test_industry_followup.py')]
+    sources += [ROOT/p for p in ('tests/test_training_continuation.py','tests/test_recovered_adapter_evaluation.py',
+        'scripts/report_recovered_adapter.py','scripts/run_recovered_candidate_arm.py',
+        'scripts/publish_recovered_progress.py','scripts/package_adapter_review.py','scripts/audit_recovered_rasters.py',
+        'scripts/reuse_adapter_inference.py','tests/test_qwen_zero_span.py')]
+    sources += [ROOT/'scripts/enhance_adapter_viewer.py',ROOT/'scripts/audit_adapter_defect_stages.py',ROOT/'scripts/prepare_uniform_training_bundle.py']
     sources += sorted((ROOT/'training').glob('*.py'))+[ROOT/'training/requirements.txt',ROOT/'training/colab.ipynb']
     sources += sorted((ROOT/'experiments').rglob('*.py'))
     sources += [ROOT/'experiments/layout_upgrade/requirements.txt']
@@ -222,6 +227,9 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     shutil.copy2(ROOT/'docs/ALGORITHM_FOLLOWUP.md',packet/'docs/ALGORITHM_FOLLOWUP.md')
     shutil.copy2(ROOT/'config/industry_followup.json',packet/'config/industry_followup.json')
     shutil.copy2(ROOT/'docs/INDUSTRY_ALGORITHM_DECISIONS.md',packet/'docs/INDUSTRY_ALGORITHM_DECISIONS.md')
+    shutil.copy2(ROOT/'docs/TRAINING_CONTINUATION.md',packet/'docs/TRAINING_CONTINUATION.md')
+    shutil.copy2(ROOT/'docs/POST_TRAINING_EVALUATION_PLAN.md',packet/'docs/POST_TRAINING_EVALUATION_PLAN.md')
+    shutil.copy2(ROOT/'docs/RECOVERED_ADAPTER_EVALUATION.md',packet/'docs/RECOVERED_ADAPTER_EVALUATION.md')
     shutil.copy2(ROOT/'docs/archive/UPGRADE_PILOT_RESULTS.md',packet/'docs/UPGRADE_PILOT_RESULTS.md')
     shutil.copy2(ROOT/'docs/archive/TRAINING_FREE_SCALE_RESULTS.md',packet/'docs/TRAINING_FREE_SCALE_RESULTS.md')
     shutil.copy2(ROOT/'docs/SURGICAL_ALGORITHM_DECISIONS.md',packet/'docs/SURGICAL_ALGORITHM_DECISIONS.md')
@@ -374,6 +382,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     if training.is_file():
         shutil.copy2(training,packet/'evidence/upgrade_exploration_training_preparation.json')
         (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Current training preparation and submission docs\n\nRead docs/TRAINING_RUNBOOK.md and CURRENT_PROJECT_README.md. The portable recipe prepares six pinned providers and trains three distinct first-round packages: fresh 0.6B data control, Qwen3.5-0.8B and source-image-aware Qwen3-VL-2B, retains prompt v2 and compares fresh inference on 89+59 tasks before human review. Actual supervised targets are natively screened, with owned-mask confirmation for invisible-text exclusions. No new adapter was trained or promoted here. Full training/validation messages, line sidecars, fonts and weights remain local and are excluded from this packet. Public adapter upload and final offline Docker execution remain pending. Historical notes have moved under docs/archive; use docs/README.md for current instructions.\n')
+    (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Imported training checkpoint recovery\n\nThe user supplied Qwen3-0.6B checkpoints 70/140/210. Checkpoint 210 records three completed epochs and the best validation loss .7931865454; all 392 tensors are finite and a full matching-base PEFT load/CPU forward passed. An inference export is recovered locally; original final training/environment provenance was missing and is not fabricated. This imported adapter has not passed layout promotion gates or replaced production. See docs/TRAINING_CONTINUATION.md to run only the two pending challengers, with ten-step optimizer-state recovery saves. Twenty-four focused training/continuation tests passed, including an actual tiny CPU Trainer save/resume test. The weights and training data are excluded from this packet.\n')
     for name in ('candidate_preflight.json','new_model_smoke.json','frontier_screen.json','new_model_layout_summary.json'):
         src=ROOT/'data/training_next'/name
         if src.is_file():shutil.copy2(src,packet/'evidence'/('upgrade_exploration_training_'+name))
@@ -400,13 +409,28 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
             'Research comparisons: review/industry_followup/index.html. The preceding growth, quota and statistic arms are also explicitly rejected for production. '
             'The document distinguishes public Adobe/Canva behavior from unverified private implementation claims.\n')
     # The private adapter context contains weights and is deliberately never copied.
+    uniform=ROOT/'data/training_next/uniform_v1/preparation.json'
+    if uniform.is_file():
+        shutil.copy2(uniform,packet/'evidence/upgrade_exploration_uniform_preparation.json')
+        shutil.copy2(ROOT/'docs/VLM_TRAINING_VERIFICATION.md',packet/'docs/VLM_TRAINING_VERIFICATION.md')
+        shutil.copy2(ROOT/'scripts/verify_vlm_training_bundle.py',packet/'code/scripts/verify_vlm_training_bundle.py')
+        confirmation=ROOT/'data/training_next/vlm_full_confirmation.json'
+        if confirmation.is_file():
+            shutil.copy2(confirmation,packet/'evidence/upgrade_exploration_vlm_full_confirmation.json')
+        verified=ROOT/'data/training_next/uniform_vlm_verification.json'
+        if verified.is_file():shutil.copy2(verified,packet/'evidence/upgrade_exploration_uniform_vlm_verification.json')
+        with (packet/'LATEST_UPDATE.md').open('a') as stream:
+            stream.write('\n## Current remaining-training instructions\n\nThe new instructions-only TRAINING_RUNBOOK.md supersedes the older three-job weighted recipe. A separate hashed audited-uniform-v1 bundle retains 1,043 screened train / 309 validation rows and 971 source PNGs, with unit weights and one visit per row. The current user run selects VL-2B only and defers 0.8B, using a new uniform_v2_candidates directory. Checkpoint identity guards prevent mixing weighted and uniform runs. Modern multimodal and hybrid-projection providers are preserved. No CUDA training or new model gain is claimed. Read POST_TRAINING_EVALUATION_PLAN.md for the considered frame, contrast and group-box experiments; they remain separate from the first frozen-selector model comparison. The private uniform bundle is excluded from this ZIP.\n')
     overview=packet/'review/index.html'
     overview.write_text('<!doctype html><meta charset="utf-8"><title>MagiCanvas review</title><h1>Current engine review</h1><p><a href="regression_suite/index.html">Unified Original/Resized viewer</a></p><p><a href="attachment_growth/index.html">Source-attachment outliers (snapshot in audit)</a></p><p><a href="reviewed_outliers/index.html">Human-rejected tasks (snapshot in audit)</a></p><p><a href="dense_ab/index.html">Historical 20-case model A/B</a></p><p><a href="preferences_campaign/review.html">Large actual-engine preference campaign</a></p><p>Read LATEST_UPDATE.md and ENGINE_UPGRADE_RESULTS.md. No model-off arm, public upload or automatically generated approvals.</p>')
     page=viewer/'index.html'
+    from scripts.package_adapter_review import add_evidence,compact_cards
+    adapter_evidence=add_evidence(packet)
     nav='<p id="upgrade-links"><a href="../training_candidates/index.html">New-model feasibility / training queue</a> · <a href="../surgical_followup/index.html">Surgical follow-ups</a> · <a href="../training_free_scale/index.html">134-task algorithm comparison</a> · <a href="../training_free_selectors/index.html">Selector comparisons</a> · <a href="../upgrade_repair_followup/index.html">Repair/sampling snapshot</a> · <a href="../upgrade_pilots/index.html">Earlier model pilots (recorded snapshot)</a> · <a href="../attachment_growth/index.html">Attachment outliers (audit snapshot)</a> · <a href="../reviewed_outliers/index.html">Human-rejected tasks (audit snapshot)</a> · <a href="../dense_ab/index.html">Historical model A/B</a> · <a href="../preferences_campaign/review.html">Human preference campaign</a></p>'
     body=page.read_text()
     if (followup/'report.json').is_file():nav=nav.replace('id="upgrade-links">','id="upgrade-links"><a href="../scale_followup/index.html">134-task growth/render follow-up</a> · ')
     if (industry/'report.json').is_file():nav=nav.replace('id="upgrade-links">','id="upgrade-links"><a href="../industry_followup/index.html">Industry-algorithm decisions</a> · ')
+    if adapter_evidence:nav=nav.replace('id="upgrade-links">','id="upgrade-links"><a href="../trained_adapters/index.html">Fresh recovered-adapter A/B</a> · ')
     if 'id="upgrade-links"' not in body:page.write_text(body.replace('</header>',nav+'</header>'))
     else:
         import re
@@ -428,6 +452,10 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     shutil.copy2(ROOT/'docs/ALGORITHM_FOLLOWUP.md',stage/'docs/ALGORITHM_FOLLOWUP.md')
     shutil.copy2(ROOT/'config/industry_followup.json',stage/'config/industry_followup.json')
     shutil.copy2(ROOT/'docs/INDUSTRY_ALGORITHM_DECISIONS.md',stage/'docs/INDUSTRY_ALGORITHM_DECISIONS.md')
+    shutil.copy2(ROOT/'docs/TRAINING_CONTINUATION.md',stage/'docs/TRAINING_CONTINUATION.md')
+    shutil.copy2(ROOT/'docs/POST_TRAINING_EVALUATION_PLAN.md',stage/'docs/POST_TRAINING_EVALUATION_PLAN.md')
+    shutil.copy2(ROOT/'docs/VLM_TRAINING_VERIFICATION.md',stage/'docs/VLM_TRAINING_VERIFICATION.md')
+    shutil.copy2(ROOT/'docs/RECOVERED_ADAPTER_EVALUATION.md',stage/'docs/RECOVERED_ADAPTER_EVALUATION.md')
     shutil.copy2(ROOT/'docs/archive/UPGRADE_PILOT_RESULTS.md',stage/'docs/UPGRADE_PILOT_RESULTS.md')
     shutil.copy2(ROOT/'docs/archive/TRAINING_FREE_SCALE_RESULTS.md',stage/'docs/TRAINING_FREE_SCALE_RESULTS.md')
     shutil.copy2(ROOT/'docs/SURGICAL_ALGORITHM_DECISIONS.md',stage/'docs/SURGICAL_ALGORITHM_DECISIONS.md')
@@ -438,7 +466,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         if p.name in ('UPGRADE_EXPLORATION_AND_EVALUATION.md','GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','COMPETITOR_REPOSITORY_AUDIT.md','CHAMELEON_ALGORITHM_UPGRADES.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
     for p in (packet/'evidence').glob('*'):
         if not flow and p.name.startswith('dense_reflow_'):continue
-        if p.name.startswith(('upgrade_exploration_','chameleon_','unified_regression_','copy_axis_','engine_upgrade_','attachment_','dense_reflow_','preference_campaign_','asset_lookup_','skyscraper_','capacity_','nested_reflow_','followup_reflow_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
+        if p.name.startswith(('recovered_adapter_','upgrade_exploration_','chameleon_','unified_regression_','copy_axis_','engine_upgrade_','attachment_','dense_reflow_','preference_campaign_','asset_lookup_','skyscraper_','capacity_','nested_reflow_','followup_reflow_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
     additional=packet/'review/reviewed_outliers'
     if additional.is_dir():
         for p in additional.glob('*_audit.json'):shutil.copy2(p,stage/'cases'/('additional_'+p.name))
@@ -510,7 +538,8 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
                 draw.text((col*600+10,12),label,fill='white')
             image=f'images/{key}.jpg';sheet.save(stage/image,quality=82,optimize=True);extra_images+=1
             cards.append(f'<article><h2>1.7B alternative · {html.escape(row["case"])}</h2><img loading="lazy" src="{image}" alt="Original and resized with 1.7B"><p>Same current selector · flags {html.escape(str(row["defect_flags"]))}. Ten other final outputs are identical to the default arm.</p><a href="cases/{key}_audit.json">Audit JSON</a></article>')
-    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. Read docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md for current experiments; older dense outlier evidence retains its own snapshot.</p>'+''.join(cards))
+    if adapter_evidence:cards.extend(compact_cards(packet,stage))
+    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. Fresh adapter comparisons, when present, are labeled separately. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. Read docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md for current experiments; older dense outlier evidence retains its own snapshot.</p>'+''.join(cards))
     (stage/'README_FOR_GEMINI.md').write_text('Read LATEST_UPDATE.md, then GEMINI_REVIEW_PROMPT.md. Open index.html for all comparisons. Current engine code and per-case raw/source/output geometry are included. Historical archives, model weights, full assets and fonts are excluded. This packet is not runnable standalone.\n')
     digest_manifest(stage)
     backup=small.with_name(small.name+'.previous')
