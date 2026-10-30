@@ -21,4 +21,4 @@ Native macOS selects MPS FP16 and merges LoRA in memory for inference. CUDA sele
 
 ## Training boundary
 
-[TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md) prepares immutable, family-isolated v2 supervision and prepares six packages and trains three selected model-specific adapters under one controlled recipe. Line counts remain audit metadata. New adapters must pass raw and end-to-end comparisons before human review; training never replaces production automatically.
+[TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md) runs only the experimental VL-2B package from immutable, family-isolated, uniformly sampled v2 supervision plus source images. The completed 0.6B retraining was not promoted, and 0.8B is deferred. Line counts remain audit metadata. New adapters must pass raw and end-to-end comparisons before human review; training never replaces production automatically.

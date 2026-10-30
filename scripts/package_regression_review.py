@@ -230,6 +230,12 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     shutil.copy2(ROOT/'docs/TRAINING_CONTINUATION.md',packet/'docs/TRAINING_CONTINUATION.md')
     shutil.copy2(ROOT/'docs/POST_TRAINING_EVALUATION_PLAN.md',packet/'docs/POST_TRAINING_EVALUATION_PLAN.md')
     shutil.copy2(ROOT/'docs/RECOVERED_ADAPTER_EVALUATION.md',packet/'docs/RECOVERED_ADAPTER_EVALUATION.md')
+    shutil.copy2(ROOT/'docs/STARTER_INTEGRITY.md',packet/'docs/STARTER_INTEGRITY.md')
+    shutil.copy2(ROOT/'scripts/audit_starter_files.py',packet/'code/scripts/audit_starter_files.py')
+    for name in ('starter_files.json','helper_equivalence.json','relocation_comparison.json'):
+        source=ROOT/'data/submission_audit'/name
+        if source.is_file():
+            shutil.copy2(source,packet/'evidence'/('upgrade_exploration_submission_'+name))
     shutil.copy2(ROOT/'docs/archive/UPGRADE_PILOT_RESULTS.md',packet/'docs/UPGRADE_PILOT_RESULTS.md')
     shutil.copy2(ROOT/'docs/archive/TRAINING_FREE_SCALE_RESULTS.md',packet/'docs/TRAINING_FREE_SCALE_RESULTS.md')
     shutil.copy2(ROOT/'docs/SURGICAL_ALGORITHM_DECISIONS.md',packet/'docs/SURGICAL_ALGORITHM_DECISIONS.md')
@@ -456,6 +462,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     shutil.copy2(ROOT/'docs/POST_TRAINING_EVALUATION_PLAN.md',stage/'docs/POST_TRAINING_EVALUATION_PLAN.md')
     shutil.copy2(ROOT/'docs/VLM_TRAINING_VERIFICATION.md',stage/'docs/VLM_TRAINING_VERIFICATION.md')
     shutil.copy2(ROOT/'docs/RECOVERED_ADAPTER_EVALUATION.md',stage/'docs/RECOVERED_ADAPTER_EVALUATION.md')
+    shutil.copy2(ROOT/'docs/STARTER_INTEGRITY.md',stage/'docs/STARTER_INTEGRITY.md')
     shutil.copy2(ROOT/'docs/archive/UPGRADE_PILOT_RESULTS.md',stage/'docs/UPGRADE_PILOT_RESULTS.md')
     shutil.copy2(ROOT/'docs/archive/TRAINING_FREE_SCALE_RESULTS.md',stage/'docs/TRAINING_FREE_SCALE_RESULTS.md')
     shutil.copy2(ROOT/'docs/SURGICAL_ALGORITHM_DECISIONS.md',stage/'docs/SURGICAL_ALGORITHM_DECISIONS.md')

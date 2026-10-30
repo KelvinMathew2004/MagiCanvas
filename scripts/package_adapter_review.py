@@ -6,7 +6,12 @@ import json,shutil,html,sys
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 
 
-def completed_run(pointer=None):
+def engine_snapshot():
+    return {str(p.relative_to(ROOT)):sha256(p.read_bytes()).hexdigest()
+            for p in sorted((ROOT/'engine').glob('*.py'))}
+
+
+def completed_run(pointer=None, *, require_current_engine=True):
     pointer=pointer or ROOT/'data/training_next/latest_completed_evaluation.json'
     if not pointer.is_file():return None
     record=json.loads(pointer.read_text());run=Path(record['run'])
@@ -17,8 +22,8 @@ def completed_run(pointer=None):
     for arm,digest in analysis['arms_sha256'].items():
         if sha256((run/(arm+'.jsonl')).read_bytes()).hexdigest()!=digest:
             raise ValueError('Adapter output records changed after final reporting')
-    current={str(p.relative_to(ROOT)):sha256(p.read_bytes()).hexdigest() for p in sorted((ROOT/'engine').glob('*.py'))}
-    if manifest['engine']!=current:raise ValueError('Adapter comparison uses a different engine snapshot')
+    if require_current_engine and manifest['engine']!=engine_snapshot():
+        raise ValueError('Adapter comparison uses a different engine snapshot')
     if analysis['all']['tasks']!=148 or analysis['reference']['tasks']!=89 or analysis['review']['tasks']!=59:
         raise ValueError('Adapter comparison is incomplete')
     return run,analysis
@@ -35,7 +40,8 @@ def add_evidence(packet):
         shutil.copy2(correction,packet/'evidence/recovered_adapter_realization_fault_regression.json')
         with (packet/'LATEST_UPDATE.md').open('a') as f:
             f.write(f"\n## Candidate realization fault isolation\n\nThe required-adapter path now distinguishes a load/generation failure from an exception after a proposal decoded. Required loading/generation still fails closed; realization failures preserve raw geometry and diagnostics and retain the normal fallback gates. Explicit old/new snapshot comparison: {comparison['cases']} tasks, {comparison['geometry_changes']} changed final geometries; {image_matches} exact resized JPEG matches. The known conference defect remains flagged. The earlier denominator-guard experiment was rejected because it worsened that output. Read docs/RECOVERED_ADAPTER_EVALUATION.md and evidence/recovered_adapter_realization_fault_regression.json.\n")
-    result=completed_run()
+    # Preserve verifiable historical evidence without relabeling it as current.
+    result=completed_run(require_current_engine=False)
     if not result:
         partial=ROOT/'data/training_next/recovered_partial_report.json'
         if partial.is_file():
@@ -44,6 +50,31 @@ def add_evidence(packet):
                 f.write('\n## Recovered adapter: comparison still incomplete\n\nRead docs/RECOVERED_ADAPTER_EVALUATION.md and evidence/recovered_adapter_interrupted_partial.json. These are 33 matching tasks from the interrupted first snapshot, not the full 89+59 study or a promotion decision. The raw-font improvement and ID/box regressions are reported together. The engine realization-fault correction has its own refreshed 59-case verification; saved predictions will be re-realized before final comparison. Production remains on the earlier adapter.\n')
         return False
     run,analysis=result
+    recorded=json.loads((run/'manifest.json').read_text())['engine']
+    current=engine_snapshot()
+    if recorded!=current:
+        names=('manifest.json','report.json','paired_analysis.json','parallel_arm_provenance.json',
+               'visual_review.json','native_raster_audit.json','stage_defect_audit.json',
+               'completed_review_subset.json','timing_limitations.json')
+        for name in names:
+            path=run/name
+            if path.is_file():shutil.copy2(path,packet/'evidence'/('historical_adapter_'+name))
+            obsolete=packet/'evidence'/('recovered_adapter_'+name)
+            if obsolete.is_file():obsolete.unlink()
+        status=dict(current_engine_comparison=False,historical_completed_run=str(run),
+                    recorded_engine=recorded,current_engine=current,
+                    note='Completed model comparison belongs to its recorded snapshot; no fresh 89+59 comparison was run after the engine change.')
+        (packet/'evidence/upgrade_exploration_historical_adapter_status.json').write_text(json.dumps(status,indent=2)+'\n')
+        with (packet/'LATEST_UPDATE.md').open('a') as f:
+            f.write('\n## Historical adapter comparison — not current engine evidence\n\nThe completed 148-task adapter A/B remains available under historical_adapter_* evidence, with its original engine manifest. It was not rerun after the current engine change and is excluded from the current comparison cards. The current fixed 59-case Qwen-enabled engine replay has its own manifest; do not describe that replay as fresh model inference or a fresh 89+59 adapter comparison. Production remains on the earlier champion.\n')
+        page=packet/'review/trained_adapters/index.html'
+        if page.is_file():
+            body=page.read_text()
+            if 'id="historical-engine-snapshot"' not in body:
+                banner='<aside id="historical-engine-snapshot" style="padding:16px;border:2px solid #d9974c">Historical model comparison: recorded engine snapshot differs from current code. These outputs have not been rerun after the latest engine change. Use the current regression viewer for current-engine outputs.</aside>'
+                body=body.replace('<h1>',banner+'<h1>',1)
+                page.write_text(body)
+        return False
     shutil.copy2(ROOT/'docs/RECOVERED_ADAPTER_EVALUATION.md',packet/'docs/RECOVERED_ADAPTER_EVALUATION.md')
     for filename in ('manifest.json','report.json','paired_analysis.json','parallel_arm_provenance.json','visual_review.json','native_raster_audit.json','stage_defect_audit.json','completed_review_subset.json','timing_limitations.json'):
         path=run/filename

@@ -41,3 +41,6 @@ models/*
 # Archived competitor research remains private too.
 /docs/archive/CHAMELEON_*.md
 /docs/archive/*COMPETITOR*.md
+
+# Historical reports/notebooks are retained locally, not evaluator instructions.
+/docs/archive/

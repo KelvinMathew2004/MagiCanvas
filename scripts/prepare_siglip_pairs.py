@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("MAGICANVAS_DATASET_RENDERING", "1")
 from engine.resize import resize, _text, _text_visible_bounds, _rgba, _asset_root
 from engine.resize import _overlap, _intentional_stack_pair
-from renderer.converter.assets import visible_content_bounds
+from engine.asset_geometry import visible_content_bounds
 from scripts.dataset_renderer import render_design_to_png
 from scripts.compare_crello_renders import compare_images
 

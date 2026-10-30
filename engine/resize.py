@@ -25,7 +25,7 @@ import os
 import re
 from typing import Any
 
-from renderer.converter.assets import visible_content_bounds
+from engine.asset_geometry import visible_content_bounds
 from engine.request_cache import asset_lookup_state, asset_lookup_request
 
 

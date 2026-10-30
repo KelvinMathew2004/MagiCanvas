@@ -45,3 +45,12 @@ Sixteen byte-identical `scripts/* 2.py` copies were also removed after archive
 SHA-256 verification. Their canonical `.py` counterparts remain. Recovery:
 `/Users/kelvinmathew/Documents/MagiCanvas-archives/2026-10-29-exact-script-duplicates.tar.gz`,
 with its adjacent manifest. Non-identical copies were preserved.
+
+## October 30, 2026 submission cleanup
+
+All 43 previously tracked files under `docs/archive/` were removed from Git's
+index and the entire folder was added to `.gitignore` and `.dockerignore`.
+Every file remains on disk. The index removals require the next commit to
+affect a fresh clone; earlier Git history is unchanged. Current documentation
+is indexed in docs/README.md. Old model and experiment numbers are historical
+records, not performance claims for the submitted adapter.

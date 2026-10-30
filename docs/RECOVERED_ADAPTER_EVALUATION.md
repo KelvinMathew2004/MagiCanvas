@@ -1,5 +1,10 @@
 # Recovered 0.6B adapter: completed A/B
 
+Historical model comparison on its recorded October 29 engine snapshot, not
+fresh metrics for every later commit. The October 30 helper relocation has a
+separate, unchanged 59-case engine replay; the full 89+59 model comparison was
+not rerun after it. Current release setup is in the root README.
+
 October 29, 2026. **Keep `qwen3-layout-lora-v2` as production default.**
 The recovered checkpoint is integrated as the selectable profile
 `qwen3_0p6b_audited_candidate`, but it fails the promotion gates. Lower training

@@ -1,33 +1,31 @@
 # Documentation map
 
-Start with the root [README](../README.md). Current operational documents:
+## Evaluator entry points
 
-- [EVALUATION.md](EVALUATION.md): exact local/private/public Docker paths, release blockers and unified viewer refresh.
-- [IMPLEMENTATION.md](IMPLEMENTATION.md): current Generate → Repair → Verify architecture and compatible model swapping.
-- [MODEL_TRAINING_CANDIDATES.md](MODEL_TRAINING_CANDIDATES.md): six references/challengers, modality differences and current evidence.
-- [TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md): ordered local preparation, Colab training and fresh model evaluation.
-- [TRAINING_CONTINUATION.md](TRAINING_CONTINUATION.md): skip the completed 0.6B and resume the remaining challengers with frequent recovery saves.
-- [RECOVERED_ADAPTER_EVALUATION.md](RECOVERED_ADAPTER_EVALUATION.md): recovered 0.6B package, fresh champion comparison and promotion evidence.
-- [POST_TRAINING_EVALUATION_PLAN.md](POST_TRAINING_EVALUATION_PLAN.md): internal challenger gates and considered engine ablations after training.
-- [VLM_TRAINING_VERIFICATION.md](VLM_TRAINING_VERIFICATION.md): full-bundle image/masking checks, historical weight identity and remaining training limits.
+- [Project README](../README.md): Docker command, input/output contract, model limits and algorithm summary.
+- [EVALUATION.md](EVALUATION.md): pinned public build, private local-adapter build and verification commands.
+- [IMPLEMENTATION.md](IMPLEMENTATION.md): current architecture and model-swapping boundary.
+- [STARTER_INTEGRITY.md](STARTER_INTEGRITY.md): exact comparison with the organizer's starter files.
+
+## Training and development references
+
+These documents describe experiments and development cohorts, not hidden-test
+scores or promises about the submitted model.
+
+- [TRAINING_RUNBOOK.md](TRAINING_RUNBOOK.md) and [TRAINING_CONTINUATION.md](TRAINING_CONTINUATION.md): current VL-2B-only Colab instructions.
+- [VLM_TRAINING_VERIFICATION.md](VLM_TRAINING_VERIFICATION.md): image/masking checks and remaining training limits.
+- [MODEL_TRAINING_CANDIDATES.md](MODEL_TRAINING_CANDIDATES.md), [RECOVERED_ADAPTER_EVALUATION.md](RECOVERED_ADAPTER_EVALUATION.md) and [POST_TRAINING_EVALUATION_PLAN.md](POST_TRAINING_EVALUATION_PLAN.md): challenger research, rejected retraining and promotion gates.
+- [SURGICAL_ALGORITHM_DECISIONS.md](SURGICAL_ALGORITHM_DECISIONS.md), [ALGORITHM_FOLLOWUP.md](ALGORITHM_FOLLOWUP.md) and [INDUSTRY_ALGORITHM_DECISIONS.md](INDUSTRY_ALGORITHM_DECISIONS.md): dated algorithm experiments, including rejected changes.
 - [CRELLO_DATA_AND_TRAINING.md](CRELLO_DATA_AND_TRAINING.md): dataset provenance and sharing boundaries.
-- [SURGICAL_ALGORITHM_DECISIONS.md](SURGICAL_ALGORITHM_DECISIONS.md): latest detailed research decisions, including negative results and remaining defects.
-- [ALGORITHM_FOLLOWUP.md](ALGORITHM_FOLLOWUP.md): intact-container growth, render quotas and exact-statistic performance evaluation.
-- [INDUSTRY_ALGORITHM_DECISIONS.md](INDUSTRY_ALGORITHM_DECISIONS.md): verified industry mechanisms, paragraph balancing and whole-group search; measured decisions and untested limits.
-- [REVIEW_ARCHIVE.md](REVIEW_ARCHIVE.md): recoverable cleanup inventory.
+- [REVIEW_ARCHIVE.md](REVIEW_ARCHIVE.md): local artifact recovery inventory.
 
-- [Recovered champion training scripts](archive/champion_training_history/README.md): exact historical notebooks/exporters and a byte-identical Git weight match.
+## Local research archive
 
-## Research history
+`docs/archive/` contains superseded reports and notebooks. It is retained locally,
+ignored by Git and not part of the evaluator-facing checkout. Older numbers
+are dated experiment records, not current release claims. Training data, weights
+and review renders under `data/` also stay local.
 
-Historical notes are preserved in [archive/](archive/) for evidence and future work. They are dated experiments, not current setup instructions. Numeric test counts, timings and model claims belong to their recorded snapshots.
-
-- [Overall proposal ledger](archive/UPGRADE_EXPLORATION_AND_EVALUATION.md): all model/algorithm suggestions and what remains untested.
-- [Model and decoding pilots](archive/UPGRADE_PILOT_RESULTS.md): matching-base comparisons, grammar, sampling and runtime limits.
-- [134-task no-training study](archive/TRAINING_FREE_SCALE_RESULTS.md): retrieval, grouping, packing and visual tie-break experiments; no universal promotion.
-- [Implementation checklist](archive/ENGINE_UPGRADE_CHECKLIST.md): accepted versus experimental versus human-gated work.
-- [Previous complete project narrative](archive/PROJECT_HISTORY_2026-10-28.md): retained history, superseded by the concise root README.
-
-## Current state
-
-The production default remains Qwen3-0.6B with the existing v2 LoRA. The recovered completed 0.6B adapter was evaluated on 89+59 tasks and was not promoted: final reference box/font errors worsened. Read RECOVERED_ADAPTER_EVALUATION.md for gains, failures and provenance limits. The 59-case current-code replay retains one flagged dense micro-banner; no automatic flag is a guarantee of visual perfection. Training corpus, base models, adapters and required regression caches remain local. Hugging Face publication and a successful final adapter-required offline Docker run are pending.
+Production remains Qwen3-0.6B with the existing v2 LoRA. The recovered 0.6B
+retraining was not promoted. VL-2B is an experiment, not the installed default.
+Public adapter publication and final offline Docker verification remain pending.

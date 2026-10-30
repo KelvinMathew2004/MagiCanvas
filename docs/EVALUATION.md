@@ -1,5 +1,10 @@
 # Evaluation and local review
 
+For stage-one setup, start with the Docker section of the root [README](../README.md).
+The optional Python/preview commands there are development conveniences, not
+the container evaluation entry point. [STARTER_INTEGRITY.md](STARTER_INTEGRITY.md)
+records the exact comparison against the organizer's starter files.
+
 ## Final public submission — pending adapter publication
 
 After publishing the selected adapter, replace the two uppercase values below with its public repository and full 40-character commit. The base is pinned too.

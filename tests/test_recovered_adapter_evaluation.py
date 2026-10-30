@@ -108,6 +108,35 @@ def test_packaging_rejects_tampered_completed_report(tmp_path):
     with pytest.raises(ValueError,match='changed'):completed_run(pointer)
 
 
+def test_historical_adapter_comparison_is_not_presented_as_current(tmp_path,monkeypatch):
+    import scripts.package_adapter_review as package
+    monkeypatch.setattr(package,'ROOT',tmp_path)
+    engine=tmp_path/'engine';engine.mkdir();(engine/'resize.py').write_text('current')
+    run=tmp_path/'run';run.mkdir()
+    (run/'manifest.json').write_text(json.dumps({'engine':{'engine/resize.py':'old-hash'}}))
+    (run/'paired_analysis.json').write_text(json.dumps(dict(arms_sha256={},
+        all={'tasks':148},reference={'tasks':89},review={'tasks':59})))
+    pointer=tmp_path/'data/training_next/latest_completed_evaluation.json'
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps(dict(run=str(run),
+        manifest_sha256=sha256((run/'manifest.json').read_bytes()).hexdigest(),
+        analysis_sha256=sha256((run/'paired_analysis.json').read_bytes()).hexdigest())))
+    with pytest.raises(ValueError,match='different engine'):package.completed_run()
+    assert package.completed_run(require_current_engine=False)[0]==run
+    packet=tmp_path/'packet';(packet/'evidence').mkdir(parents=True)
+    (packet/'LATEST_UPDATE.md').write_text('Current engine review\n')
+    stale=packet/'evidence/recovered_adapter_paired_analysis.json';stale.write_text('old current claim')
+    assert package.add_evidence(packet) is False
+    assert not stale.exists()
+    assert (packet/'evidence/historical_adapter_paired_analysis.json').is_file()
+    status=json.loads((packet/'evidence/upgrade_exploration_historical_adapter_status.json').read_text())
+    assert status['current_engine_comparison'] is False
+    assert 'not current engine evidence' in (packet/'LATEST_UPDATE.md').read_text()
+    (run/'paired_analysis.json').write_text('{}')
+    with pytest.raises(ValueError,match='changed'):
+        package.completed_run(require_current_engine=False)
+
+
 def test_prediction_reuse_requires_identical_generation_contract_and_weights():
     from copy import deepcopy
     from scripts.reuse_adapter_inference import verify_compatible,GENERATION_FILES
