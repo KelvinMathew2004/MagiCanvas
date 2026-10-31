@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "scope": "Training-free development replay; no target-guided selection or automatic production activation",
+  "arms": {
+    "container-growth": {"scale_cap": 1.25, "translation_cap": 0.05, "minimum_scale_gain": 0.02},
+    "quota-funnel": {"candidate_budget": 12, "reserve_raw_and_repaired_qwen": true},
+    "exact-order-statistics": {"ranks": ["minimum", "floor(n/20)", "floor(n/5)"], "require_bitwise_metrics": true}
+  },
+  "promotion": {
+    "container-growth": "No new defects; improve source-only proxy with incumbent retained; review every changed output and reference/family deltas before any integration",
+    "quota-funnel": "Reject default if any final output or family coverage regresses; render savings alone are insufficient",
+    "exact-order-statistics": "Require exact per-call equality, useful measured kernel speed, and unchanged full-engine regression before replacing sorting"
+  }
+}

@@ -12,7 +12,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "crello_sample"
 sys.path.insert(0, str(ROOT))
-from renderer.converter.assets import visible_content_bounds
+from engine.asset_geometry import visible_content_bounds
 from engine.resize import _text_visible_bounds
 
 

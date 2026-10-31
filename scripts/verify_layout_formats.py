@@ -11,7 +11,7 @@ sys.path.insert(0,str(ROOT))
 from engine.resize import _adapt_with_diagnostics, _bounds, _text
 from engine.main import self_check
 from renderer.converter.convert import render_design_to_png
-from renderer.converter.assets import visible_content_bounds
+from engine.asset_geometry import visible_content_bounds
 
 FORMATS=(('story',1080,1920),('square',1080,1080),('portrait',1080,1350),
          ('widescreen',1920,1080),('web-banner',1600,400),('leaderboard',728,90))

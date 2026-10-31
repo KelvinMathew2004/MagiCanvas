@@ -100,7 +100,7 @@ def main():
     for k,d in groups.items():
         rows_=d['results'];df=d['defects'];append+=f"| {k} | {len(rows_)} | {sum(bool(r.get('flagged')) for r in rows_)} | {df['before']['misalignment']['incidents']} → {df['after']['misalignment']['incidents']} | {df['before']['text_fit']['incidents']} → {df['after']['text_fit']['incidents']} |\n"
     append+='\nThe frame-axis counter is intentionally not a clean-layout gate: it also counts intentional reflows and frame shifts used to center painted labels. Its remaining flags are exposed for review, not removed to manufacture a zero. See `data/qwen_lora/inventory_fixes_verified/index.html` and `summary.json`.\n'
-    doc=ROOT/'docs/INVENTORY_REPAIR_AUDIT.md';s=doc.read_text().split('\n## Verified replay results')[0];doc.write_text(s+append)
+    doc=ROOT/'docs/archive/INVENTORY_REPAIR_AUDIT.md';s=doc.read_text().split('\n## Verified replay results')[0];doc.write_text(s+append)
     print(json.dumps(summary,indent=2))
 
 if __name__=='__main__':main()

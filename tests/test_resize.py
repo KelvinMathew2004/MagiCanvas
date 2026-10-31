@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from engine.resize import resize, _bounds, _text
 from engine.main import self_check
-from renderer.converter.assets import visible_content_bounds
+from engine.asset_geometry import visible_content_bounds
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = [(1080,1080),(1080,1350),(1080,1920),(1920,1080),(1600,400),(728,90),(320,568)]
