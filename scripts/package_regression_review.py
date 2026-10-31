@@ -27,6 +27,76 @@ def digest_manifest(folder):
     (folder/'MANIFEST.sha256').write_text('\n'.join(f'{sha256(p.read_bytes()).hexdigest()}  {p.relative_to(folder).as_posix()}' for p in sorted(folder.rglob('*')) if p.is_file() and p.name not in ('MANIFEST.sha256','.DS_Store'))+'\n')
 
 
+def repair_packet(root,dest):
+    """Rebuild a bounded two-panel research page from measured JSON only."""
+    from PIL import Image
+    directory=root/'data/donor_leaf_repair_v2';summary=json.loads((directory/'summary.json').read_text())
+    selected=directory/'selected.json';all_rows=json.loads(selected.read_text()) if selected.is_file() else summary.get('alternate_results',[])
+    alternates={str(r['index']) for r in summary.get('alternate_results',[])}
+    featured=[r for r in all_rows if str(r['index']) in alternates or r.get('changed') and r.get('eligible_vs_incumbent')]
+    featured.sort(key=lambda r:(str(r['index']) not in alternates,int(r['index'])))
+    dest.mkdir(exist_ok=True,parents=True)
+    for stale in dest.glob('*.jpg'):stale.unlink()
+    shutil.copy2(directory/'summary.json',dest/'summary.json')
+    if selected.is_file():shutil.copy2(selected,dest/'selected.json')
+    clear=sum(bool(r.get('donor_flags')) and not r.get('repair_flags') for r in summary.get('alternate_results',[]))
+    line=(f"{summary['tasks']} tasks rescored; {summary['cost_improved']} lower defect costs; "
+          f"flagged donor cases {summary['donor_flagged']} to {summary['repair_flagged']}. "
+          f"{summary.get('divider_contacts_improved',0)} reduced divider/art contacts; {clear} alternates cleared flags. "
+          f"{summary['clean_candidates_vs_incumbent']} changed repairs meet automated safety eligibility against production; these are not confirmed wins.")
+    panels=[]
+    for row in featured:
+        key=str(row['index']);variant=row.get('best_variant','repaired');available=[]
+        for tag,name in [('incumbent','incumbent'),('before','donor'),('after',variant)]:
+            src=directory/f'{key}_{name}.png'
+            if not src.is_file():raise FileNotFoundError(src)
+            with Image.open(src) as im:
+                im=im.convert('RGB');im.thumbnail((1000,1200));im.save(dest/f'{key}_{tag}.jpg',quality=82)
+            available.append(tag)
+        status='Automated safety eligible; not an aesthetic win' if row.get('eligible_vs_incumbent') else 'Not safety eligible against production'
+        panels.append(f'<article id="case-{html.escape(key)}"><h2>{html.escape(row["pair_id"])}</h2><p>{html.escape(status)}</p><div class="panels"><figure><figcaption><select onchange="this.closest(\'figure\').querySelector(\'img\').src=this.value"><option value="{key}_incumbent.jpg">Production incumbent</option><option value="{key}_before.jpg">Untouched donor</option></select></figcaption><img loading="lazy" src="{key}_incumbent.jpg"></figure><figure><figcaption>Repaired donor · {html.escape(variant)}</figcaption><img loading="lazy" src="{key}_after.jpg"></figure></div><pre>'+html.escape(json.dumps(row,indent=2))+'</pre></article>')
+    (dest/'index.html').write_text('<meta charset="utf-8"><style>body{font:16px system-ui;background:#101820;color:white;margin:24px}.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}img{width:100%;max-height:700px;object-fit:contain}pre{overflow:auto}article{margin-bottom:48px}</style><h1>Historical donor finishing experiment</h1><p>'+html.escape(line)+'</p><p>Two panels; switch the left panel between production and untouched donor. No production adoption. Current native-engine experiment is separate.</p>'+''.join(panels))
+    for name in ('repair.py','run.py','report.py','test_repair.py'):
+        src=root/'data/donor_leaf_repair'/name
+        if src.is_file():shutil.copy2(src,dest/name)
+    return line
+
+
+def replace_note(path,key,text):
+    """Idempotent generated note replacement; preserve unrelated document text."""
+    import re
+    start,end=f'<!-- {key}:start -->',f'<!-- {key}:end -->'
+    section=start+'\n'+text+'\n'+end
+    old=path.read_text() if path.is_file() else ''
+    pattern=re.escape(start)+r'.*?'+re.escape(end)
+    path.write_text(re.sub(pattern,lambda _:section,old,flags=re.S) if start in old else old+'\n'+section+'\n')
+
+
+def lane_comparison_packet(root,dest,viewer):
+    """Small champion/candidate comparison; live viewer retains all tasks."""
+    from PIL import Image
+    source=root/'data/native_divider_lane_ab'
+    result=json.loads((source/'summary.json').read_text())
+    dest.mkdir(exist_ok=True,parents=True)
+    for name in ('summary.json','comparison_manifest.json'):
+        shutil.copy2(source/name,dest/name)
+    featured=[];counts={}
+    for path in sorted((source/'paired').glob('*.json')):
+        r=json.loads(path.read_text());cohort=r['cohort'];counts[cohort]=counts.get(cohort,0)+1
+        limit=18 if cohort=='official' else 8 if cohort=='alternate' else 6
+        if r['changed'] or counts[cohort]<=limit:featured.append(r)
+    cards=[]
+    for r in featured:
+        key=f'{r["index"]:03d}'
+        for tag in ('before','after'):
+            with Image.open(viewer/f'{key}_{tag}.png') as im:
+                im=im.convert('RGB');im.thumbnail((1000,1200));im.save(dest/f'{key}_{tag}.jpg',quality=82)
+        cards.append(f'<article><h2>{html.escape(r["pair_id"])}</h2><p>{"Changed" if r["changed"] else "Unchanged"} · {html.escape(r["cohort"])}</p><div class="panels">'+''.join(f'<figure><figcaption>{label}</figcaption><img loading="lazy" src="{key}_{tag}.jpg"></figure>' for tag,label in [('before','Champion · Qwen3-0.6B v2'),('after','Working candidate · same model')])+'</div><pre>'+html.escape(json.dumps(r['lane_trace'],indent=2))+'</pre></article>')
+    stats={k:v for k,v in result.items() if k not in ('changed_cases',)}
+    (dest/'index.html').write_text('<meta charset="utf-8"><style>body{font:16px system-ui;background:#101820;color:white;margin:24px}.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}img{width:100%;max-height:700px;object-fit:contain}pre{overflow:auto}article{margin-bottom:48px}</style><h1>Champion vs working candidate</h1><p>Same cached Qwen predictions, adapter and earlier selector. Candidate adds only the experimental final divider-lane alternative. No competitor layouts. Representative unchanged official, alternate and dataset cases plus every changed output. Full live viewer contains all tasks; this is not fresh inference.</p><pre>'+html.escape(json.dumps(stats,indent=2))+'</pre>'+''.join(cards))
+    return f"{result['tasks']} paired tasks; {result['changed']} changed outputs; flags {result['before_flagged']} to {result['after_flagged']}; {result['new_flag_cases']} new flag cases."
+
+
 def package(packet=PACK,test_log=None):
     from PIL import Image,ImageDraw
     viewer=packet/'review/regression_suite'
@@ -111,7 +181,7 @@ was not deployed. A subsequent fixed ten-feature structural/raster pilot matched
 Five exact-pixel reconstruction failures were excluded. The actual campaign
 validation subset only tied at 5/8, so the new head also is not deployed. The
 37 test outcomes have now been consumed; do not call them sealed or tune to them.
-Read docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md and evidence/chameleon_structural_ranker_report.json.
+Read the current engine evaluation notes. Private external-repository research is excluded.
 
 A generic source-contact growth fix prevents a backing from expanding into
 adjacent media. Measured container packing now addresses short-slot capacity;
@@ -215,7 +285,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     sources += sorted((ROOT/'tests/fixtures/user_level3_sources').glob('u*.json'))
     for p in sources:
         target=packet/'code'/p.relative_to(ROOT);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,target)
-    for name in ('UPGRADE_EXPLORATION_AND_EVALUATION.md','GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','COMPETITOR_REPOSITORY_AUDIT.md','CHAMELEON_ALGORITHM_UPGRADES.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
+    for name in ('UPGRADE_EXPLORATION_AND_EVALUATION.md','GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','UNIVERSAL_REFLOW_RESEARCH.md','DAY4_5_AUDIT.md'):
         shutil.copy2(doc_path(name),packet/'docs'/name)
     shutil.copy2(ROOT/'config/regression_review.json',packet/'config/regression_review.json')
     shutil.copy2(ROOT/'config/fresh_design_review.json',packet/'config/fresh_design_review.json')
@@ -304,9 +374,6 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
         'Distinguish researched hypotheses and future experiments from shipped engine changes. '
         'Check model total versus active counts, adapter/processor compatibility, source licensing, '
         'the adverse prompt-lookup prefix probe, and the separate fresh-model versus frozen-engine evaluation gates.\n')
-    note=ROOT/'docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md'
-    if note.exists():
-        (packet/'LATEST_UPDATE.md').write_text((packet/'LATEST_UPDATE.md').read_text()+'\n## Latest algorithm and latency study\n\nRead docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md, docs/archive/COMPETITOR_REPOSITORY_AUDIT.md and evidence/chameleon_summary.json. Retrieval/dual-granularity remain experimental; the calibrated ranker is not deployed. Native Metal selects FP16 and in-memory adapter merge automatically; ARM64 Linux alone does not expose Metal. New task generation and repeat caching are measured separately.\n')
     for src,name in [(ROOT/'data/user_design_stress/source_integrity.json','skyscraper_source_integrity.json'),
                      (ROOT/'data/user_design_stress/run_v2/summary.json','skyscraper_fresh_summary.json')]:
         if src.is_file():shutil.copy2(src,packet/'evidence'/name)
@@ -470,7 +537,7 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
     for name in ('README.md','IMPLEMENTATION.md','EVALUATION.md','TRAINING_RUNBOOK.md','REVIEW_ARCHIVE.md','CRELLO_DATA_AND_TRAINING.md','MODEL_TRAINING_CANDIDATES.md'):
         shutil.copy2(packet/'docs'/name,stage/'docs'/name)
     for p in (packet/'docs').glob('*.md'):
-        if p.name in ('UPGRADE_EXPLORATION_AND_EVALUATION.md','GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','COMPETITOR_REPOSITORY_AUDIT.md','CHAMELEON_ALGORITHM_UPGRADES.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
+        if p.name in ('UPGRADE_EXPLORATION_AND_EVALUATION.md','GEMINI_FOLLOWUP_DECISIONS.md','NESTED_REFLOW_AUDIT.md','PROMPT_CAPACITY_AND_MODEL_DECISIONS.md','RUNTIME_AND_EXPERIMENTS.md','SKYSCRAPER_STRESS_RESULTS.md','DENSE_REFLOW_AUDIT.md','PREFERENCE_CAMPAIGN_PLAN.md','ENGINE_UPGRADE_CHECKLIST.md','ENGINE_UPGRADE_RESULTS.md','REGRESSION_REVIEW_AND_NEXT_STEPS.md','PEER_ROW_ALIGNMENT.md','DAY4_5_AUDIT.md'):shutil.copy2(p,stage/'docs'/p.name)
     for p in (packet/'evidence').glob('*'):
         if not flow and p.name.startswith('dense_reflow_'):continue
         if p.name.startswith(('recovered_adapter_','upgrade_exploration_','chameleon_','unified_regression_','copy_axis_','engine_upgrade_','attachment_','dense_reflow_','preference_campaign_','asset_lookup_','skyscraper_','capacity_','nested_reflow_','followup_reflow_')) and p.is_file():shutil.copy2(p,stage/'evidence'/p.name)
@@ -546,8 +613,10 @@ unified_regression_*. No adapter or full assets are distributed in this packet.
             image=f'images/{key}.jpg';sheet.save(stage/image,quality=82,optimize=True);extra_images+=1
             cards.append(f'<article><h2>1.7B alternative · {html.escape(row["case"])}</h2><img loading="lazy" src="{image}" alt="Original and resized with 1.7B"><p>Same current selector · flags {html.escape(str(row["defect_flags"]))}. Ten other final outputs are identical to the default arm.</p><a href="cases/{key}_audit.json">Audit JSON</a></article>')
     if adapter_evidence:cards.extend(compact_cards(packet,stage))
-    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. Fresh adapter comparisons, when present, are labeled separately. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. Read docs/archive/CHAMELEON_ALGORITHM_UPGRADES.md for current experiments; older dense outlier evidence retains its own snapshot.</p>'+''.join(cards))
+    (stage/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Current Gemini review</title><style>body{background:#101820;color:white;font:16px system-ui;margin:24px}img{width:100%;max-width:1200px}article{margin-bottom:40px}</style><h1>All current original/resized comparisons</h1><p>Read LATEST_UPDATE.md. Qwen enabled; saved model predictions replayed through the current engine. Fresh adapter comparisons, when present, are labeled separately. This compact packet excludes runtime weights and full assets. <a href="evidence/attachment_growth_comparison.jpg">Historical attachment outliers: before/after audit</a>. Older dense outlier evidence retains its own snapshot.</p>'+''.join(cards))
     (stage/'README_FOR_GEMINI.md').write_text('Read LATEST_UPDATE.md, then GEMINI_REVIEW_PROMPT.md. Open index.html for all comparisons. Current engine code and per-case raw/source/output geometry are included. Historical archives, model weights, full assets and fonts are excluded. This packet is not runnable standalone.\n')
+    # Closed research is explicitly separated from current production results.
+    # External-repository experiments are retained only in the private local archive.
     digest_manifest(stage)
     backup=small.with_name(small.name+'.previous')
     if backup.exists():shutil.rmtree(backup)

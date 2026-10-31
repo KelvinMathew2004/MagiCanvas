@@ -79,6 +79,7 @@ def main():
     mode=p.add_mutually_exclusive_group(required=True)
     mode.add_argument('--trained',type=Path,help='Root containing all three finished training packages')
     mode.add_argument('--candidate-adapter',type=Path,help='One recovered completed Qwen3-0.6B final export')
+    p.add_argument('--models', nargs='+', help='Evaluate only these trained model keys, plus the production baseline')
     p.add_argument('--reuse-inference-from',type=Path,help='Replay matching saved predictions after an engine-only correction; never reuse final layouts')
     args=p.parse_args()
     from scripts.refresh_regression_viewer import PACK,fingerprint
@@ -110,6 +111,10 @@ def main():
         records.sort(key=lambda r:not r['pair_id'].startswith('review:'))
     candidate_config=json.loads((ROOT/'config/training_candidates.json').read_text())
     candidates=[] if args.candidate_adapter else [s for key in candidate_config['training_queue'] for s in candidate_config['models'] if s['key']==key]
+    if args.models:
+        unknown=set(args.models)-{s['key'] for s in candidates}
+        if unknown:p.error('Unknown or unavailable trained models: '+', '.join(sorted(unknown)))
+        candidates=[s for s in candidates if s['key'] in args.models]
     provider_specs={s['key']:s for s in candidates}
     specs=[('baseline',ROOT/'models/qwen3-0.6b',ROOT/'models/qwen3-layout-lora-v2')]
     specs += [(s['key'],ROOT/'models'/s['key'],args.trained/s['key']/'final') for s in candidates]

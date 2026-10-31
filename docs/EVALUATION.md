@@ -5,22 +5,22 @@ The optional Python/preview commands there are development conveniences, not
 the container evaluation entry point. [STARTER_INTEGRITY.md](STARTER_INTEGRITY.md)
 records the exact comparison against the organizer's starter files.
 
-## Final public submission — pending adapter publication
+## Final public submission — pinned champion adapter
 
-After publishing the selected adapter, replace the two uppercase values below with its public repository and full 40-character commit. The base is pinned too.
+The selected champion LoRA is published at `NeoliteNexus/magicanvas-qwen3-0.6b-lora`, commit `09216ebcf0260889f84d21a723ce4ecacdc58e5b`. The base is pinned too.
 
 ```bash
 docker build --platform linux/amd64 --target submission \
   --build-arg QWEN_MODEL=Qwen/Qwen3-0.6B \
   --build-arg QWEN_MODEL_REVISION=c1899de289a04d12100db370d81485cdf75e47ca \
-  --build-arg QWEN_ADAPTER_REPO=OWNER/REPOSITORY \
-  --build-arg QWEN_ADAPTER_REVISION=FULL_40_CHARACTER_COMMIT \
+  --build-arg QWEN_ADAPTER_REPO=NeoliteNexus/magicanvas-qwen3-0.6b-lora \
+  --build-arg QWEN_ADAPTER_REVISION=09216ebcf0260889f84d21a723ce4ecacdc58e5b \
   -t magicanvas .
 docker run --rm --network none \
   -v "$PWD/input:/app/input" -v "$PWD/output:/app/output" magicanvas
 ```
 
-This is the challenge's input/output mount convention. The submission stage verifies adapter compatibility and fails closed if the required adapter cannot load. No Docker execution has been verified on this workstation because its daemon was unavailable. Hugging Face publication and final offline build/run are release blockers, not completed work.
+This is the challenge's input/output mount convention. The submission stage verifies adapter compatibility and fails closed if the required adapter cannot load. Complete an offline run after the build to verify the final image.
 
 ## Same behavior with the existing private local adapter
 

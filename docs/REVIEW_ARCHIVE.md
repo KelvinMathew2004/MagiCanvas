@@ -54,3 +54,14 @@ Every file remains on disk. The index removals require the next commit to
 affect a fresh clone; earlier Git history is unchanged. Current documentation
 is indexed in docs/README.md. Old model and experiment numbers are historical
 records, not performance claims for the submitted adapter.
+
+## VLM ablation closed — October 30, 2026
+
+VLM-specific evaluation reports, viewer/packet builders, admission tracing and
+partial-backing experiment code/tests are retained under the ignored
+`docs/archive/vlm_research_20261030/` tree. The experiment's runtime hook was
+removed. Existing local model weights, evaluation JSONL and rendered evidence
+remain available; no weights were deleted. Generic training/inference provider
+support is retained for reproducibility and model swapping, without production
+VLM integration. Qwen3-0.6B v2 remains the production default. No further VLM
+training, routing or repair work is planned for submission.

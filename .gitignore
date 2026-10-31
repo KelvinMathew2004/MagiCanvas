@@ -44,3 +44,9 @@ models/*
 
 # Historical reports/notebooks are retained locally, not evaluator instructions.
 /docs/archive/
+
+# Private external-repository experiment reports.
+/docs/DIVIDER_LANE_EVALUATION.md
+/docs/SECTION_PACKING_EXPERIMENT.md
+
+input/sample_level3_unseen_custom.json

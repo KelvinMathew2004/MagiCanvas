@@ -49,6 +49,8 @@ def fingerprint(config):
     # hashing/loading a multi-GB base on each refresh.
     weights={p.name:[p.stat().st_size,p.stat().st_mtime_ns] for p in sorted((ROOT/spec['model']).glob('*.safetensors'))}
     return dict(files_sha256=hashes,model=spec['model'],model_weights=weights,adapter=spec['adapter'],layout_experiments=dict(
+        divider_lanes=os.environ.get('MAGICANVAS_EXPERIMENTAL_DIVIDER_LANES')=='1',
+        section_packing=os.environ.get('MAGICANVAS_EXPERIMENTAL_SECTION_PACKING')=='1',
         macro_library=os.environ.get('MAGICANVAS_EXPERIMENTAL_MACRO_LIBRARY')=='1',
         vision_tiled=os.environ.get('MAGICANVAS_SIGLIP_TILED','').strip().lower() in ('1','true','yes','on')))
 
