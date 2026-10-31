@@ -304,3 +304,56 @@ These are pinned development snapshots; use a new root/version before changing
 the hypotheses. Do not relabel old native audits as freshly rendered. Full
 datasets, fonts, weights and complete target sidecars stay local; the Gemini
 packet includes aggregate findings, relevant code and per-case review evidence.
+
+## Follow-up: repeated-composite realization (2026-10-31)
+
+Rejected for production. Across 134 saved champion tasks, the isolated measured
+repeated-composite variant changed five cases (027, 046, 052, 053, 055). Four
+retained their automated flag set; 055 introduced control-label-axis and control
+readability flags. Reviewer feedback found no convincing visual gain. This was
+an offline final-output experiment, not full topology enumeration or fresh Qwen
+inference. Corner-radius normalization changed 33 outputs without changing
+flags; no demonstrated visual gain, so not promoted. Rotated-text bounds rescue
+triggered on zero tasks. Evidence: local
+`data/contender_surgical_20261030/remaining_results.json` and before/after viewer.
+
+## Follow-up: framing and background texture (2026-10-31)
+
+Not promoted. Two isolated offline hypotheses were scanned across the same 134
+saved champion outputs, preserving all IDs and making no model or production
+selector changes.
+
+- Source-overlap framing attachment: lower-layer translucent shapes were linked
+  to foreground images using source overlap and visible asset bounds. Opacity
+  included both the element opacity and RGBA fill alpha. Two tasks had eligible
+  relationships; one changed (049, supplied u03 skyscraper). Native-resolution
+  inspection showed a backing expanding across adjacent cards; automated checks
+  added control_collision and foreground_gutter. Reject this realization.
+- Background-gradient displacement: render the actual cover backdrop, measure
+  grayscale gradients under text, and consider bounded rigid foreground shifts
+  only with at least 20% lower gradient energy and no canvas overflow. Zero
+  proposals passed the trigger across 134 tasks. No demonstrated gain. This is
+  a texture proxy, not semantic subject detection or a trained focal detector.
+
+These experiments do not establish that every framing-aware scorer or focal
+crop algorithm fails. The tested realizations do not justify production code.
+Evidence remains local in `data/contender_framing_20261031/` and
+`data/contender_focal_20261031/`. The before/after research viewer includes the
+one changed framing case. Prior repeated-group and radius arms remain archived.
+
+## Coordinated H/V subtrees and framing/rescue — abandoned 2026-10-31
+
+The actual mechanisms were subsequently implemented as separate full-engine
+arms, beyond the earlier final-output probes. Topology used linked source
+subtree signatures/axes with synchronized H/V flips and atomic controls;
+framing/rescue added soft visibility/crowding costs and rigid rotated-group
+corner alternatives. Six focused mechanics tests passed.
+
+Stopped at the user's request after 53/134 completed tasks per arm: **zero
+changed final outputs**, zero new flagged cases, and the same one flagged
+baseline task in both arms. Alternatives were generated and rendered on
+eligible inputs but did not demonstrate a final quality gain. This is a
+partial development benchmark, not evidence that all forms of these algorithms
+are ineffective. Neither arm was enabled in production. Code and evidence are
+archived locally under `data/archived_hierarchy_followup_20261031/` and
+`data/hierarchy_followup_20261031/`; no additional engine hooks remain.

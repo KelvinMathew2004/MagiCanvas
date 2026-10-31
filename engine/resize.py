@@ -170,11 +170,28 @@ def _set_font_size(element,size):
 
 
 def _source_ink_overhang(element,authored):
-    """Allow authored font bearings, which the renderer paints without clipping."""
+    """Allow authored bearings and intrinsic target-size vertical bearings.
+
+    Hinting can introduce a negative top bearing at a small target font size even
+    when the larger source face has none. Measure an unconstrained left-aligned
+    probe before allowing that bearing. Horizontal allowances retain their
+    source-based policy; this fix cannot excuse a narrow centered/right frame.
+    Canvas and inter-element ink checks remain independent of this allowance.
+    """
     ink=_render_text_ink(authored) if authored else None
     if ink is None:return (0.,0.)
     scale=float(element.get('font_size',1))/max(1.,float(authored.get('font_size',1)))
-    return (float(ceil(max(0.,-ink[0])*scale)),float(ceil(max(0.,-ink[1])*scale)))
+    bx=float(ceil(max(0.,-ink[0])*scale));by=float(ceil(max(0.,-ink[1])*scale))
+    target=_render_text_ink(element)
+    if target is not None and target[1]<-by:
+        probe=deepcopy(element);probe['text_align']='left'
+        natural=_text_info(probe,1e9)[1]
+        probe['width']=ceil(natural+max(4.,float(probe.get('font_size',1))))
+        probe['height']=max(probe['height'],_text_info(probe)[0])
+        bearing=_render_text_ink(probe)
+        if bearing is not None:
+            by=max(by,float(ceil(max(0.,-bearing[1]))))
+    return bx,by
 
 
 def _raw_bounds(items):

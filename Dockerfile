@@ -30,16 +30,16 @@ RUN python scripts/fetch_siglip.py
 # weights are included so a judging container can run entirely offline.
 COPY scripts/fetch_qwen.py ./scripts/fetch_qwen.py
 ARG QWEN_MODEL="Qwen/Qwen3-0.6B"
-ARG QWEN_MODEL_REVISION=""
+ARG QWEN_MODEL_REVISION="c1899de289a04d12100db370d81485cdf75e47ca"
 RUN python scripts/fetch_qwen.py --model "$QWEN_MODEL" --output /app/models/qwen-base ${QWEN_MODEL_REVISION:+--revision "$QWEN_MODEL_REVISION"}
 ENV MAGICANVAS_QWEN_DIR=/app/models/qwen-base
 ENV MAGICANVAS_QWEN_ENABLED=1
 
-# A public adapter is fetched only when its repository is supplied at build
-# time. Only the explicit runtime development target can run base-model-only.
+# A public adapter is fetched by default from the pinned champion repository.
+# Evaluators can supply an alternate --build-arg QWEN_ADAPTER_REPO=... if swapping.
 # The final submission stage below requires the verified pinned adapter.
-ARG QWEN_ADAPTER_REPO=""
-ARG QWEN_ADAPTER_REVISION=""
+ARG QWEN_ADAPTER_REPO="NeoliteNexus/magicanvas-qwen3-0.6b-lora"
+ARG QWEN_ADAPTER_REVISION="09216ebcf0260889f84d21a723ce4ecacdc58e5b"
 COPY scripts/fetch_qwen_lora.py ./scripts/fetch_qwen_lora.py
 COPY scripts/verify_qwen_adapter.py ./scripts/verify_qwen_adapter.py
 RUN if [ -n "$QWEN_ADAPTER_REPO" ]; then \
